@@ -1,0 +1,389 @@
+# Root skeleton for the AI-Assisted Incident Diagnosis System.
+# Member 1 owns this file. Every other member's service plugs into the
+# `diagnosis-net` network defined here.
+#
+# Testbed: Sock Shop (testbed/sock-shop), an e-commerce microservices demo.
+# Switched from Train Ticket for the initial phase - Sock Shop ships
+# pre-built Docker Hub images for every service (no Maven/JDK build step,
+# no service-discovery layer to stand up), which is much less friction
+# while the pipeline (M1-M4) is still being built out. Train Ticket has
+# published fault catalogues Sock Shop lacks, so it may be worth
+# revisiting for the fault-injection/evaluation phase (Weeks 8-9) - see
+# docs/phase0-decisions.md.
+#
+# Dependency chain, verified by extracting each image's actual config
+# (not guessed from docs - this repo is unmaintained/deprecated and its
+# own compose file predates some of what's baked into the images now):
+#
+#   edge-router (Traefik, entrypoint) -> front-end (Node BFF)
+#     -> catalogue -> catalogue-db (MySQL)
+#     -> carts -> carts-db (Mongo)
+#     -> orders -> orders-db (Mongo)
+#          -> (checkout also involves payment, shipping, user - standard
+#              Sock Shop reference architecture)
+#     -> user -> user-db (Mongo)
+#   shipping -> rabbitmq <- queue-master (async fan-out, distinct call
+#     pattern from the REST chain above - useful later for queue-backlog
+#     fault scenarios)
+#
+# front-end's config.js/endpoints.js (extracted from the
+# weaveworksdemos/front-end image) confirms it calls catalogue, carts,
+# orders, and user directly via plain container hostnames - no gateway
+# or service discovery involved, unlike Train Ticket.
+#
+# Dropped from the official reference compose: `user-sim` (a load-test
+# traffic generator, not part of the causal dependency graph).
+#
+# Kafka / TimescaleDB / Postgres deploy log land here in Phases 3-5.
+
+services:
+  edge-router:
+    image: weaveworksdemos/edge-router:0.1.1
+    hostname: edge-router
+    restart: always
+    ports:
+      - "80:80"
+      - "8080:8080"
+    networks:
+      - diagnosis-net
+
+  front-end:
+    image: weaveworksdemos/front-end:0.3.12
+    hostname: front-end
+    restart: always
+    networks:
+      - diagnosis-net
+
+  catalogue:
+    image: weaveworksdemos/catalogue:0.3.5
+    hostname: catalogue
+    restart: always
+    depends_on:
+      - catalogue-db
+    networks:
+      - diagnosis-net
+
+  catalogue-db:
+    image: weaveworksdemos/catalogue-db:0.3.0
+    hostname: catalogue-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: Abcd1234#
+      MYSQL_ALLOW_EMPTY_PASSWORD: "true"
+      MYSQL_DATABASE: socksdb
+    networks:
+      - diagnosis-net
+
+  carts:
+    image: weaveworksdemos/carts:0.4.8
+    hostname: carts
+    restart: always
+    environment:
+      JAVA_OPTS: -Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false
+    depends_on:
+      - carts-db
+    networks:
+      - diagnosis-net
+
+  carts-db:
+    image: mongo:3.4
+    hostname: carts-db
+    restart: always
+    networks:
+      - diagnosis-net
+
+  orders:
+    image: weaveworksdemos/orders:0.4.7
+    hostname: orders
+    restart: always
+    environment:
+      JAVA_OPTS: -Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false
+    depends_on:
+      - orders-db
+    networks:
+      - diagnosis-net
+
+  orders-db:
+    image: mongo:3.4
+    hostname: orders-db
+    restart: always
+    networks:
+      - diagnosis-net
+
+  shipping:
+    image: weaveworksdemos/shipping:0.4.8
+    hostname: shipping
+    restart: always
+    environment:
+      JAVA_OPTS: -Xms64m -Xmx128m -XX:+UseG1GC -Djava.security.egd=file:/dev/urandom -Dspring.zipkin.enabled=false
+    depends_on:
+      - rabbitmq
+    networks:
+      - diagnosis-net
+
+  queue-master:
+    image: weaveworksdemos/queue-master:0.3.1
+    hostname: queue-master
+    restart: always
+    depends_on:
+      - rabbitmq
+    networks:
+      - diagnosis-net
+
+  rabbitmq:
+    image: rabbitmq:3.6.8
+    hostname: rabbitmq
+    restart: always
+    networks:
+      - diagnosis-net
+
+  payment:
+    image: weaveworksdemos/payment:0.4.3
+    hostname: payment
+    restart: always
+    networks:
+      - diagnosis-net
+
+  user:
+    image: weaveworksdemos/user:0.4.4
+    hostname: user
+    restart: always
+    environment:
+      MONGO_HOST: user-db:27017
+    depends_on:
+      - user-db
+    networks:
+      - diagnosis-net
+
+  user-db:
+    image: weaveworksdemos/user-db:0.4.0
+    hostname: user-db
+    restart: always
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 2 - instrumentation
+  # ---------------------------------------------------------------
+  # Every app service above already ships a native Prometheus /metrics
+  # endpoint (verified by curling each one directly - no sidecar/agent
+  # instrumentation needed, unlike a typical closed-box image). Prometheus
+  # here is the "local endpoint" proof-of-work surface for Phase 2; Phase 3
+  # will bridge these samples onto the metrics.raw Kafka topic.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 3 - Kafka ingestion pipeline
+  # ---------------------------------------------------------------
+  # KRaft mode (no ZooKeeper), single-node combined broker+controller -
+  # sufficient for local dev. Two listeners: PLAINTEXT for other
+  # containers (kafka:9092), EXTERNAL for host-side debugging
+  # (localhost:29092).
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    restart: always
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    ports:
+      - "29092:29092"
+    networks:
+      - diagnosis-net
+
+  # One-shot: creates metrics.raw / logs.raw / deploys.events with the
+  # partitioning + retention proposed in CONTRACTS.md (pending team
+  # sign-off), then exits.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1; do
+          echo "waiting for kafka..."; sleep 2
+        done
+        for topic in metrics.raw logs.raw deploys.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic $$topic --partitions 3 --replication-factor 1 \
+            --config retention.ms=86400000
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    networks:
+      - diagnosis-net
+
+  # Browser UI for Kafka - browse topics, read messages, watch consumer
+  # groups, without needing the kafka-console-consumer.sh CLI.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    restart: always
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - diagnosis-net
+
+  # Scrapes the Phase 2 Prometheus metrics and republishes them onto
+  # metrics.raw in the {service, metric, value, timestamp, labels{}}
+  # shape from CONTRACTS.md. See services/metrics-bridge/.
+  metrics-bridge:
+    build: services/metrics-bridge
+    restart: always
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_started
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCRAPE_INTERVAL_SECONDS: "5"
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 4 - TimescaleDB metrics sink
+  # ---------------------------------------------------------------
+  # timescaledb/init/001_schema.sql runs automatically on first startup
+  # (standard Postgres image behavior): creates the metrics hypertable,
+  # a 1-minute continuous aggregate, and retention policies (24h raw,
+  # 7d rolled-up).
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: Abcd1234#
+      POSTGRES_DB: metrics
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./timescaledb/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "metrics"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - diagnosis-net
+
+  # Browser UI for TimescaleDB - run SQL, browse the metrics table,
+  # without needing the psql CLI. Login: System=PostgreSQL,
+  # Server=timescaledb, Username=postgres, Password=Abcd1234#, DB=metrics.
+  adminer:
+    image: adminer:latest
+    restart: always
+    ports:
+      - "8082:8080"
+    depends_on:
+      - timescaledb
+    networks:
+      - diagnosis-net
+
+  # Consumes metrics.raw and writes each sample into TimescaleDB's
+  # metrics hypertable. See services/metrics-sink/.
+  metrics-sink:
+    build: services/metrics-sink
+    restart: always
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 5 - deploy event emitter
+  # ---------------------------------------------------------------
+  # Deploy log lives in the same timescaledb/metrics database
+  # (timescaledb/init/002_deploys.sql) - not a separate Postgres
+  # container, matching the architecture diagram's "Time-Series Store"
+  # grouping. Publishes to deploys.events on every recorded deploy, and
+  # fabricates an ordinary deploy every couple minutes so the log isn't
+  # empty until M2's fault-injection harness starts calling POST /deploys
+  # for real. See services/deploy-emitter/.
+  deploy-emitter:
+    build: services/deploy-emitter
+    restart: always
+    ports:
+      - "5000:5000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      SIMULATE_INTERVAL_SECONDS: "120"
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 8 (pulled forward) - fault injection harness
+  # ---------------------------------------------------------------
+  # Real faults via the Docker Engine API (mounted socket), not simulated
+  # metrics: CPU-throttles/stops/saturates actual containers. Ground
+  # truth recorded in fault_scenarios (timescaledb/init/003_fault_scenarios.sql)
+  # in CONTRACTS.md's eval-hooks shape, for M2's evaluation runner to
+  # score detection latency/precision against later. See
+  # services/fault-injector/ and docs/phase8-fault-injection.md.
+  fault-injector:
+    build: services/fault-injector
+    restart: always
+    ports:
+      - "5001:5001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      deploy-emitter:
+        condition: service_started
+    environment:
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      DEPLOY_EMITTER_URL: http://deploy-emitter:5000
+    networks:
+      - diagnosis-net
+
+networks:
+  diagnosis-net:
+    driver: bridge
+
+volumes:
+  timescale-data:

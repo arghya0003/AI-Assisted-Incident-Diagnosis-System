@@ -1,0 +1,21 @@
+.claude/
+.env
+.env.local
+
+# Upstream testbed clone - reference only, nothing builds from it
+# (Sock Shop images are pulled pre-built from Docker Hub). Has its own
+# .git history, so it doesn't belong nested inside this repo. Re-clone
+# with: git clone https://github.com/microservices-demo/microservices-demo testbed/sock-shop
+testbed/
+
+# Java / Maven build artifacts inside testbed services
+**/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

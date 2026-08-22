@@ -1,0 +1,264 @@
+"""
+Fault injection harness (Phase 8, pulled forward). Runs real, physically
+enforced faults against the Sock Shop testbed via the Docker Engine API
+(mounted socket - Docker-outside-of-Docker), and records ground truth in
+the shape M2's evaluation runner needs (CONTRACTS.md's "eval hooks":
+scenario_id, fault_type, ground_truth_service, t_inject).
+
+Three scenario types, chosen to be real (not simulated metrics) and cheap
+to implement without re-architecting the testbed's network topology:
+
+  bad_deploy_latency  - records a real deploy via deploy-emitter (Phase 5),
+                        then CPU-throttles the target container via cgroups
+                        (docker update --cpus equivalent) for the duration.
+                        A deploy that quietly regresses per-request CPU
+                        cost is a common real-world cause of latency
+                        regressions, so this is a faithful mechanism, not
+                        a shortcut - and it closes the loop with the
+                        deploy log M3 will correlate against.
+  service_crash       - stops the container, waits, restarts it. Simulates
+                        a hard outage / dependency-cascade trigger.
+  db_pool_saturation  - opens N held connections directly against
+                        catalogue-db (MySQL) to exhaust its connection
+                        limit, so `catalogue` starts failing to acquire
+                        new ones. Mongo-backed services (carts/orders/user)
+                        are a documented gap - see docs/phase8-fault-injection.md.
+"""
+
+import os
+import json
+import random
+import logging
+import threading
+import time
+from datetime import datetime, timezone
+
+import docker
+import psycopg2
+import psycopg2.extras
+import pymysql
+import requests
+from flask import Flask, request, jsonify
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("fault-injector")
+
+PG_HOST = os.environ.get("PG_HOST", "timescaledb")
+PG_PORT = os.environ.get("PG_PORT", "5432")
+PG_DB = os.environ.get("PG_DB", "metrics")
+PG_USER = os.environ.get("PG_USER", "postgres")
+PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
+
+DEPLOY_EMITTER_URL = os.environ.get("DEPLOY_EMITTER_URL", "http://deploy-emitter:5000")
+COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "incident-diagnosis-system")
+
+MAX_DURATION_SECONDS = 300  # safety cap - a forgotten fault can't run forever
+MAX_CONNECTIONS = 100  # safety cap - stays well clear of catalogue-db's max_connections=151
+
+FAULT_TYPES = {"bad_deploy_latency", "service_crash", "db_pool_saturation"}
+KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
+
+docker_client = docker.from_env()
+
+
+def connect_postgres():
+    while True:
+        try:
+            conn = psycopg2.connect(
+                host=PG_HOST, port=PG_PORT, dbname=PG_DB,
+                user=PG_USER, password=PG_PASSWORD,
+            )
+            conn.autocommit = True
+            return conn
+        except psycopg2.OperationalError as exc:
+            log.warning("timescaledb not reachable yet (%s), retrying in 3s", exc)
+            time.sleep(3)
+
+
+conn = connect_postgres()
+app = Flask(__name__)
+
+
+def get_container(service: str):
+    matches = docker_client.containers.list(
+        filters={"label": f"com.docker.compose.service={service}"}
+    )
+    if not matches:
+        raise ValueError(f"no running container found for service {service!r}")
+    return matches[0]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def record_scenario(scenario_id, fault_type, service, params) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO fault_scenarios
+               (scenario_id, fault_type, ground_truth_service, t_inject, status, params)
+               VALUES (%s, %s, %s, now(), 'running', %s)""",
+            (scenario_id, fault_type, service, json.dumps(params)),
+        )
+
+
+def mark_recovered(scenario_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fault_scenarios SET status = 'recovered', t_recovered = now() WHERE scenario_id = %s",
+            (scenario_id,),
+        )
+
+
+def mark_failed(scenario_id: str, error: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fault_scenarios SET status = 'failed', t_recovered = now(), "
+            "params = params || %s::jsonb WHERE scenario_id = %s",
+            (json.dumps({"error": error}), scenario_id),
+        )
+
+
+def new_scenario_id(fault_type: str) -> str:
+    return f"scn-{fault_type.replace('_', '-')}-{int(time.time())}"
+
+
+# ---------------------------------------------------------------------
+# Fault implementations
+# ---------------------------------------------------------------------
+
+def run_bad_deploy_latency(service: str, duration_s: int, cpu_limit: float):
+    try:
+        requests.post(
+            f"{DEPLOY_EMITTER_URL}/deploys",
+            json={"service": service, "config_diff": "perf regression: inefficient loop introduced"},
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        log.warning("could not record companion deploy event: %s", exc)
+
+    container = get_container(service)
+    period = 100000
+    quota = max(int(period * cpu_limit), 1000)
+    log.info("throttling %s to %.0f%% CPU for %ss", service, cpu_limit * 100, duration_s)
+    container.update(cpu_period=period, cpu_quota=quota)
+    try:
+        time.sleep(duration_s)
+    finally:
+        container.update(cpu_period=period, cpu_quota=-1)
+        log.info("restored %s CPU", service)
+
+
+def run_service_crash(service: str, duration_s: int):
+    container = get_container(service)
+    log.info("stopping %s for %ss", service, duration_s)
+    container.stop(timeout=5)
+    try:
+        time.sleep(duration_s)
+    finally:
+        container.start()
+        log.info("restarted %s", service)
+
+
+def run_db_pool_saturation(service: str, duration_s: int, connections: int):
+    if service != "catalogue":
+        raise ValueError("db_pool_saturation currently only supports service=catalogue (MySQL)")
+
+    held = []
+    try:
+        log.info("opening %d held connections against catalogue-db", connections)
+        for _ in range(connections):
+            try:
+                c = pymysql.connect(host="catalogue-db", user="root", password="Abcd1234#",
+                                     database="socksdb", connect_timeout=3)
+                held.append(c)
+            except pymysql.MySQLError as exc:
+                log.warning("stopped opening new connections early: %s", exc)
+                break
+        time.sleep(duration_s)
+    finally:
+        for c in held:
+            try:
+                c.close()
+            except pymysql.MySQLError:
+                pass
+        log.info("released %d held connections", len(held))
+
+
+def execute(scenario_id: str, fault_type: str, service: str, params: dict):
+    try:
+        if fault_type == "bad_deploy_latency":
+            run_bad_deploy_latency(service, params["duration_s"], params["cpu_limit"])
+        elif fault_type == "service_crash":
+            run_service_crash(service, params["duration_s"])
+        elif fault_type == "db_pool_saturation":
+            run_db_pool_saturation(service, params["duration_s"], params["connections"])
+        mark_recovered(scenario_id)
+        log.info("scenario %s recovered", scenario_id)
+    except Exception as exc:
+        log.exception("scenario %s failed", scenario_id)
+        mark_failed(scenario_id, str(exc))
+
+
+# ---------------------------------------------------------------------
+# HTTP API
+# ---------------------------------------------------------------------
+
+@app.get("/healthz")
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@app.get("/fault-types")
+def fault_types():
+    return jsonify(sorted(FAULT_TYPES))
+
+
+@app.post("/faults")
+def post_fault():
+    body = request.get_json(force=True, silent=True) or {}
+    fault_type = body.get("fault_type")
+    service = body.get("service")
+
+    if fault_type not in FAULT_TYPES:
+        return jsonify({"error": f"fault_type must be one of {sorted(FAULT_TYPES)}"}), 400
+    if service not in KNOWN_SERVICES:
+        return jsonify({"error": f"service must be one of {KNOWN_SERVICES}"}), 400
+
+    duration_s = min(int(body.get("duration_s", 30)), MAX_DURATION_SECONDS)
+    params = {"duration_s": duration_s}
+    if fault_type == "bad_deploy_latency":
+        params["cpu_limit"] = float(body.get("cpu_limit", 0.05))
+    if fault_type == "db_pool_saturation":
+        params["connections"] = min(int(body.get("connections", 50)), MAX_CONNECTIONS)
+
+    scenario_id = new_scenario_id(fault_type)
+    try:
+        record_scenario(scenario_id, fault_type, service, params)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    threading.Thread(target=execute, args=(scenario_id, fault_type, service, params), daemon=True).start()
+
+    return jsonify({
+        "scenario_id": scenario_id, "fault_type": fault_type,
+        "ground_truth_service": service, "t_inject": now_iso(),
+        "params": params, "status": "running",
+    }), 202
+
+
+@app.get("/faults")
+def get_faults():
+    limit = min(int(request.args.get("limit", 20)), 200)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM fault_scenarios ORDER BY t_inject DESC LIMIT %s", (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["t_inject"] = r["t_inject"].isoformat()
+        if r["t_recovered"]:
+            r["t_recovered"] = r["t_recovered"].isoformat()
+    return jsonify(rows)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001)

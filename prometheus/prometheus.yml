@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Every Sock Shop app service ships pre-instrumented with a native
+  # Prometheus /metrics endpoint (request_duration_seconds histogram with
+  # method/route/status_code labels, CPU, memory) - verified by curling
+  # each service directly. No sidecar/agent instrumentation needed here.
+  #
+  # queue-master is deliberately excluded: its /metrics returns legacy
+  # Spring Boot Actuator JSON, not Prometheus text format (a real
+  # inconsistency in that image vs. carts/orders/shipping), which breaks
+  # the scrape. Documented as a known gap rather than faked - see
+  # docs/phase0-decisions.md.
+  - job_name: sock-shop-services
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - front-end:8079
+          - catalogue:80
+          - payment:80
+          - user:80
+          - carts:80
+          - orders:80
+          - shipping:80
+        labels:
+          project: incident-diagnosis-system
