@@ -11,6 +11,11 @@ testbed/
 # Java / Maven build artifacts inside testbed services
 **/target/
 
+# Python cache and test artifacts
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # IDE
 .idea/
 *.iml
