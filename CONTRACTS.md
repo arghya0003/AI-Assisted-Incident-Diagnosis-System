@@ -74,6 +74,58 @@ Producer: M2's EWMA detector, after dedup/grouping.
 }
 ```
 
+## Evidence model
+
+Evidence is the common structure M3 uses to explain a diagnosis. Each evidence item
+belongs to one of the five categories below and keeps a reference to its source record
+instead of copying the source data.
+
+```
+Evidence
+├── Anomaly
+├── Metrics
+├── Deployment history
+├── Service dependencies
+└── Similar past incidents
+```
+
+Evidence item shape:
+
+```json
+{
+  "evidence_id": "ev-0001",
+  "incident_id": "anom-0001",
+  "category": "metrics",
+  "source_id": "catalogue:latency_p99_ms:2026-08-12T20:45:00.123Z",
+  "service": "catalogue",
+  "observed_at": "2026-08-12T20:45:00.123Z",
+  "relevance": 0.92,
+  "summary": "Catalogue p99 latency increased 4.2x after the anomaly onset",
+  "payload": {
+    "metric": "latency_p99_ms",
+    "value": 598.4,
+    "baseline": 142.3
+  }
+}
+```
+
+`category` must be one of `anomaly`, `metrics`, `deployment`, `dependency`, or
+`similar_incident`. `source_id` is the ID or stable composite key in the source system;
+`payload` contains category-specific details. `relevance` is a number from 0 to 1 and
+is used to rank evidence in the diagnosis response.
+
+The five categories map to current and planned sources as follows:
+
+| Category | Source |
+| --- | --- |
+| `anomaly` | M2 `anomalies.detected` |
+| `metrics` | TimescaleDB `metrics` / `metrics_1m` |
+| `deployment` | TimescaleDB `deploys` / `deploys.events` |
+| `dependency` | Service dependency graph above |
+| `similar_incident` | M3 incident history and retrieval store |
+
+The database representation is defined in `timescaledb/init/004_evidence.sql`.
+
 ## Synchronous REST
 
 ### `POST /analyze`

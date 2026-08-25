@@ -95,3 +95,11 @@ timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, de
 services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
 services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
 ```
+
+## Diagnosis evidence
+
+The shared diagnosis evidence model groups supporting facts into anomaly, metrics,
+deployment history, service dependencies, and similar past incidents. Its contract is
+documented in `CONTRACTS.md`, with the database schema in
+`timescaledb/init/004_evidence.sql`. See `docs/evidence-model.md` for the mapping to
+the current data sources and the planned M3 diagnosis service.

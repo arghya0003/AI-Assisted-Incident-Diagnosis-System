@@ -264,6 +264,22 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
+  # Phase 4 - Anomaly detection (M1)
+  # ---------------------------------------------------------------
+  # Reads metrics.raw and emits anomalies.detected based on the EWMA
+  # z-score detector in services/anomaly-detector/main.py.
+  anomaly-detector:
+    build: services/anomaly-detector
+    restart: always
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
   # Phase 4 - TimescaleDB metrics sink
   # ---------------------------------------------------------------
   # timescaledb/init/001_schema.sql runs automatically on first startup
