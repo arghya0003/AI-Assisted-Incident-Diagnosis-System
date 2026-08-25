@@ -79,6 +79,14 @@ conn = connect_postgres()
 app = Flask(__name__)
 
 
+def ensure_db_connection():
+    global conn
+    if conn is None or conn.closed:
+        log.warning("postgres connection closed; reconnecting")
+        conn = connect_postgres()
+    return conn
+
+
 def get_container(service: str):
     matches = docker_client.containers.list(
         filters={"label": f"com.docker.compose.service={service}"}
@@ -93,7 +101,8 @@ def now_iso() -> str:
 
 
 def record_scenario(scenario_id, fault_type, service, params) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             """INSERT INTO fault_scenarios
                (scenario_id, fault_type, ground_truth_service, t_inject, status, params)
@@ -103,7 +112,8 @@ def record_scenario(scenario_id, fault_type, service, params) -> None:
 
 
 def mark_recovered(scenario_id: str) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             "UPDATE fault_scenarios SET status = 'recovered', t_recovered = now() WHERE scenario_id = %s",
             (scenario_id,),
@@ -111,7 +121,8 @@ def mark_recovered(scenario_id: str) -> None:
 
 
 def mark_failed(scenario_id: str, error: str) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             "UPDATE fault_scenarios SET status = 'failed', t_recovered = now(), "
             "params = params || %s::jsonb WHERE scenario_id = %s",
@@ -250,7 +261,8 @@ def post_fault():
 @app.get("/faults")
 def get_faults():
     limit = min(int(request.args.get("limit", 20)), 200)
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    db = ensure_db_connection()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM fault_scenarios ORDER BY t_inject DESC LIMIT %s", (limit,))
         rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
