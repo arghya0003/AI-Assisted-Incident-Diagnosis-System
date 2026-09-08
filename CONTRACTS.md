@@ -192,5 +192,17 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
 - [ ] Confirm topic partitioning/retention on `metrics.raw` — **implemented** as proposed
       (3 partitions, keyed by `service`, `retention.ms=86400000`), pending team sign-off.
       Downsampling-after-24h not yet built.
-- [ ] Confirm `anomalies.detected` `severity` enum values with M2.
+- [x] Confirm `anomalies.detected` `severity` enum values with M2 — **implemented**
+      as `low` / `medium` / `high` (M2's detectors currently only ever emit
+      `medium`/`high` — see `services/anomaly-detector/main.py`'s `SEVERITY_RANK`).
 - [ ] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4.
+
+## M2 addendum: `anomalies` table
+
+M2's detectors (`services/anomaly-detector/`) persist every grouped anomaly to a new
+`anomalies` table (`timescaledb/init/005_anomalies.sql`), tagged by `detector`
+(`ewma` or `static_threshold`) so the evaluation runner can score them independently.
+This is in addition to, not instead of, publishing to `anomalies.detected` — only
+`detector = 'ewma'` rows are published to Kafka; `static_threshold` is an
+evaluation-only comparison baseline and never reaches M4. This doesn't change the
+`anomalies.detected` wire shape above.

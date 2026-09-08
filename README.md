@@ -94,7 +94,44 @@ services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into 
 timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
 services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
 services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
+services/anomaly-detector/  M2 Phase 1 — EWMA + static-threshold detection, dedup, deploy suppression
+services/eval-runner/       M2 Phase 2 — fault-injector-driven evaluation harness (opt-in profile)
 ```
+
+## Member 2: Anomaly Detection & Evaluation
+
+Owns "something is wrong" and "how do we know we're right" - the EWMA
+detector, a comparison baseline, dedup/grouping, and the evaluation
+harness that scores detection against M1's fault-injection harness.
+
+### Phase 1 — Anomaly detection ✅
+`services/anomaly-detector/` runs the EWMA z-score detector alongside a
+frozen `StaticThresholdDetector` comparison baseline (the plan's "add at
+least one comparison baseline" ask), both per `(service, metric)` off
+`metrics.raw`. Detections are buffered and flushed every 5s into one
+grouped `anomalies.detected` event per flush (deduped `services[]` /
+`metrics[]`, not one alert per metric) instead of the previous one-event-
+per-metric behavior. A second consumer watches `deploys.events` to
+suppress detections within an 8s post-deploy settle window, so a benign
+deploy blip doesn't fire an alert while a genuine regression that persists
+past the window still does. Both detectors' grouped anomalies persist to
+the new `anomalies` table (`timescaledb/init/005_anomalies.sql`) for
+evaluation; only the EWMA detector publishes to `anomalies.detected`,
+per CONTRACTS.md. Seasonality suppression is explicitly out of scope (see
+`docs/m2-phase1-anomaly-detection.md` for why). Verified via unit tests
+(`services/anomaly-detector/tests/`); not yet re-verified against a live
+running stack in this pass — see that doc's honesty note.
+
+### Phase 2 — Evaluation runner ✅
+`services/eval-runner/` (opt-in via `docker compose --profile eval run
+--rm eval-runner` — not part of the always-on stack) drives M1's
+`fault-injector` through its three fault types, measures detection latency
+and hit rate per fault type per detector, and measures false-positive rate
+over a quiet period with nothing injected. Writes `eval-results/eval_raw.csv`
+and `eval-results/eval_summary.csv`, regenerable with that one command.
+This is also where the EWMA-vs-static-threshold ablation the plan asks for
+comes from. Root-cause ranking accuracy / MRR (M3-scoped) is explicitly
+deferred — see `docs/m2-phase2-evaluation.md`.
 
 ## Diagnosis evidence
 
