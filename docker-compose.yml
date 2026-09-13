@@ -264,18 +264,27 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
-  # Phase 4 - Anomaly detection (M1)
+  # M2 - Anomaly detection
   # ---------------------------------------------------------------
-  # Reads metrics.raw and emits anomalies.detected based on the EWMA
-  # z-score detector in services/anomaly-detector/main.py.
+  # Reads metrics.raw and deploys.events, runs the EWMA detector and a
+  # frozen static-threshold comparison baseline side by side, groups
+  # detections into anomalies.detected (EWMA only) and persists both
+  # detectors' grouped anomalies to TimescaleDB for eval-runner to score.
+  # See services/anomaly-detector/main.py.
   anomaly-detector:
     build: services/anomaly-detector
     restart: always
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
     networks:
       - diagnosis-net
 
@@ -394,6 +403,35 @@ services:
       PG_USER: postgres
       PG_PASSWORD: Abcd1234#
       DEPLOY_EMITTER_URL: http://deploy-emitter:5000
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # M2 - evaluation runner
+  # ---------------------------------------------------------------
+  # Not part of the always-on stack (`profiles: [eval]` - won't start on a
+  # plain `docker compose up`). Run on demand once the stack is healthy:
+  #   docker compose --profile eval run --rm eval-runner
+  # Injects fault-injector's scenarios, scores detection latency/recall per
+  # detector and false-positive rate, writes ./eval-results/*.csv. See
+  # services/eval-runner/main.py.
+  eval-runner:
+    build: services/eval-runner
+    profiles: ["eval"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      fault-injector:
+        condition: service_started
+    environment:
+      FAULT_INJECTOR_URL: http://fault-injector:5001
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      RESULTS_DIR: /app/results
+    volumes:
+      - ./eval-results:/app/results
     networks:
       - diagnosis-net
 

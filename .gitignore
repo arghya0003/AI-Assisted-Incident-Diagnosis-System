@@ -16,6 +16,10 @@ testbed/
 *.py[cod]
 .pytest_cache/
 
+# eval-runner output (regenerate with: docker compose --profile eval run --rm eval-runner)
+eval-results/*
+!eval-results/.gitkeep
+
 # IDE
 .idea/
 *.iml
