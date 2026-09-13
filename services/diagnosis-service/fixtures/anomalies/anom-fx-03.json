@@ -5,7 +5,14 @@
     "fault_type": "bad_deploy_latency",
     "ground_truth_service": "payment",
     "tags": ["deploy-caused", "leaf-service"],
-    "notes": "payment calls nothing, so there is no downstream service to blame. Medium severity: a smaller regression than anom-fx-01."
+    "notes": "payment calls nothing, so there is no downstream service to blame. Medium severity: a smaller regression than anom-fx-01.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-03-inj", "service": "payment", "version": "1.0.10", "commit_sha": "f0b6c93", "config_diff": "perf regression: inefficient loop introduced", "time": "2026-09-14T10:40:12.500Z" },
+        { "deploy_id": "dep-fx-03-bg1", "service": "shipping", "version": "1.0.12", "commit_sha": "2e8d7a5", "config_diff": "adjust upstream timeout config for shipping", "time": "2026-09-14T10:38:30.000Z" },
+        { "deploy_id": "dep-fx-03-bg2", "service": "carts", "version": "1.0.15", "commit_sha": "91c4f6b", "config_diff": "adjust log level for carts", "time": "2026-09-14T10:36:30.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-03",
   "services": ["payment"],

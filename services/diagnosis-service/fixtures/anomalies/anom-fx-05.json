@@ -5,7 +5,13 @@
     "fault_type": "service_crash",
     "ground_truth_service": "user",
     "tags": ["root-cause-not-in-services", "grouped", "no-deploy"],
-    "notes": "user is the one dependency orders and front-end share, so graph reasoning should converge on it even though it is absent from services."
+    "notes": "user is the one dependency orders and front-end share, so graph reasoning should converge on it even though it is absent from services.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-05-bg1", "service": "shipping", "version": "1.0.13", "commit_sha": "d4c8a2f", "config_diff": "adjust log level for shipping", "time": "2026-09-14T11:18:10.000Z" },
+        { "deploy_id": "dep-fx-05-bg2", "service": "catalogue", "version": "1.0.15", "commit_sha": "0e7b5d9", "config_diff": "roll out feature flag for catalogue", "time": "2026-09-14T11:08:10.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-05",
   "services": ["orders", "front-end"],

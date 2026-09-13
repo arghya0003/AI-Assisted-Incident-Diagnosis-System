@@ -5,7 +5,13 @@
     "fault_type": "service_crash",
     "ground_truth_service": "carts",
     "tags": ["root-cause-not-in-services", "no-deploy", "same-symptom-as-fx-04"],
-    "notes": "The anomaly alone cannot separate this from anom-fx-04 (catalogue). Only other evidence, such as which downstream service stopped reporting metrics, can. A pipeline that ranks these two identically is guessing."
+    "notes": "The anomaly alone cannot separate this from anom-fx-04 (catalogue). Only other evidence, such as which downstream service stopped reporting metrics, can. A pipeline that ranks these two identically is guessing.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-06-bg1", "service": "catalogue", "version": "1.0.16", "commit_sha": "8f3a6e2", "config_diff": "adjust upstream timeout config for catalogue", "time": "2026-09-14T11:38:03.000Z" },
+        { "deploy_id": "dep-fx-06-bg2", "service": "orders", "version": "1.0.19", "commit_sha": "3b1d9c7", "config_diff": "adjust log level for orders", "time": "2026-09-14T11:36:03.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-06",
   "services": ["front-end"],

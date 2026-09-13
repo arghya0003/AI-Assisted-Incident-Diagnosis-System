@@ -2,7 +2,8 @@
 
 Each file is an anomalies.detected event plus a "_fixture" block describing the scenario it
 stands for. With that block removed, the file is exactly M2's wire shape, so it can be stored
-directly or published to Kafka. The block is the ground truth later phases test against.
+directly or published to Kafka. The block is the ground truth later phases test against, and
+its `context` holds the deploys and nearby anomalies the scenario would have produced.
 """
 
 import json
@@ -12,13 +13,25 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models import AnomalyEvent
+from app.models import AnomalyEvent, Deploy
+from app.scoring import ScoringInputs
 
 FIXTURE_ID_PREFIX = "anom-fx-"
+FIXTURE_DEPLOY_PREFIX = "dep-fx-"
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "anomalies"
 
 # Fault types fault-injector can produce (services/fault-injector/main.py, FAULT_TYPES).
 FaultType = Literal["bad_deploy_latency", "service_crash", "db_pool_saturation"]
+
+
+class FixtureContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Includes background deploys: deploy-emitter fabricates one every two minutes, so a real
+    # incident always has unrelated recent deploys nearby.
+    deploys: list[Deploy] = []
+    # Other anomalies with a nearby onset, e.g. M2's same-service duplicates or unrelated noise.
+    related_anomalies: list[AnomalyEvent] = []
 
 
 class FixtureMeta(BaseModel):
@@ -32,6 +45,7 @@ class FixtureMeta(BaseModel):
     ground_truth_service: str | None
     tags: list[str] = []
     notes: str = ""
+    context: FixtureContext = FixtureContext()
 
     @model_validator(mode="after")
     def _ground_truth_is_complete(self) -> "FixtureMeta":
@@ -47,6 +61,13 @@ class Fixture:
     raw: dict  # the event exactly as it would arrive on anomalies.detected
     event: AnomalyEvent
 
+    def scoring_inputs(self) -> ScoringInputs:
+        return ScoringInputs(
+            anomaly=self.event,
+            related=list(self.meta.context.related_anomalies),
+            deploys=list(self.meta.context.deploys),
+        )
+
 
 def load_fixture(path: Path) -> Fixture:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -54,9 +75,15 @@ def load_fixture(path: Path) -> Fixture:
         raise ValueError(f"{path.name}: missing the _fixture block")
     meta = FixtureMeta.model_validate(data.pop("_fixture"))
     event = AnomalyEvent.model_validate(data)
-    if not event.anomaly_id.startswith(FIXTURE_ID_PREFIX):
-        # Keeps fixtures distinguishable from real M2 ids (anom-<epoch ms>) everywhere.
-        raise ValueError(f"{path.name}: anomaly_id must start with {FIXTURE_ID_PREFIX!r}")
+    # Keeps fixtures distinguishable from real M2 ids (anom-<epoch ms>) and deploy-emitter ids
+    # (dep-<date>-<n>) everywhere.
+    ids = [event.anomaly_id] + [other.anomaly_id for other in meta.context.related_anomalies]
+    for anomaly_id in ids:
+        if not anomaly_id.startswith(FIXTURE_ID_PREFIX):
+            raise ValueError(f"{path.name}: anomaly_id {anomaly_id!r} must start with {FIXTURE_ID_PREFIX!r}")
+    for deploy in meta.context.deploys:
+        if not deploy.deploy_id.startswith(FIXTURE_DEPLOY_PREFIX):
+            raise ValueError(f"{path.name}: deploy_id {deploy.deploy_id!r} must start with {FIXTURE_DEPLOY_PREFIX!r}")
     return Fixture(path=path, meta=meta, raw=data, event=event)
 
 

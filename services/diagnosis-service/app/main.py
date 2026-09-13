@@ -1,9 +1,10 @@
 """diagnosis-service HTTP API.
 
-Phase 2: /analyze resolves the anomaly from the anomalies table (fed by the Kafka consumer)
-and 404s unknown ids, but the hypothesis is still a stub. Later phases replace the stub with
-the scoring -> retrieval -> LLM -> guardrail pipeline without changing the request or
-response shape.
+Phase 4: /analyze resolves the anomaly from the anomalies table (fed by the Kafka consumer)
+and 404s unknown ids, but the hypothesis is still a stub. GET /candidates/{anomaly_id} exposes
+the deterministic candidate ranking that later phases hand to the LLM. Later phases replace
+the stub with the scoring -> retrieval -> LLM -> guardrail pipeline without changing the
+request or response shape.
 """
 
 import logging
@@ -14,20 +15,22 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 from app.consumer import AnomalyConsumer
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
 from app.graph import load_graph
-from app.models import NO_ACTION, AnalyzeRequest, AnalyzeResponse, Hypothesis
+from app.models import NO_ACTION, AnalyzeRequest, AnalyzeResponse, CandidateReport, Hypothesis
+from app.scoring import ScoringConfig, score_candidates
 from app.settings import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("diagnosis-service")
 
-SERVICE_VERSION = "0.2.0"
+SERVICE_VERSION = "0.4.0"
 # Returned in /health and the X-Diagnosis-Mode header so a stub response is never
 # mistaken for a real diagnosis. Becomes full/llm_only/no_graph/deterministic in Phase 8.
 PIPELINE_MODE = "stub"
 
-# Loaded at import so a broken or missing YAML stops the container at startup, not on the
-# first /analyze.
+# Loaded at import so a broken graph file or invalid score weights stop the container at
+# startup, not on the first request.
 graph = load_graph()
+scoring_config = ScoringConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
 consumer = AnomalyConsumer(settings)
 
@@ -44,7 +47,12 @@ async def lifespan(_app: FastAPI):
         settings.llm_context_tokens,
         settings.consumer_enabled,
     )
-    log.info("dependency graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges))
+    log.info(
+        "dependency graph: %d nodes, %d edges; score weights %s",
+        len(graph.nodes),
+        len(graph.edges),
+        scoring_config.weights,
+    )
     if settings.consumer_enabled:
         consumer.start()
     yield
@@ -58,9 +66,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+ERROR_RESPONSES = {
+    404: {"description": "No anomaly with this id has been received"},
+    503: {"description": "TimescaleDB unreachable or a required table missing"},
+}
+
 
 def get_store() -> AnomalyStore:
     return store
+
+
+def _unavailable(anomaly_id: str, exc: DatabaseUnavailable) -> HTTPException:
+    log.error("anomaly_id=%s: %s", anomaly_id, exc)
+    return HTTPException(status_code=503, detail=str(exc))
+
+
+def _not_found(anomaly_id: str) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"unknown anomaly_id {anomaly_id!r}")
 
 
 @app.get("/health")
@@ -77,14 +99,7 @@ def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, str]:
     }
 
 
-@app.post(
-    "/analyze",
-    response_model=AnalyzeResponse,
-    responses={
-        404: {"description": "No anomaly with this id has been received"},
-        503: {"description": "TimescaleDB unreachable or migration not applied"},
-    },
-)
+@app.post("/analyze", response_model=AnalyzeResponse, responses=ERROR_RESPONSES)
 def analyze(
     request: AnalyzeRequest,
     response: Response,
@@ -93,10 +108,9 @@ def analyze(
     try:
         anomaly = anomalies.get(request.anomaly_id)
     except DatabaseUnavailable as exc:
-        log.error("analyze anomaly_id=%s: %s", request.anomaly_id, exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise _unavailable(request.anomaly_id, exc) from exc
     if anomaly is None:
-        raise HTTPException(status_code=404, detail=f"unknown anomaly_id {request.anomaly_id!r}")
+        raise _not_found(request.anomaly_id)
 
     response.headers["X-Diagnosis-Mode"] = PIPELINE_MODE
     log.info("analyze anomaly_id=%s mode=%s", anomaly.anomaly_id, PIPELINE_MODE)
@@ -115,3 +129,18 @@ def analyze(
             )
         ]
     )
+
+
+@app.get("/candidates/{anomaly_id}", response_model=CandidateReport, responses=ERROR_RESPONSES)
+def candidates(anomaly_id: str, anomalies: AnomalyStore = Depends(get_store)) -> CandidateReport:
+    """Debug view of the deterministic ranking: every candidate with its per-signal breakdown
+    and the evidence behind it. Read-only, and makes no LLM call."""
+    try:
+        inputs = anomalies.scoring_inputs(
+            anomaly_id, scoring_config.co_anomaly_window_seconds, scoring_config.deploy_lookback_minutes
+        )
+    except DatabaseUnavailable as exc:
+        raise _unavailable(anomaly_id, exc) from exc
+    if inputs is None:
+        raise _not_found(anomaly_id)
+    return score_candidates(inputs, graph, scoring_config)

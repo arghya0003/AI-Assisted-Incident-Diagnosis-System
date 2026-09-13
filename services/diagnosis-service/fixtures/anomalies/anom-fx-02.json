@@ -5,7 +5,14 @@
     "fault_type": "bad_deploy_latency",
     "ground_truth_service": "orders",
     "tags": ["deploy-caused", "grouped", "upstream-propagation"],
-    "notes": "front-end calls orders, so front-end latency is a symptom, not a cause. Blaming front-end, or a deploy to front-end, is wrong."
+    "notes": "front-end calls orders, so front-end latency is a symptom, not a cause. A background front-end deploy two minutes earlier must not pull the blame onto front-end.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-02-inj", "service": "orders", "version": "1.0.18", "commit_sha": "4a0f9d2", "config_diff": "perf regression: inefficient loop introduced", "time": "2026-09-14T10:19:50.000Z" },
+        { "deploy_id": "dep-fx-02-bg1", "service": "front-end", "version": "1.0.21", "commit_sha": "c3e7b10", "config_diff": "adjust log level for front-end", "time": "2026-09-14T10:18:03.000Z" },
+        { "deploy_id": "dep-fx-02-bg2", "service": "payment", "version": "1.0.9", "commit_sha": "5d2a8e4", "config_diff": "roll out feature flag for payment", "time": "2026-09-14T10:16:03.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-02",
   "services": ["orders", "front-end"],

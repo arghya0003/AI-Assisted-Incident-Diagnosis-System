@@ -167,18 +167,41 @@ def test_analyze_unknown_anomaly_is_404():
 
 
 def test_analyze_database_down_is_503():
-    class UnavailableStore:
-        def get(self, anomaly_id):
-            raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
-
-        def status(self):
-            return "unreachable"
-
     app.dependency_overrides[get_store] = UnavailableStore
     assert client.post("/analyze", json={"anomaly_id": "anom-0001"}).status_code == 503
     health = client.get("/health")
     assert health.status_code == 200  # a DB outage must not fail the container healthcheck
     assert health.json()["database"] == "unreachable"
+
+
+class UnavailableStore:
+    def get(self, anomaly_id):
+        raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+
+    def scoring_inputs(self, anomaly_id, window_seconds, lookback_minutes):
+        raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+
+    def status(self):
+        return "unreachable"
+
+
+def test_candidates_returns_the_ranked_breakdown():
+    resp = client.get("/candidates/anom-0001")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["anomaly_id"] == "anom-0001"
+    assert [c["rank"] for c in body["candidates"]] == list(range(1, len(body["candidates"]) + 1))
+    assert {"catalogue", "front-end", "catalogue-db"} <= {c["service"] for c in body["candidates"]}
+    assert set(body["candidates"][0]["signals"]) == set(body["weights"])
+
+
+def test_candidates_unknown_anomaly_is_404():
+    assert client.get("/candidates/anom-invented-9999").status_code == 404
+
+
+def test_candidates_database_down_is_503():
+    app.dependency_overrides[get_store] = UnavailableStore
+    assert client.get("/candidates/anom-0001").status_code == 503
 
 
 @pytest.mark.parametrize(

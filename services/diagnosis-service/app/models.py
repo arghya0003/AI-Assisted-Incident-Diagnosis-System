@@ -7,7 +7,7 @@ than in M4's UI.
 
 import re
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -82,3 +82,74 @@ class AnalyzeResponse(BaseModel):
         if ranks != list(range(1, len(ranks) + 1)):
             raise ValueError(f"ranks must be 1..n with no gaps or duplicates; got {ranks}")
         return self
+
+
+class Deploy(BaseModel):
+    """A row of M1's `deploys` table (timescaledb/init/002_deploys.sql)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    deploy_id: NonBlankId
+    service: str
+    version: str
+    commit_sha: str
+    config_diff: str | None = None
+    time: datetime
+
+
+EvidenceCategory = Literal["anomaly", "metrics", "deployment", "dependency", "similar_incident"]
+
+
+class Evidence(BaseModel):
+    """One evidence item, shaped like a row of the `evidence` table (CONTRACTS.md,
+    timescaledb/init/004_evidence.sql). `incident_id` is the anomaly being diagnosed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: NonBlankId
+    incident_id: NonBlankId
+    category: EvidenceCategory
+    source_id: NonBlankId
+    service: str | None
+    observed_at: datetime
+    relevance: float = Field(ge=0.0, le=1.0)
+    summary: str = Field(min_length=1)
+    payload: dict[str, Any] = {}
+
+
+class Signals(BaseModel):
+    """Per-signal scores for one candidate, each in 0..1, before weighting."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deploy_proximity: float = Field(ge=0.0, le=1.0)
+    graph_proximity: float = Field(ge=0.0, le=1.0)
+    co_anomaly: float = Field(ge=0.0, le=1.0)
+    incident_similarity: float = Field(ge=0.0, le=1.0)
+
+
+class Candidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int = Field(ge=1)
+    service: str
+    kind: str  # dependency-graph node kind, or "unknown" for a service not in the graph
+    score: float = Field(ge=0.0, le=1.0)
+    signals: Signals
+    distance: int = Field(ge=0)  # hops below the nearest anomalous service in the event
+    deploy_id: str | None
+    evidence_ids: list[NonBlankId]
+
+
+class CandidateReport(BaseModel):
+    """GET /candidates/{anomaly_id}: the deterministic ranking with everything behind it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anomaly_id: str
+    t_onset: datetime
+    anomalous_services: list[str]  # this event's services plus those of related anomalies
+    related_anomaly_ids: list[str]
+    weights: dict[str, float]
+    candidates: list[Candidate]
+    evidence: list[Evidence]

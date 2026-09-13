@@ -5,7 +5,13 @@
     "fault_type": null,
     "ground_truth_service": null,
     "tags": ["ambiguous"],
-    "notes": "carts and user do not depend on each other. The system should report low confidence rather than invent a shared cause."
+    "notes": "carts and user do not depend on each other. The system should report low confidence rather than invent a shared cause.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-10-bg1", "service": "front-end", "version": "1.0.24", "commit_sha": "2f6c8e9", "config_diff": "adjust log level for front-end", "time": "2026-09-14T12:58:15.000Z" },
+        { "deploy_id": "dep-fx-10-bg2", "service": "catalogue", "version": "1.0.17", "commit_sha": "a91d3b5", "config_diff": "roll out feature flag for catalogue", "time": "2026-09-14T12:56:15.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-10",
   "services": ["carts", "user"],

@@ -8,13 +8,13 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 3 — dependency graph. A background consumer stores every
-`anomalies.detected` event in the `anomalies` table, and `POST /analyze` looks the anomaly up
-there (404 if unknown). `app/graph.py` loads the Sock Shop call graph from
-`config/dependency_graph.yaml` and answers "what does this service call" (root-cause
-candidates) and "who calls it" (blast radius). The hypothesis itself is still a **stub**
-(marked `[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`); scoring arrives in
-Phase 4.
+**Status:** Phase 4 — deterministic candidate scoring. A background consumer stores every
+`anomalies.detected` event in the `anomalies` table. `GET /candidates/{anomaly_id}` ranks the
+possible root causes (the anomalous services plus everything they call, from
+`config/dependency_graph.yaml`). Each candidate is scored on recent deploys, graph distance,
+and whether it is the deepest anomalous service, with no LLM, and the response shows every
+signal and the evidence behind it. `POST /analyze` still returns a **stub** hypothesis (marked
+`[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`); the LLM arrives in Phase 6.
 
 ## API
 
@@ -22,6 +22,7 @@ Phase 4.
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
+| `GET` | `/candidates/{anomaly_id}` | — | Debug: `{anomaly_id, anomalous_services, related_anomaly_ids, weights, candidates[{rank, service, score, signals, distance, deploy_id, evidence_ids}], evidence[]}`. Read-only, no LLM; 404 and 503 as for `/analyze`. |
 
 Interactive docs: `http://localhost:8000/docs`.
 
@@ -86,7 +87,10 @@ which evaluation must exclude, and re-loading replaces them.
 
 **Configuration** — environment variables, defaults in `app/settings.py`:
 `KAFKA_BOOTSTRAP`, `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
-`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`, `CONSUMER_ENABLED` (default `true`). The
+`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`, `CONSUMER_ENABLED` (default `true`).
+Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO_ANOMALY` 0.20,
+`SCORE_WEIGHT_INCIDENT` 0.15 (must sum to 1, checked at startup), `DEPLOY_LOOKBACK_MINUTES` 30,
+`DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. The
 container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
 on `0.0.0.0` (`OLLAMA_HOST`).
 

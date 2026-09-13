@@ -1,19 +1,21 @@
-"""TimescaleDB access for M3's own tables (timescaledb/init/005_diagnosis.sql).
+"""TimescaleDB access for M3's own tables (timescaledb/init/005_diagnosis.sql), plus read-only
+queries against M1's `deploys` table.
 
 The API opens a short-lived connection per request. /analyze is called at human pace and
 will spend seconds in the LLM, so a pool would only add stale-connection handling. The Kafka
 consumer keeps its own long-lived connection.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeVar
 
 import psycopg2
 import psycopg2.errors
 from psycopg2.extras import Json
 
-from app.models import AnomalyEvent
+from app.models import AnomalyEvent, Deploy
+from app.scoring import ScoringInputs
 from app.settings import Settings
 
 M3_TABLES = ("anomalies", "incidents", "hypotheses")
@@ -21,10 +23,11 @@ MIGRATION = "timescaledb/init/005_diagnosis.sql"
 
 SaveResult = Literal["inserted", "duplicate", "collision"]
 DbStatus = Literal["ok", "unreachable", "schema_missing"]
+T = TypeVar("T")
 
 
 class DatabaseUnavailable(RuntimeError):
-    """TimescaleDB is unreachable, or M3's migration has not been applied to it."""
+    """TimescaleDB is unreachable, or a table this service reads has not been created."""
 
 
 def connect(settings: Settings, connect_timeout: int = 5):
@@ -83,6 +86,43 @@ def get_anomaly(cur, anomaly_id: str) -> AnomalyEvent | None:
     return None if row is None else AnomalyEvent.model_validate(row[0])
 
 
+# Anomalies from the same source (never mixing fixtures with real events) whose onset is within
+# the window either side of this anomaly's onset.
+_RELATED_ANOMALIES = """
+    SELECT other.raw
+    FROM anomalies AS this
+    JOIN anomalies AS other
+      ON other.source = this.source
+     AND other.anomaly_id <> this.anomaly_id
+     AND other.t_onset BETWEEN this.t_onset - make_interval(secs => %(window)s)
+                           AND this.t_onset + make_interval(secs => %(window)s)
+    WHERE this.anomaly_id = %(anomaly_id)s
+    ORDER BY other.t_onset, other.anomaly_id
+"""
+
+_DEPLOYS_BEFORE_ONSET = """
+    SELECT deploy_id, service, version, commit_sha, config_diff, time
+    FROM deploys
+    WHERE time BETWEEN %(onset)s - make_interval(secs => %(lookback)s * 60) AND %(onset)s
+    ORDER BY time DESC, deploy_id
+"""
+
+
+def get_scoring_inputs(
+    cur, anomaly_id: str, window_seconds: float, lookback_minutes: float
+) -> ScoringInputs | None:
+    """Everything candidate scoring needs for one anomaly, read in one transaction."""
+    anomaly = get_anomaly(cur, anomaly_id)
+    if anomaly is None:
+        return None
+    cur.execute(_RELATED_ANOMALIES, {"anomaly_id": anomaly_id, "window": window_seconds})
+    related = [AnomalyEvent.model_validate(raw) for (raw,) in cur.fetchall()]
+    cur.execute(_DEPLOYS_BEFORE_ONSET, {"onset": anomaly.t_onset, "lookback": lookback_minutes})
+    columns = [column.name for column in cur.description]
+    deploys = [Deploy.model_validate(dict(zip(columns, row))) for row in cur.fetchall()]
+    return ScoringInputs(anomaly=anomaly, related=related, deploys=deploys)
+
+
 def missing_tables(cur) -> list[str]:
     cur.execute(
         "SELECT t FROM unnest(%s::text[]) AS t WHERE to_regclass(t) IS NULL",
@@ -95,6 +135,10 @@ class AnomalyStore(Protocol):
     """What the API needs from storage; tests substitute an in-memory implementation."""
 
     def get(self, anomaly_id: str) -> AnomalyEvent | None: ...
+
+    def scoring_inputs(
+        self, anomaly_id: str, window_seconds: float, lookback_minutes: float
+    ) -> ScoringInputs | None: ...
 
     def status(self) -> DbStatus: ...
 
@@ -116,14 +160,24 @@ class PostgresAnomalyStore:
         finally:
             conn.close()
 
-    def get(self, anomaly_id: str) -> AnomalyEvent | None:
+    def _query(self, query: Callable[..., T], *args) -> T:
         try:
             with self._cursor() as cur:
-                return get_anomaly(cur, anomaly_id)
+                return query(cur, *args)
         except psycopg2.errors.UndefinedTable as exc:
-            raise DatabaseUnavailable(f"table 'anomalies' is missing; apply {MIGRATION}") from exc
+            raise DatabaseUnavailable(
+                f"a required table is missing ({exc.diag.message_primary}); apply {MIGRATION}"
+            ) from exc
         except psycopg2.OperationalError as exc:
             raise DatabaseUnavailable(f"TimescaleDB query failed: {exc}") from exc
+
+    def get(self, anomaly_id: str) -> AnomalyEvent | None:
+        return self._query(get_anomaly, anomaly_id)
+
+    def scoring_inputs(
+        self, anomaly_id: str, window_seconds: float, lookback_minutes: float
+    ) -> ScoringInputs | None:
+        return self._query(get_scoring_inputs, anomaly_id, window_seconds, lookback_minutes)
 
     def status(self) -> DbStatus:
         try:

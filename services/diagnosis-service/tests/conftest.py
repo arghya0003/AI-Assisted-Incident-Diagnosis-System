@@ -9,6 +9,7 @@ import pytest  # noqa: E402
 
 from app.main import app, get_store  # noqa: E402
 from app.models import AnomalyEvent  # noqa: E402
+from app.scoring import ScoringInputs  # noqa: E402
 
 STORED_ANOMALY = AnomalyEvent.model_validate(
     {
@@ -29,6 +30,10 @@ class FakeAnomalyStore:
 
     def get(self, anomaly_id: str) -> AnomalyEvent | None:
         return self._events.get(anomaly_id)
+
+    def scoring_inputs(self, anomaly_id: str, window_seconds: float, lookback_minutes: float):
+        event = self._events.get(anomaly_id)
+        return None if event is None else ScoringInputs(anomaly=event, related=[], deploys=[])
 
     def status(self) -> str:
         return "ok"

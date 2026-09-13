@@ -5,7 +5,13 @@
     "fault_type": "db_pool_saturation",
     "ground_truth_service": "catalogue",
     "tags": ["grouped", "no-deploy"],
-    "notes": "No deploy is involved. deploy-emitter fabricates a deploy every two minutes, so an unrelated recent deploy is likely; it must not outrank the saturation, and rollback_deploy is the wrong action."
+    "notes": "No deploy is involved, and rollback_deploy is the wrong action. The background deploys (payment 8 minutes and front-end 12 minutes before onset) must not outrank the saturation. A front-end deploy only 3 minutes before would; see the known-limitation test in tests/test_scoring.py.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-07-bg1", "service": "payment", "version": "1.0.11", "commit_sha": "7a2e4b6", "config_diff": "adjust log level for payment", "time": "2026-09-14T11:52:02.000Z" },
+        { "deploy_id": "dep-fx-07-bg2", "service": "front-end", "version": "1.0.23", "commit_sha": "c5f81d3", "config_diff": "roll out feature flag for front-end", "time": "2026-09-14T11:48:02.000Z" }
+      ]
+    }
   },
   "anomaly_id": "anom-fx-07",
   "services": ["catalogue", "front-end"],

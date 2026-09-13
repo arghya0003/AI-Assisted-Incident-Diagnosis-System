@@ -8,6 +8,7 @@ back, so nothing is left in the shared dev database.
 import dataclasses
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import pytest
@@ -18,6 +19,7 @@ from app.db import (
     PostgresAnomalyStore,
     connect,
     get_anomaly,
+    get_scoring_inputs,
     missing_tables,
     save_anomaly,
 )
@@ -109,8 +111,57 @@ def test_store_reports_ok_against_the_real_database(cur):
     assert store.get("anom-test-phase2-does-not-exist") is None
 
 
+def _event_at(anomaly_id, onset, services=("catalogue",)):
+    stamp = onset.isoformat()
+    return {
+        **EVENT,
+        "anomaly_id": anomaly_id,
+        "services": list(services),
+        "t_detected": stamp,
+        "t_onset": stamp,
+        "evidence_window": {"start": stamp, "end": stamp},
+    }
+
+
+def test_scoring_inputs_apply_the_window_and_source(cur):
+    # 2020, so no real anomaly or deploy falls in these windows.
+    onset = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    main = _event_at("anom-test-p4-main", onset)
+    near = _event_at("anom-test-p4-near", onset + timedelta(seconds=60), ["user"])
+    far = _event_at("anom-test-p4-far", onset + timedelta(seconds=300))
+    fixture_source = _event_at("anom-test-p4-fixture", onset + timedelta(seconds=10))
+    for raw in (main, near, far):
+        _save(cur, raw)
+    save_anomaly(cur, AnomalyEvent.model_validate(fixture_source), fixture_source, source="fixture")
+
+    deploys = [
+        ("dep-test-p4-in", onset - timedelta(minutes=5)),
+        ("dep-test-p4-too-old", onset - timedelta(minutes=40)),
+        ("dep-test-p4-after", onset + timedelta(minutes=1)),
+    ]
+    for deploy_id, time in deploys:
+        cur.execute(
+            "INSERT INTO deploys (deploy_id, service, version, commit_sha, config_diff, time) "
+            "VALUES (%s, 'catalogue', '1.0.0', 'abc1234', NULL, %s)",
+            (deploy_id, time),
+        )
+
+    inputs = get_scoring_inputs(cur, "anom-test-p4-main", window_seconds=120, lookback_minutes=30)
+    assert inputs.anomaly.anomaly_id == "anom-test-p4-main"
+    assert [a.anomaly_id for a in inputs.related] == ["anom-test-p4-near"]
+    assert [d.deploy_id for d in inputs.deploys] == ["dep-test-p4-in"]
+    assert inputs.deploys[0].config_diff is None
+
+
+def test_scoring_inputs_for_an_unknown_anomaly_is_none(cur):
+    assert get_scoring_inputs(cur, "anom-test-p4-missing", 120, 30) is None
+    assert PostgresAnomalyStore(TEST_SETTINGS).scoring_inputs("anom-test-p4-missing", 120, 30) is None
+
+
 def test_store_reports_an_unreachable_database():
     store = PostgresAnomalyStore(dataclasses.replace(settings, pg_host="127.0.0.1", pg_port=1))
     assert store.status() == "unreachable"
     with pytest.raises(DatabaseUnavailable):
         store.get("anom-0001")
+    with pytest.raises(DatabaseUnavailable):
+        store.scoring_inputs("anom-0001", 120, 30)

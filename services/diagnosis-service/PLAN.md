@@ -489,6 +489,75 @@ values are what the LLM is allowed to cite, and what the Phase 7 guardrail check
 `bad_deploy_latency` fixture, ranks the deployed service first. A `GET /candidates/{anomaly_id}`
 debug endpoint returns the ranked list with per-signal breakdowns.
 
+#### Phase 4 outcome (2026-09-13) — status: DONE (fixtures); live check inconclusive, see finding 2
+
+| Check | Result |
+| --- | --- |
+| All fixtures scored with zero LLM calls | A test blocks every socket connection while scoring all 10 fixtures |
+| `bad_deploy_latency` fixtures rank the deployed service first | 4 of 4 (`anom-fx-01/02/03/08`), each citing the injected deploy, despite 2–3 background deploys per fixture |
+| Other fixtures | `anom-fx-07` (DB saturation) is correct; benign `anom-fx-09` tops out at 0.45, against 0.84 for a real bad deploy; ambiguous `anom-fx-10` is an exact tie |
+| Known misses (strict `xfail` tests, which fail loudly if they start passing) | Crashes `anom-fx-04/05/06`; `anom-fx-07` with a front-end deploy 3 min before onset |
+| `GET /candidates/{id}` on the live stack | 200 with per-signal breakdown and evidence for real and fixture anomalies; 404 for unknown ids |
+| Tests | 186 passed, 4 xfailed, inside the compose network |
+
+Decisions made while building, beyond what this section specified:
+
+- **`co_anomaly` means "deepest anomalous service"**: the candidate is anomalous (in this event,
+  or in a related anomaly within ±120 s of onset), and nothing it calls is also anomalous. The
+  plain "was it also anomalous" reading tied cause and symptom in every grouped fixture:
+  `orders` and `front-end` both scored 1 in `anom-fx-02`. An anomalous service with anomalous
+  dependencies is more likely a symptom.
+- **Related anomalies only mark services; they never add candidates.** M2's `memory_bytes` flood
+  (issue #2) would otherwise add unrelated services to almost every analysis. Related anomalies
+  are matched from the same `source`, so fixtures and real events never mix.
+- **Deploys after onset are excluded**, and a service's most recent deploy in the window is the
+  one scored and cited.
+- **Ties break by distance, then service name**, so rankings are reproducible.
+- **Evidence is built but not yet written to the `evidence` table.** Each item has a
+  deterministic id, `ev:<anomaly_id>:<category>:<source_id>`, and `/candidates` returns the list.
+  Writing moves to Phase 6, when `/analyze` first cites evidence: a debug `GET` should not write,
+  and a write path with no reader would go untested. There is no `metrics` evidence yet, because
+  no signal reads metric values.
+- **Weights are validated at startup** (non-negative, summing to 1), so a bad
+  `SCORE_WEIGHT_*` value stops the container instead of skewing every score.
+- **Fixture contexts** (`_fixture.context`) hold each scenario's deploys, including background
+  ones, and related anomalies. The loader stores the related anomalies but not the deploys,
+  because `deploys` is M1's table. So `/candidates` on a fixture id has no deploy signal, and can
+  rank differently from `tests/test_scoring.py`.
+
+Findings:
+
+1. **deploy-emitter fabricates a deploy every 2.0 minutes** (102 in 3 h 22 min), so almost every
+   candidate has a deploy inside the 30-minute lookback. On a real catalogue latency anomaly,
+   the top candidate got a deploy score of 0.41 from a routine background deploy. Injected
+   deploys land seconds before onset (score about 1.0) and still stand out. But a background
+   deploy to a *symptom* service within about 7 minutes of onset outranks a no-deploy cause
+   (the `anom-fx-07` xfail). This is Week 8 weight tuning. Ask M1 whether this deploy rate is
+   intended for evaluation runs.
+2. **The live bad-deploy injection produced no symptom.** `bad_deploy_latency` on `catalogue`
+   (60 s at 5% CPU, scenario `scn-bad-deploy-latency-1789299649`) recorded its deploy
+   (`dep-2026-09-13-0107`), but catalogue p95 stayed at 4.8 ms at about 0.2 requests/s, and M2
+   raised nothing. The testbed carries too little traffic for a CPU throttle to matter. Over
+   the preceding 3 hours:
+   - every service with latency data ran at exactly 0.20 requests/s;
+   - p95 took only 2–3 distinct values per service (histogram-bucket steps, not a live signal);
+   - only `catalogue`, `payment` and `user` reported p95 at all;
+   - no load-generator container was running (M1 dropped `user-sim` in Phase 0).
+
+   So end-to-end ranking on live data is
+   **not verified yet**, and the fixture tests are the evidence. Raise with M1 and M2 before the
+   evaluation weeks, because detection and diagnosis both depend on faults being visible.
+3. **The memory flood reaches the co-anomaly set.** That real catalogue anomaly had 5 related
+   anomalies within ±2 min (carts, orders and shipping `memory_bytes`). They add no candidates,
+   but they can mark a downstream service co-anomalous (issue #2).
+4. **Crash faults need a missing-metrics signal.** A stopped container stops reporting, so it is
+   never anomalous and never has a deploy, and scoring cannot rank it (`anom-fx-04/05/06`). A
+   "candidate stopped reporting metrics near onset" signal from M1's `metrics` table would
+   address this. It is not in this plan's weights, so it is proposed here rather than built.
+5. **Open item for the team: what do hypotheses cite?** The CONTRACTS.md example cites source ids
+   (`anom-0001`, `dep-...`, `incident-0042`), while `docs/evidence-model.md` says `/analyze`
+   should return `evidence_id` values. Phase 6 needs one answer.
+
 ---
 
 ### Phase 5 — Retrieval (RAG)

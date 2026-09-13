@@ -37,11 +37,18 @@ def main() -> None:
             cur.execute("DELETE FROM anomalies WHERE source = 'fixture'")
             removed = cur.rowcount
             for fixture in fixtures:
-                if save_anomaly(cur, fixture.event, fixture.raw, source="fixture") != "inserted":
-                    raise SystemExit(
-                        f"{fixture.path.name}: {fixture.event.anomaly_id} already exists as a "
-                        "non-fixture row; nothing was changed"
-                    )
+                # Related anomalies go in too, so /candidates sees the co-anomalies. Context deploys
+                # do not: `deploys` is M1's table, so DB-backed scoring of a fixture has no deploy
+                # signal and can rank differently from tests/test_scoring.py.
+                events = [(fixture.event, fixture.raw)] + [
+                    (other, other.model_dump(mode="json")) for other in fixture.meta.context.related_anomalies
+                ]
+                for event, raw in events:
+                    if save_anomaly(cur, event, raw, source="fixture") != "inserted":
+                        raise SystemExit(
+                            f"{fixture.path.name}: {event.anomaly_id} already exists as a "
+                            "non-fixture row; nothing was changed"
+                        )
     finally:
         conn.close()
 
