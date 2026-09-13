@@ -8,8 +8,46 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 0 complete. No service code yet — Phase 1 adds the runnable skeleton and the
-"how to run standalone" section.
+**Status:** Phase 1 — skeleton service. `POST /analyze` returns a contract-shaped **stub**
+(marked `[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`) so M4 can build against
+the real endpoint now. No diagnosis logic yet.
+
+## API
+
+| Method | Path | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode"}` |
+| `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
+
+Interactive docs: `http://localhost:8000/docs`. Malformed requests return 422.
+
+`proposed_action` is one of `rollback_deploy:<deploy_id>`, `restart_service:<service>`,
+`scale_service:<service>`, or `no_action`. The vocabulary is still to be confirmed with M4.
+
+## Run
+
+**With the whole stack** (from the repo root):
+
+```
+docker compose up -d --build diagnosis-service
+curl localhost:8000/health
+```
+
+**Standalone, without Docker** (from `services/diagnosis-service/`):
+
+```
+python -m venv .venv
+.venv\Scripts\activate            # Windows; use: source .venv/bin/activate elsewhere
+pip install -r requirements-dev.txt
+uvicorn app.main:app --port 8000
+```
+
+**Tests:** `python -m pytest` from `services/diagnosis-service/`.
+
+**Configuration** — environment variables, defaults in `app/settings.py`:
+`KAFKA_BOOTSTRAP`, `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
+`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`. The container reaches Ollama on the host via
+`host.docker.internal`, which requires Ollama to listen on `0.0.0.0` (`OLLAMA_HOST`).
 
 ---
 

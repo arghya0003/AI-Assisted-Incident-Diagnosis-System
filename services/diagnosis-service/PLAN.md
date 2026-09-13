@@ -244,6 +244,38 @@ are temporary and should be removed once the corresponding issue is closed.
 `{"anomaly_id":"anom-0001"}` returns a response that validates against CONTRACTS.md's shape.
 The container comes up as part of `docker compose up` with no manual steps.
 
+#### Phase 1 outcome (2026-09-13) — status: DONE
+
+Verified against the running stack:
+
+| Check | Result |
+| --- | --- |
+| `docker compose up -d --build diagnosis-service` | builds and starts after `kafka-init` completes and `timescaledb` is healthy |
+| Container health / restarts | `healthy` / 0 |
+| `GET /health` | 200 `{"status":"ok",...,"pipeline_mode":"stub"}` |
+| `POST /analyze` (real M2 anomaly id) | 200, contract shape, header `X-Diagnosis-Mode: stub` |
+| `POST /analyze` with `{}` | 422 |
+| Ollama from inside the container | reachable via `host.docker.internal` (version 0.34.0) |
+| `python -m pytest` | 32 passed |
+
+Decisions made while building, beyond what this section specified:
+
+- **The stub is deliberately honest:** `cause` starts with `[stub]`, `confidence` is `0.0`,
+  `proposed_action` is `no_action`, and it cites only the requested `anomaly_id`. A contract-valid
+  stub that looked like a real rollback recommendation would be indistinguishable from a real
+  diagnosis in M4's UI.
+- **The models enforce more than the contract text states,** because Phase 6 will validate LLM
+  output with the same classes: `proposed_action` must match the four-value vocabulary exactly;
+  `confidence` must be within 0–1; `evidence_ids` must be non-empty and non-blank; ranks must be
+  exactly 1..n; and extra fields are rejected on responses and requests. Unknown fields on
+  `AnomalyEvent` are *ignored*, because M2 owns that shape.
+- **Dependencies are added per phase, not all up front.** `requirements.txt` holds only what the
+  running service imports (FastAPI, uvicorn, Pydantic); `pytest`/`httpx` are in
+  `requirements-dev.txt`, so the image doesn't ship test tooling. `psycopg2`, `kafka-python-ng`,
+  `pyyaml` and `numpy` arrive with Phases 2, 3 and 5.
+- **Not verified:** a full `docker compose down -v && up` from a clean checkout. That destroys
+  M1's data volume, so it waits for an agreed team-wide rebuild rather than being run unilaterally.
+
 ---
 
 ### Phase 2 — Storage and fixtures

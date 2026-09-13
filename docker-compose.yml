@@ -397,6 +397,44 @@ services:
     networks:
       - diagnosis-net
 
+  # ---------------------------------------------------------------
+  # M3 - Diagnosis service (AI reasoning & RAG)
+  # ---------------------------------------------------------------
+  # POST /analyze {anomaly_id} -> ranked, evidence-cited root-cause
+  # hypotheses (CONTRACTS.md). Phase 1 returns a contract-shaped stub.
+  # Ollama runs on the HOST, not in a container, because it needs the
+  # GPU; it must listen on 0.0.0.0 (OLLAMA_HOST) to be reachable via
+  # host.docker.internal. See services/diagnosis-service/.
+  diagnosis-service:
+    build: services/diagnosis-service
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      OLLAMA_URL: http://host.docker.internal:11434
+      LLM_MODEL: phi4-mini
+      EMBED_MODEL: nomic-embed-text
+      LLM_CONTEXT_TOKENS: "8192"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - diagnosis-net
+
 networks:
   diagnosis-net:
     driver: bridge
