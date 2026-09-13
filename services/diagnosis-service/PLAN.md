@@ -51,7 +51,7 @@ M2 ---> anomalies.detected -----------------+------> [THIS SERVICE]
 | Generation model | **`phi4-mini`** (3.8B, Q4_K_M, ~2.5 GB VRAM) via Ollama | 4 GB VRAM ceiling. Reasoning-dense training and comparatively reliable structured/JSON output at this size. **Provisional** — Phase 0 benchmarks it on real hardware before anything is designed around it. |
 | Embedding model | **`nomic-embed-text`** (768-dim, ~300 MB VRAM) | Fits alongside `phi4-mini` in 4 GB without contention. |
 | Context window | **8192 tokens, hard cap** | Context competes with model weights for the same 4 GB. Prompt assembly must truncate deliberately, not hope. |
-| Vector search | pgvector in the existing `metrics` DB **if available**, else brute-force cosine in NumPy over JSONB-stored vectors | See the Phase 0 check. At a 50-150 record corpus, brute force is about 1 ms and removes a dependency entirely — this is a legitimate final answer, not only a fallback. |
+| Vector search | **pgvector** in the existing `metrics` DB, `vector(768)` with the `<=>` cosine operator | Confirmed available in M1's TimescaleDB image in Phase 0, so no image change and no NumPy fallback are needed. |
 | Anomaly lookup | My own `anomalies` table, populated by my own Kafka consumer | `anomalies.detected` is pub/sub with no shared table (unlike `deploys`/`metrics`). `POST /analyze` only receives an `anomaly_id`, so I must have persisted it myself. **This is an architecture decision not yet in CONTRACTS.md — raise it with the team.** |
 | Action vocabulary | Fixed enum: `rollback_deploy`, `restart_service`, `scale_service`, `no_action` | CONTRACTS.md open question 3. Formatted in responses as `<action>:<target_id>`, e.g. `rollback_deploy:dep-2026-08-12-0007`. Confirm with M4. |
 | Executor | **None. Ever.** | Remediation is text for a human to approve. M4 owns the stubbed executor. |
@@ -175,6 +175,31 @@ tables and topics are reachable with the shapes CONTRACTS.md claims; `phi4-mini`
 (tok/s, latency, GPU placement, valid-JSON rate out of 10); pgvector available yes or no; and a
 container can reach Ollama. Nothing is built yet, and that is correct.
 
+#### Phase 0 outcome (2026-09-13) — status: DONE. Full numbers in `README.md`.
+
+Findings that change later phases:
+
+1. **pgvector is available.** Phase 2 uses `embedding vector(768)` instead of JSONB, and Phase 5
+   uses the `<=>` operator. The NumPy path is no longer needed. Confirmed dimension: 768.
+2. **`phi4-mini` passes on correctness, not on fit.** 10/10 valid JSON, 0/10 hallucinated IDs,
+   about 5 s p50 at `num_ctx` 8192 — but 44% of it runs on CPU, because Windows holds about 800 MB
+   of the 4 GB. A 4K context did not fix this. Decision: keep 8192.
+3. **First model load can return HTTP 500** (runner crash `0xc0000409`, succeeds on retry). Phase 6's
+   Ollama client must retry transport and 5xx errors separately from JSON-validation retries.
+4. **M2's `evidence_window` is zero-width** — `start == end == t_onset` in every real event sampled.
+   Phase 4 must not derive lookback ranges from it: use `t_onset - 30min` for deploys and a fixed
+   `t_onset ± 2min` for co-anomaly overlap, and raise with M2 whether the window is meant to be wider.
+5. **M2 does not deduplicate yet.** One real slowdown produced three anomalies within about 130 ms
+   (`catalogue` p95, `catalogue` p99, `user` p95), each with its own `anomaly_id`. Until M2's Week 4
+   grouping lands, Phase 4's co-anomaly signal will count these as independent corroboration, and
+   M4 would request three analyses for one incident. Treat same-onset anomalies (within the ±2min
+   window) as one incident when scoring; raise the grouping timeline with M2.
+6. **`anomalies.detected` has 1 partition**, confirming open item 4: it is auto-created on first
+   publish rather than by `kafka-init`. Harmless for correctness today; it is the bug shape M1 fixed
+   in Phase 6, so it still belongs in `kafka-init`.
+7. **The stack check script needed `MSYS_NO_PATHCONV=1`** — Git Bash rewrote `/opt/kafka/...` into a
+   Windows path before it reached the container. Fixed in the script.
+
 ---
 
 ### Phase 1 — Skeleton service
@@ -226,7 +251,9 @@ CREATE TABLE IF NOT EXISTS anomalies (
 );
 CREATE INDEX IF NOT EXISTS anomalies_detected_idx ON anomalies (t_detected DESC);
 
--- Past-incident corpus for retrieval.
+-- Past-incident corpus for retrieval. pgvector confirmed available in Phase 0.
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS incidents (
     incident_id   TEXT PRIMARY KEY,
     title         TEXT NOT NULL,
@@ -234,7 +261,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     services      TEXT[],
     fault_type    TEXT,
     source        TEXT,              -- 'public_postmortem' | 'synthetic'
-    embedding     JSONB,             -- swap to vector(768) if pgvector is available
+    embedding     vector(768),       -- nomic-embed-text; dimension confirmed in Phase 0
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

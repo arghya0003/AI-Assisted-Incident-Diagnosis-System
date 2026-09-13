@@ -10,6 +10,12 @@
 
 set -uo pipefail
 
+# Git Bash (MSYS) on Windows rewrites arguments that look like absolute POSIX
+# paths - "/opt/kafka/bin/..." becomes "C:/Program Files/Git/opt/kafka/bin/..." -
+# before docker ever sees them, so every `docker compose exec kafka /opt/...`
+# fails inside the container. No effect on Linux/macOS.
+export MSYS_NO_PATHCONV=1
+
 PASS=0
 FAIL=0
 WARN=0
