@@ -9,7 +9,7 @@ import pytest
 
 from app.fixtures import load_fixtures
 from app.graph import load_graph
-from app.models import AnomalyEvent, Deploy, Signals
+from app.models import AnomalyEvent, Deploy, Signals, SimilarIncident
 from app.scoring import ScoringConfig, ScoringInputs, score_candidates
 from app.settings import settings
 
@@ -166,8 +166,53 @@ def test_related_anomalies_outside_the_window_or_self_are_ignored():
     assert by_service(report)["catalogue"].signals.co_anomaly == 0.0
 
 
-def test_incident_similarity_is_zero_until_retrieval_exists():
-    assert all(c.signals.incident_similarity == 0.0 for c in score(["front-end"]).candidates)
+def test_incident_similarity_is_zero_without_retrieved_incidents():
+    report = score(["front-end"])
+    assert all(c.signals.incident_similarity == 0.0 for c in report.candidates)
+    assert report.retrieval_status == "not_run"
+
+
+def make_incident(incident_id, services, similarity):
+    return SimilarIncident(
+        incident_id=incident_id,
+        title=f"title of {incident_id}",
+        services=list(services),
+        fault_type="db_pool_saturation",
+        source="synthetic",
+        similarity=similarity,
+    )
+
+
+def test_incident_similarity_is_the_best_incident_naming_the_candidate():
+    incidents = [
+        make_incident("incident-9001", ["catalogue"], 0.62),
+        make_incident("incident-9002", ["catalogue", "orders"], 0.71),
+        make_incident("incident-9003", [], 0.90),  # a public postmortem names no Sock Shop service
+    ]
+    inputs = ScoringInputs(
+        anomaly=make_anomaly(["front-end"]), related=[], deploys=[], similar_incidents=incidents, retrieval_status="ok"
+    )
+    report = score_candidates(inputs, GRAPH, CONFIG)
+    candidates = by_service(report)
+    assert candidates["catalogue"].signals.incident_similarity == pytest.approx(0.71)
+    assert candidates["orders"].signals.incident_similarity == pytest.approx(0.71)
+    assert candidates["front-end"].signals.incident_similarity == 0.0
+    assert "ev:anom-t-1:similar_incident:incident-9001" in candidates["catalogue"].evidence_ids
+    assert not any("incident-9003" in item.evidence_id for item in report.evidence)
+    assert report.retrieval_status == "ok"
+    assert [i.incident_id for i in report.similar_incidents] == ["incident-9001", "incident-9002", "incident-9003"]
+
+
+def test_negative_similarity_is_clipped_to_zero():
+    inputs = ScoringInputs(
+        anomaly=make_anomaly(["catalogue"]),
+        related=[],
+        deploys=[],
+        similar_incidents=[make_incident("incident-9001", ["catalogue"], -0.2)],
+    )
+    report = score_candidates(inputs, GRAPH, CONFIG)
+    assert by_service(report)["catalogue"].signals.incident_similarity == 0.0
+    assert all(item.relevance >= 0 for item in report.evidence)
 
 
 # ------------------------------------------------------------------ score and ranking

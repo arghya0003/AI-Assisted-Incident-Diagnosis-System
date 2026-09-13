@@ -8,12 +8,13 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 4 — deterministic candidate scoring. A background consumer stores every
+**Status:** Phase 5 — retrieval of similar past incidents. A background consumer stores every
 `anomalies.detected` event in the `anomalies` table. `GET /candidates/{anomaly_id}` ranks the
 possible root causes (the anomalous services plus everything they call, from
 `config/dependency_graph.yaml`). Each candidate is scored on recent deploys, graph distance,
-and whether it is the deepest anomalous service, with no LLM, and the response shows every
-signal and the evidence behind it. `POST /analyze` still returns a **stub** hypothesis (marked
+whether it is the deepest anomalous service, and similarity to past incidents retrieved from a
+61-incident corpus. The response shows every signal and the evidence behind it. No LLM
+generation is involved yet. `POST /analyze` still returns a **stub** hypothesis (marked
 `[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`); the LLM arrives in Phase 6.
 
 ## API
@@ -22,7 +23,7 @@ signal and the evidence behind it. `POST /analyze` still returns a **stub** hypo
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
-| `GET` | `/candidates/{anomaly_id}` | — | Debug: `{anomaly_id, anomalous_services, related_anomaly_ids, weights, candidates[{rank, service, score, signals, distance, deploy_id, evidence_ids}], evidence[]}`. Read-only, no LLM; 404 and 503 as for `/analyze`. |
+| `GET` | `/candidates/{anomaly_id}` | — | Debug: `{anomaly_id, anomalous_services, related_anomaly_ids, weights, retrieval_status, similar_incidents[], candidates[{rank, service, score, signals, distance, deploy_id, evidence_ids}], evidence[]}`. Read-only, no LLM generation; 404 and 503 as for `/analyze`. `retrieval_status` is `ok`, `empty_corpus` or `embedding_unavailable`; retrieval problems never fail the request. |
 
 Interactive docs: `http://localhost:8000/docs`.
 
@@ -85,12 +86,19 @@ a `_fixture` block recording the injected fault and true root cause. Load them w
 `--fixtures` above so `/analyze` accepts their ids. They are stored with `source='fixture'`,
 which evaluation must exclude, and re-loading replaces them.
 
+**Incident corpus.** `corpus/incidents/*.md` holds 61 past-incident write-ups: 35 synthetic Sock
+Shop incidents and 26 paraphrased public postmortems (sources and caveats in
+`corpus/README.md`). Embed and load them, re-runnable and updating in place, with
+`test_in_docker.sh --ingest`; `--compare` prints vector-versus-hybrid retrieval for every fixture.
+Both need Ollama on the host.
+
 **Configuration** — environment variables, defaults in `app/settings.py`:
 `KAFKA_BOOTSTRAP`, `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
 `LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`, `CONSUMER_ENABLED` (default `true`).
 Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO_ANOMALY` 0.20,
 `SCORE_WEIGHT_INCIDENT` 0.15 (must sum to 1, checked at startup), `DEPLOY_LOOKBACK_MINUTES` 30,
-`DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. The
+`DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. Retrieval: `RETRIEVAL_MODE` `hybrid`
+(or `vector`), `RETRIEVAL_TOP_K` 3, `OLLAMA_TIMEOUT_SECONDS` 60. The
 container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
 on `0.0.0.0` (`OLLAMA_HOST`).
 
@@ -159,3 +167,48 @@ python services/diagnosis-service/scripts/phase0_llm_bench.py [--num-ctx 8192]
   retryable, not fatal.
 - The benchmark prompt is a stand-in written for Phase 0, not the final Phase 6 prompt. If
   results diverge later, suspect the prompt before the hardware.
+
+---
+
+## Phase 5 retrieval results — 2026-09-13
+
+Reproduce with `bash services/diagnosis-service/scripts/test_in_docker.sh --ingest --compare`.
+Corpus: 61 incidents embedded with `nomic-embed-text` (symptoms section only; see PLAN.md, Phase 5).
+
+### `anom-fx-07` (catalogue-db connection pool exhausted), top 3, judged by hand
+
+The fixture is an error-rate and p99-latency anomaly on `catalogue` and `front-end`, with no
+deploy involved.
+
+| Rank | Incident | Similarity | Judgement |
+| --- | --- | --- | --- |
+| 1 | `incident-0008` catalogue deploy lowers its CPU limit and throttles the service | 0.771 | **Partly relevant.** Right service and a similar symptom profile, but the wrong mechanism: it points towards a deploy, which this fixture doesn't have. |
+| 2 | `incident-0022` catalogue deploy lowers the connection pool maximum from 50 to 5 | 0.752 | **Relevant.** Same mechanism (requests queue on an exhausted pool), though there the trigger was a deploy. |
+| 3 | `incident-0020` reporting job exhausts catalogue-db connections | 0.748 | **Most relevant.** Connection exhaustion with no deploy, errors and latency together, front-end slowing. The closest match in the corpus, yet ranked third. |
+
+Verdict: 2 of 3 relevant and 1 partly relevant. The best match is present but not first, and
+the scores are only 0.023 apart.
+
+### Pure vector vs hybrid
+
+Compared on all 10 fixtures. The top 3 is identical in 9. On `anom-fx-03` (payment latency),
+pure vector returns `incident-0031` (a front-end alert, outside the candidate set) as #3, and
+hybrid replaces it with `incident-0007` (a shipping bad deploy). **Hybrid is kept, as marginally
+better.** At this corpus size its filter rarely removes anything, because candidate sets and
+metric-to-fault mappings are broad.
+
+### Before the symptoms-only change
+
+The first ingest embedded title plus full body. `anom-fx-07` then retrieved `incident-0001`,
+`0004` and `0031`: none about connection pools, two about other services entirely. Two generic
+incidents (`0031`, `0004`) filled 14 of the 30 top-3 slots across the fixtures. The comparison
+that led to embedding symptoms only is in PLAN.md, Phase 5 outcome.
+
+### Reading
+
+- Retrieval works mechanically and helps when the anomaly's symptoms are distinctive, but it
+  can't distinguish causes the anomaly doesn't describe; crash fixtures retrieve crash
+  incidents for the wrong service.
+- Similarities cluster between about 0.63 and 0.77, so the `incident_similarity` signal is weak.
+- These numbers are optimistic: the synthetic corpus and the fixtures share an author and fault
+  types, and no public postmortem reached any fixture's top 3.

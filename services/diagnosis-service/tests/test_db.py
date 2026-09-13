@@ -7,6 +7,7 @@ back, so nothing is left in the shared dev database.
 
 import dataclasses
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -14,14 +15,19 @@ import psycopg2
 import pytest
 
 from app.consumer import handle_message
+from app.corpus import IncidentRecord
 from app.db import (
     DatabaseUnavailable,
     PostgresAnomalyStore,
     connect,
+    count_incidents,
+    delete_incidents_except,
     get_anomaly,
     get_scoring_inputs,
     missing_tables,
     save_anomaly,
+    search_incidents,
+    upsert_incident,
 )
 from app.models import AnomalyEvent
 from app.settings import settings
@@ -156,6 +162,73 @@ def test_scoring_inputs_apply_the_window_and_source(cur):
 def test_scoring_inputs_for_an_unknown_anomaly_is_none(cur):
     assert get_scoring_inputs(cur, "anom-test-p4-missing", 120, 30) is None
     assert PostgresAnomalyStore(TEST_SETTINGS).scoring_inputs("anom-test-p4-missing", 120, 30) is None
+
+
+def _unit_vector(index, other=None, weight=0.0):
+    vector = [0.0] * 768
+    vector[index] = 1.0
+    if other is not None:
+        vector[other] = weight
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector]
+
+
+def _incident(incident_id, services, fault_type, title="test incident"):
+    source = "synthetic" if services else "public_postmortem"
+    return IncidentRecord(
+        incident_id=incident_id,
+        title=title,
+        services=services,
+        fault_type=fault_type,
+        source=source,
+        source_url=None if services else "https://example.com/postmortem",
+        body="**Symptoms:** s\n\n**Root cause:** r\n\n**Resolution:** x",
+    )
+
+
+# Ids 99xx never collide with the real corpus (0001-0035, 0101-0126).
+TEST_INCIDENTS = [
+    (_incident("incident-9901", ["catalogue"], "db_pool_saturation"), _unit_vector(0)),  # similarity 1.0
+    (_incident("incident-9902", ["orders"], "bad_deploy_latency"), _unit_vector(0, 1, 0.5)),  # 0.894
+    (_incident("incident-9903", [], None), _unit_vector(0, 2, 0.2)),  # 0.981
+]
+
+
+def _test_ids(results):
+    return [r.incident_id for r in results if r.incident_id.startswith("incident-99")]
+
+
+def test_incident_search_vector_versus_hybrid(cur):
+    for record, vector in TEST_INCIDENTS:
+        upsert_incident(cur, record, vector)
+    query = _unit_vector(0)
+
+    vector_results = search_incidents(cur, query, ["catalogue"], ["bad_deploy_latency"], top_k=1000, hybrid=False)
+    assert _test_ids(vector_results) == ["incident-9901", "incident-9903", "incident-9902"]
+    best = next(r for r in vector_results if r.incident_id == "incident-9901")
+    assert best.similarity == pytest.approx(1.0) and best.services == ["catalogue"]
+
+    # 9901 names a candidate service, 9902 has a matching fault type, 9903 matches neither.
+    hybrid_results = search_incidents(cur, query, ["catalogue"], ["bad_deploy_latency"], top_k=1000, hybrid=True)
+    assert _test_ids(hybrid_results) == ["incident-9901", "incident-9902"]
+
+
+def test_upsert_incident_is_idempotent(cur):
+    record, vector = TEST_INCIDENTS[0]
+    before = count_incidents(cur)
+    upsert_incident(cur, record, vector)
+    upsert_incident(cur, record.model_copy(update={"title": "renamed"}), vector)
+    assert count_incidents(cur) == before + 1
+    cur.execute("SELECT title FROM incidents WHERE incident_id = %s", (record.incident_id,))
+    assert cur.fetchone() == ("renamed",)
+
+
+def test_delete_incidents_except_removes_the_rest(cur):
+    for record, vector in TEST_INCIDENTS:
+        upsert_incident(cur, record, vector)
+    delete_incidents_except(cur, ["incident-9901"])
+    cur.execute("SELECT incident_id FROM incidents")
+    assert cur.fetchall() == [("incident-9901",)]  # rolled back after the test
 
 
 def test_store_reports_an_unreachable_database():

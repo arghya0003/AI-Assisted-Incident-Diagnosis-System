@@ -28,6 +28,13 @@ def _float_env(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
+    value = os.environ.get(name) or default
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+    return value
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -60,6 +67,9 @@ class Settings:
     deploy_lookback_minutes: float
     deploy_decay_minutes: float
     co_anomaly_window_seconds: float
+    ollama_timeout_seconds: float
+    retrieval_mode: str
+    retrieval_top_k: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -89,6 +99,12 @@ class Settings:
             # Anomalies with onsets this close are treated as one incident. Derived from t_onset
             # because M2's evidence_window is zero-width (issue #3).
             co_anomaly_window_seconds=_float_env("CO_ANOMALY_WINDOW_SECONDS", 120.0),
+            # Phase 0: a cold nomic-embed-text load took 27.5 s, so 60 s leaves room.
+            ollama_timeout_seconds=_float_env("OLLAMA_TIMEOUT_SECONDS", 60.0),
+            # Past-incident retrieval (app/retrieval.py). "vector" skips the structured pre-filter.
+            retrieval_mode=_choice_env("RETRIEVAL_MODE", "hybrid", ("hybrid", "vector")),
+            # Capped because retrieved incidents go into the 8K-token LLM prompt in Phase 6.
+            retrieval_top_k=_int_env("RETRIEVAL_TOP_K", 3),
         )
 
 

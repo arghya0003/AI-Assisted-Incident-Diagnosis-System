@@ -14,7 +14,8 @@ import psycopg2
 import psycopg2.errors
 from psycopg2.extras import Json
 
-from app.models import AnomalyEvent, Deploy
+from app.corpus import IncidentRecord
+from app.models import AnomalyEvent, Deploy, SimilarIncident
 from app.scoring import ScoringInputs
 from app.settings import Settings
 
@@ -40,6 +41,8 @@ def connect(settings: Settings, connect_timeout: int = 5):
         connect_timeout=connect_timeout,
     )
 
+
+# ------------------------------------------------------------------ anomalies
 
 _INSERT_ANOMALY = """
     INSERT INTO anomalies (anomaly_id, services, metrics, severity, t_detected, t_onset,
@@ -111,7 +114,8 @@ _DEPLOYS_BEFORE_ONSET = """
 def get_scoring_inputs(
     cur, anomaly_id: str, window_seconds: float, lookback_minutes: float
 ) -> ScoringInputs | None:
-    """Everything candidate scoring needs for one anomaly, read in one transaction."""
+    """Everything candidate scoring needs for one anomaly from the database, in one transaction.
+    Similar incidents are added separately, because retrieval also needs the embedding model."""
     anomaly = get_anomaly(cur, anomaly_id)
     if anomaly is None:
         return None
@@ -121,6 +125,96 @@ def get_scoring_inputs(
     columns = [column.name for column in cur.description]
     deploys = [Deploy.model_validate(dict(zip(columns, row))) for row in cur.fetchall()]
     return ScoringInputs(anomaly=anomaly, related=related, deploys=deploys)
+
+
+# ------------------------------------------------------------------ incidents
+
+
+def vector_literal(vector: list[float]) -> str:
+    """pgvector's text form, so no pgvector Python adapter is needed."""
+    return "[" + ",".join(repr(float(x)) for x in vector) + "]"
+
+
+_UPSERT_INCIDENT = """
+    INSERT INTO incidents (incident_id, title, body, services, fault_type, source, embedding)
+    VALUES (%(incident_id)s, %(title)s, %(body)s, %(services)s, %(fault_type)s, %(source)s,
+            %(embedding)s::vector)
+    ON CONFLICT (incident_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        body = EXCLUDED.body,
+        services = EXCLUDED.services,
+        fault_type = EXCLUDED.fault_type,
+        source = EXCLUDED.source,
+        embedding = EXCLUDED.embedding
+"""
+
+
+def upsert_incident(cur, record: IncidentRecord, vector: list[float]) -> None:
+    cur.execute(
+        _UPSERT_INCIDENT,
+        {
+            "incident_id": record.incident_id,
+            "title": record.title,
+            "body": record.body,
+            "services": record.services,
+            "fault_type": record.fault_type,
+            "source": record.source,
+            "embedding": vector_literal(vector),
+        },
+    )
+
+
+def delete_incidents_except(cur, keep_ids: list[str]) -> int:
+    """Remove incidents whose corpus file no longer exists. Returns the number deleted."""
+    cur.execute("DELETE FROM incidents WHERE NOT (incident_id = ANY(%s::text[]))", (list(keep_ids),))
+    return cur.rowcount
+
+
+def count_incidents(cur) -> int:
+    cur.execute("SELECT count(*) FROM incidents WHERE embedding IS NOT NULL")
+    return cur.fetchone()[0]
+
+
+# Hybrid keeps an incident if it names a candidate service OR its fault type fits the metrics.
+# A NULL services array or fault type simply fails its half of the filter.
+_SEARCH_INCIDENTS = """
+    SELECT incident_id, title, services, fault_type, source,
+           1 - (embedding <=> %(query)s::vector) AS similarity
+    FROM incidents
+    WHERE embedding IS NOT NULL
+      AND (NOT %(hybrid)s
+           OR services && %(services)s::text[]
+           OR fault_type = ANY(%(fault_types)s::text[]))
+    ORDER BY embedding <=> %(query)s::vector, incident_id
+    LIMIT %(top_k)s
+"""
+
+
+def search_incidents(
+    cur, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool
+) -> list[SimilarIncident]:
+    cur.execute(
+        _SEARCH_INCIDENTS,
+        {
+            "query": vector_literal(vector),
+            "services": list(services),
+            "fault_types": list(fault_types),
+            "top_k": top_k,
+            "hybrid": hybrid,
+        },
+    )
+    return [
+        SimilarIncident(
+            incident_id=incident_id,
+            title=title,
+            services=services or [],
+            fault_type=fault_type,
+            source=source,
+            # Float rounding can put an identical vector a hair outside [-1, 1].
+            similarity=max(-1.0, min(1.0, similarity)),
+        )
+        for incident_id, title, services, fault_type, source, similarity in cur.fetchall()
+    ]
 
 
 def missing_tables(cur) -> list[str]:
@@ -139,6 +233,12 @@ class AnomalyStore(Protocol):
     def scoring_inputs(
         self, anomaly_id: str, window_seconds: float, lookback_minutes: float
     ) -> ScoringInputs | None: ...
+
+    def incident_count(self) -> int: ...
+
+    def search_incidents(
+        self, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool
+    ) -> list[SimilarIncident]: ...
 
     def status(self) -> DbStatus: ...
 
@@ -178,6 +278,14 @@ class PostgresAnomalyStore:
         self, anomaly_id: str, window_seconds: float, lookback_minutes: float
     ) -> ScoringInputs | None:
         return self._query(get_scoring_inputs, anomaly_id, window_seconds, lookback_minutes)
+
+    def incident_count(self) -> int:
+        return self._query(count_incidents)
+
+    def search_incidents(
+        self, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool
+    ) -> list[SimilarIncident]:
+        return self._query(search_incidents, vector, services, fault_types, top_k, hybrid)
 
     def status(self) -> DbStatus:
         try:

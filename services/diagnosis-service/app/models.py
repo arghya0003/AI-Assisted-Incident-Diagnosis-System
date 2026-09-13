@@ -128,6 +128,19 @@ class Signals(BaseModel):
     incident_similarity: float = Field(ge=0.0, le=1.0)
 
 
+class SimilarIncident(BaseModel):
+    """A past incident returned by retrieval, with its cosine similarity to the anomaly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    incident_id: NonBlankId
+    title: str
+    services: list[str]  # where the root cause was
+    fault_type: str | None
+    source: str | None
+    similarity: float = Field(ge=-1.0, le=1.0)
+
+
 class Candidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -151,5 +164,8 @@ class CandidateReport(BaseModel):
     anomalous_services: list[str]  # this event's services plus those of related anomalies
     related_anomaly_ids: list[str]
     weights: dict[str, float]
+    # not_run | ok | empty_corpus | embedding_unavailable (app/retrieval.py)
+    retrieval_status: str
+    similar_incidents: list[SimilarIncident]
     candidates: list[Candidate]
     evidence: list[Evidence]

@@ -10,8 +10,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.db import DatabaseUnavailable
-from app.main import app, get_store
-from app.models import AnalyzeRequest, AnalyzeResponse, AnomalyEvent
+from app.main import app, get_embedder, get_store
+from app.models import AnalyzeRequest, AnalyzeResponse, AnomalyEvent, SimilarIncident
+from app.ollama import OllamaUnavailable
 
 client = TestClient(app)
 
@@ -202,6 +203,44 @@ def test_candidates_unknown_anomaly_is_404():
 def test_candidates_database_down_is_503():
     app.dependency_overrides[get_store] = UnavailableStore
     assert client.get("/candidates/anom-0001").status_code == 503
+
+
+PAST_INCIDENT = SimilarIncident(
+    incident_id="incident-0020",
+    title="reporting job exhausts catalogue-db connections",
+    services=["catalogue"],
+    fault_type="db_pool_saturation",
+    source="synthetic",
+    similarity=0.7,
+)
+
+
+def test_candidates_reports_an_empty_corpus():
+    body = client.get("/candidates/anom-0001").json()
+    assert body["retrieval_status"] == "empty_corpus"
+    assert body["similar_incidents"] == []
+
+
+def test_candidates_uses_retrieved_incidents(fake_store):
+    fake_store.incidents = [PAST_INCIDENT]
+    body = client.get("/candidates/anom-0001").json()
+    assert body["retrieval_status"] == "ok"
+    assert [i["incident_id"] for i in body["similar_incidents"]] == ["incident-0020"]
+    catalogue = next(c for c in body["candidates"] if c["service"] == "catalogue")
+    assert catalogue["signals"]["incident_similarity"] == 0.7
+
+
+def test_candidates_survives_an_unreachable_embedding_model(fake_store):
+    fake_store.incidents = [PAST_INCIDENT]
+
+    def down(texts):
+        raise OllamaUnavailable("connection refused")
+
+    app.dependency_overrides[get_embedder] = lambda: down
+    resp = client.get("/candidates/anom-0001")
+    assert resp.status_code == 200
+    assert resp.json()["retrieval_status"] == "embedding_unavailable"
+    assert all(c["signals"]["incident_similarity"] == 0.0 for c in resp.json()["candidates"])
 
 
 @pytest.mark.parametrize(

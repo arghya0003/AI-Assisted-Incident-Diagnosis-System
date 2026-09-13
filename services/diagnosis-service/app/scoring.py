@@ -10,17 +10,19 @@ everything they call within `max_hops`. Each candidate gets four signals in 0..1
 - co_anomaly: 1 if the candidate is the deepest anomalous service — anomalous itself (in this
   event, or in a related anomaly whose onset is within the window), with nothing it calls also
   anomalous. An anomalous service whose dependencies are anomalous too is more likely a symptom.
-- incident_similarity: filled in by retrieval in Phase 5; 0 until then.
+- incident_similarity: the highest cosine similarity among retrieved past incidents whose root
+  cause was in this candidate; 0 if none name it. A single anomaly-wide similarity would add the
+  same amount to every candidate and so could never change the ranking.
 
 score = weighted sum of the signals, with weights from settings. Every candidate cites the
 evidence behind its signals, and those evidence ids are what the LLM may later cite.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.graph import DEFAULT_MAX_HOPS, DependencyGraph
-from app.models import AnomalyEvent, Candidate, CandidateReport, Deploy, Evidence, Signals
+from app.models import AnomalyEvent, Candidate, CandidateReport, Deploy, Evidence, Signals, SimilarIncident
 from app.settings import Settings
 
 
@@ -78,6 +80,9 @@ class ScoringInputs:
     related: list[AnomalyEvent]
     # Deploys around the onset. Scoring applies the lookback window and per-service matching.
     deploys: list[Deploy]
+    # Past incidents from retrieval (app/retrieval.py); empty when retrieval didn't run or failed.
+    similar_incidents: list[SimilarIncident] = field(default_factory=list)
+    retrieval_status: str = "not_run"
 
 
 def score_candidates(inputs: ScoringInputs, graph: DependencyGraph, config: ScoringConfig) -> CandidateReport:
@@ -115,11 +120,12 @@ def score_candidates(inputs: ScoringInputs, graph: DependencyGraph, config: Scor
     scored = []
     for service, (hops, origin) in nearest.items():
         deploy, minutes = _latest_deploy(service, inputs.deploys, anomaly, config)
+        past_incidents = [incident for incident in inputs.similar_incidents if service in incident.services]
         signals = Signals(
             deploy_proximity=math.exp(-minutes / config.deploy_decay_minutes) if deploy else 0.0,
             graph_proximity=1.0 / (1 + hops),
             co_anomaly=1.0 if _is_deepest_anomalous(service, anomalous, graph, config.max_hops) else 0.0,
-            incident_similarity=0.0,
+            incident_similarity=max((_clip(incident.similarity) for incident in past_incidents), default=0.0),
         )
         score = sum(weight * getattr(signals, name) for name, weight in config.weights.items())
 
@@ -131,6 +137,8 @@ def score_candidates(inputs: ScoringInputs, graph: DependencyGraph, config: Scor
         for other in related:
             if service in other.services:
                 evidence_ids.append(cite(_anomaly_evidence(anomaly, other)))
+        for incident in past_incidents:
+            evidence_ids.append(cite(_incident_evidence(anomaly, incident)))
 
         scored.append(
             {
@@ -153,6 +161,8 @@ def score_candidates(inputs: ScoringInputs, graph: DependencyGraph, config: Scor
         anomalous_services=sorted(anomalous),
         related_anomaly_ids=[other.anomaly_id for other in related],
         weights=config.weights,
+        retrieval_status=inputs.retrieval_status,
+        similar_incidents=list(inputs.similar_incidents),
         candidates=[Candidate(rank=rank, **c) for rank, c in enumerate(scored, start=1)],
         evidence=sorted(evidence.values(), key=lambda item: (-item.relevance, item.evidence_id)),
     )
@@ -181,6 +191,10 @@ def _is_deepest_anomalous(service: str, anomalous: set[str], graph: DependencyGr
     if service not in graph:
         return True
     return not any(callee in anomalous for callee in graph.downstream(service, max_hops))
+
+
+def _clip(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def _evidence_id(incident: AnomalyEvent, category: str, source_id: str) -> str:
@@ -226,6 +240,26 @@ def _deploy_evidence(incident: AnomalyEvent, deploy: Deploy, minutes: float, rel
             "commit_sha": deploy.commit_sha,
             "config_diff": deploy.config_diff,
             "minutes_before_onset": round(minutes, 3),
+        },
+    )
+
+
+def _incident_evidence(incident: AnomalyEvent, past: SimilarIncident) -> Evidence:
+    return Evidence(
+        evidence_id=_evidence_id(incident, "similar_incident", past.incident_id),
+        incident_id=incident.anomaly_id,
+        category="similar_incident",
+        source_id=past.incident_id,
+        service=past.services[0] if len(past.services) == 1 else None,
+        observed_at=incident.t_onset,
+        relevance=_clip(past.similarity),
+        summary=f"Similar past incident {past.incident_id}: {past.title} (similarity {past.similarity:.2f})",
+        payload={
+            "title": past.title,
+            "services": past.services,
+            "fault_type": past.fault_type,
+            "source": past.source,
+            "similarity": past.similarity,
         },
     )
 

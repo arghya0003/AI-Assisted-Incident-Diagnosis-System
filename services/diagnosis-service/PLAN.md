@@ -595,6 +595,69 @@ fixture, the top-3 retrieved incidents are manually judged relevant, with the ju
 Pure-vector and hybrid results compared on at least two fixtures; hybrid is kept only if it is
 actually better.
 
+#### Phase 5 outcome (2026-09-13) — status: DONE (retrieval quality is modest; see the findings)
+
+| Check | Result |
+| --- | --- |
+| Corpus ingested | 61 incidents (35 synthetic, 26 public postmortems), all with 768-dim embeddings; re-running updates in place |
+| `db_pool_saturation` fixture (`anom-fx-07`), top 3 judged by hand | **2 relevant, 1 partly relevant.** Full judgement in `README.md` |
+| Pure vector vs hybrid | Compared on all 10 fixtures. They differ on one (`anom-fx-03`), where hybrid swaps an irrelevant incident about a different service for an in-scope one. Hybrid is kept, but only marginally better |
+| Retrieval inside `GET /candidates` | `retrieval_status: ok`; about 0.1 s per request including the embedding call; the matching candidate gets `incident_similarity` plus `similar_incident` evidence |
+| Ollama down | `/candidates` still returns 200 with `retrieval_status: embedding_unavailable` and similarity 0 (tested) |
+| Tests | 260 passed, 4 xfailed, inside the compose network |
+
+Decisions made while building, beyond what this section specified:
+
+- **Only the Symptoms section is embedded.** This is the most important change in the phase.
+  The first run embedded title plus full body and was poor: `anom-fx-07` retrieved no
+  connection-pool incident at all, and two short generic write-ups filled 14–16 of the 30 top-3
+  slots across fixtures. A controlled comparison (3 document forms × 2 query phrasings × 2 modes,
+  scored against the fixtures' known causes) picked symptoms-only by a wide margin:
+
+  | Documents (hybrid) | Exact cause in top 3 | Right fault type in top 3 | Generic "hub" incidents in top 3 |
+  | --- | --- | --- | --- |
+  | Title + full body | 4/10 | 13/30 | 14/30 |
+  | Title + symptoms | 5/10 | 10/30 | 11/30 |
+  | **Symptoms only** | **5/10** | **18/30** | **3/30** |
+
+  The reason: an anomaly query can only describe symptoms, while root-cause and resolution text
+  pulls a document towards things the query can never mention. Rephrasing the query did not
+  help. The full body is still stored, for the Phase 6 prompt.
+- **`incident_similarity` is per candidate**: the best similarity among retrieved incidents whose
+  root cause was in that service. The plan fed one "top similarity" into signal 4, but a value
+  shared by every candidate adds the same amount to each and can never change the ranking.
+- **Incident `services` names the root-cause service only**, never services that merely showed
+  symptoms, so an incident can't boost a symptom.
+- **Public postmortems name no Sock Shop services.** They pass the hybrid filter only by fault
+  type and never boost a candidate. The public list had no licence, so entries are paraphrases
+  that add nothing beyond the source summary and link the original.
+- **The corpus uses a wider fault-type vocabulary** than the injector's three (adding
+  `bad_deploy_errors`, `db_contention`, `capacity`, `config_error`, `dependency_failure` and
+  `benign`), so real postmortems are labelled honestly rather than forced into three boxes.
+- **Hybrid filter**: the candidate services (same set scoring uses) OR a fault type consistent
+  with the anomaly's metrics, via a deliberately generous lookup table in `app/retrieval.py`.
+- **nomic-embed-text task prefixes** (`search_query:` / `search_document:`) are used, as the model
+  requires.
+- **Retrieval never fails a request.** If Ollama is down, scoring runs without it and the
+  response says so; the deterministic baseline must not depend on the LLM host.
+- **The Ollama client retries transport errors and 5xx, but not 4xx**, per Phase 0 finding 3.
+  Phase 6 reuses it for generation.
+
+Findings:
+
+1. **Retrieval is only as informative as the anomaly.** M2's event carries service, metric and
+   severity, with no value, baseline or direction. An error-rate anomaly on `front-end` looks the
+   same whatever caused it, so the crash fixtures (`anom-fx-04/05/06`) retrieve generic crash
+   incidents for *other* services. Retrieval cannot fix the Phase 4 crash limitation.
+2. **Similarity scores are compressed** (roughly 0.63–0.77 for everything retrieved), so
+   `incident_similarity` contributes about 0.10–0.12 to any candidate an incident names, relevant
+   or not. It is a weak signal; Week 8 should consider rescaling it or lowering its weight.
+3. **Results are optimistic.** The synthetic incidents and the fixtures were written by the same
+   person from the same fault types, and the symptoms-only choice was selected on those fixtures.
+   No public postmortem reached a fixture's top 3. Week 8 should measure retrieval on real
+   injected faults or on held-out incidents, which depends on #6 (no standing traffic) being
+   resolved.
+
 ---
 
 ### Phase 6 — LLM reasoning
