@@ -115,31 +115,65 @@ first. Document whichever is done, because M1 hit the same constraint with `004_
 
 ### Phase 0 — Environment proof (do this first; it can invalidate later phases)
 
-1. `docker compose up -d` from a clean checkout; confirm M1's stack is healthy (22 containers, zero restarts).
-2. Confirm the data I depend on actually exists:
-   ```sql
-   SELECT count(*) FROM metrics;
-   SELECT * FROM deploys ORDER BY time DESC LIMIT 5;
-   SELECT * FROM evidence LIMIT 1;            -- expect 0 rows, but the table must exist
-   ```
-3. Read `anomalies.detected` directly to see M2's real output shape:
-   ```
-   docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-     --bootstrap-server kafka:9092 --topic anomalies.detected --from-beginning --max-messages 5
-   ```
-   If the topic does not exist, that is open item 4 above.
-4. Install Ollama on the host. `ollama pull phi4-mini` and `ollama pull nomic-embed-text`.
-5. **Benchmark `phi4-mini` on real hardware** and record the numbers in `README.md`: tokens/sec,
-   VRAM actually used (`nvidia-smi` during generation), and whether a roughly 2000-token prompt
-   with `format: json` returns valid JSON 10 times out of 10.
-6. Check pgvector:
-   ```sql
-   SELECT * FROM pg_available_extensions WHERE name = 'vector';
-   ```
+Two scripts automate the checks. They are read-only and create nothing:
 
-**Definition of done:** a written note in `README.md` stating — M1's stack runs; the four upstream
-tables/topics are reachable with the shapes CONTRACTS.md claims; `phi4-mini` benchmark numbers;
-pgvector available yes or no. Nothing is built yet, and that is correct.
+```
+bash   services/diagnosis-service/scripts/phase0_stack_check.sh
+python services/diagnosis-service/scripts/phase0_llm_bench.py
+```
+
+#### Host baseline (measured on this machine)
+
+| Item | Value | Consequence |
+| --- | --- | --- |
+| GPU | RTX 3050 Ti Laptop, **4096 MiB** | Confirms the 4 GB ceiling. `phi4-mini` at Q4 (~2.5 GB) plus `nomic-embed-text` (~300 MB) plus an 8K context fits; a 7B-or-larger model does not. |
+| System RAM | **15.2 GB** | M1's stack is 22 containers (Sock Shop + Kafka + TimescaleDB + Prometheus). Docker Desktop's WSL2 default is about half of RAM. Expect to need a `~/.wslconfig` with `memory=10GB` if the stack gets starved. |
+| Free disk | **49 GB of 323 GB** | Models are roughly 3 GB, images 5-6 GB. Enough, but not roomy — do not also keep a second model family around. |
+| Python | 3.12.0 | Fine. The benchmark script is stdlib-only so it runs before `requirements.txt` exists. |
+
+#### Steps
+
+1. **Start Docker Desktop**, then `docker compose up -d` from the repo root. Confirm M1's stack is
+   healthy: 22 containers, zero restarts.
+2. **Install Ollama** (`https://ollama.com/download`), then:
+   ```
+   ollama pull phi4-mini
+   ollama pull nomic-embed-text
+   ```
+3. **Set `OLLAMA_HOST=0.0.0.0` as a Windows user environment variable and restart Ollama.**
+   This is not optional and not cosmetic: on Windows, Ollama binds `127.0.0.1` by default, which a
+   container cannot reach *even through* `host.docker.internal`. Without it, `diagnosis-service`
+   gets connection-refused from inside Docker in Phase 1 and the cause is not obvious from the error.
+   `phase0_stack_check.sh` check 6 tests exactly this.
+4. **Run `phase0_stack_check.sh`.** It verifies: Docker up; container count and crash-loopers; the
+   `metrics`, `deploys`, `evidence`, `fault_scenarios` tables exist and are non-empty; metric
+   **freshness** (stale data looks like present data but silently breaks time-window queries); that
+   my own Phase 2 tables do *not* exist yet; pgvector availability; the three Kafka topics; a real
+   sample off `anomalies.detected`; and Ollama reachability from both the host and a container.
+5. **Run `phase0_llm_bench.py`.** It reports generation speed, `/analyze`-shaped latency, GPU-versus-CPU
+   placement, embedding dimensionality, and JSON validity over 10 runs on a prompt shaped like the real
+   Phase 6 one. It also previews the Phase 7 guardrail by counting runs that cited evidence IDs never
+   present in the prompt.
+6. **Paste both scripts' output into `README.md`.** Unrecorded benchmarks are not evidence.
+
+#### Things the scripts will likely flag, and what each means
+
+- **`anomalies.detected` missing.** It is not created in `kafka-init` in `docker-compose.yml`, so it
+  only springs into existence when M2 first publishes — with Kafka's default partitioning rather than
+  the `3 partitions, keyed by service` the other topics use. M1 already fixed one bug of exactly this
+  shape in Phase 6. This is open item 4; raise it rather than working around it.
+- **`anomalies.detected` empty.** M2 has not detected anything. Inject a fault with M1's harness on
+  port 5001 to generate real input.
+- **`deploys` empty.** `deploy-emitter` fabricates one every two minutes; wait, or `POST /deploys` on
+  port 5000.
+- **pgvector unavailable.** Expected on the plain `timescale/timescaledb` image. Take the NumPy path
+  in Phase 5; do not ask M1 to change the image for a 150-row corpus.
+- **Embedding dimension not 768.** Update the `vector(768)` comment in the Phase 2 schema to match reality.
+
+**Definition of done:** a written note in `README.md` stating — M1's stack runs; the upstream
+tables and topics are reachable with the shapes CONTRACTS.md claims; `phi4-mini` benchmark numbers
+(tok/s, latency, GPU placement, valid-JSON rate out of 10); pgvector available yes or no; and a
+container can reach Ollama. Nothing is built yet, and that is correct.
 
 ---
 
