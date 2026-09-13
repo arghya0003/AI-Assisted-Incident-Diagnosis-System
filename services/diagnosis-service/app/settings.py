@@ -18,6 +18,18 @@ def _int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be true or false, got {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     kafka_bootstrap: str
@@ -30,6 +42,7 @@ class Settings:
     llm_model: str
     embed_model: str
     llm_context_tokens: int
+    consumer_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -46,6 +59,8 @@ class Settings:
             embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
             # Phase 0: 8192 keeps prompt room with no measured latency cost over 4096.
             llm_context_tokens=_int_env("LLM_CONTEXT_TOKENS", 8192),
+            # The anomalies.detected consumer. Off in unit tests and when running without Kafka.
+            consumer_enabled=_bool_env("CONSUMER_ENABLED", True),
         )
 
 

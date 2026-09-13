@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "Ambiguous: carts and user slow at the same time with no fault injected",
+    "shape": "contract",
+    "fault_type": null,
+    "ground_truth_service": null,
+    "tags": ["ambiguous"],
+    "notes": "carts and user do not depend on each other. The system should report low confidence rather than invent a shared cause."
+  },
+  "anomaly_id": "anom-fx-10",
+  "services": ["carts", "user"],
+  "metrics": ["latency_p95_ms"],
+  "severity": "medium",
+  "t_detected": "2026-09-14T13:00:44.286Z",
+  "t_onset": "2026-09-14T13:00:15.930Z",
+  "evidence_window": { "start": "2026-09-14T12:55:15.930Z", "end": "2026-09-14T13:00:44.286Z" }
+}

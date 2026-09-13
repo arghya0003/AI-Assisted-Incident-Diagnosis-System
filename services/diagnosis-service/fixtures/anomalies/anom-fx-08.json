@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "Cascade: bad deploy to shipping slows orders, which slows front-end",
+    "shape": "contract",
+    "fault_type": "bad_deploy_latency",
+    "ground_truth_service": "shipping",
+    "tags": ["deploy-caused", "grouped", "cascade"],
+    "notes": "Three-hop chain front-end -> orders -> shipping. The most downstream anomalous service is the cause; orders and front-end are symptoms."
+  },
+  "anomaly_id": "anom-fx-08",
+  "services": ["front-end", "orders", "shipping"],
+  "metrics": ["latency_p99_ms", "latency_p95_ms"],
+  "severity": "high",
+  "t_detected": "2026-09-14T12:20:48.402Z",
+  "t_onset": "2026-09-14T12:20:06.771Z",
+  "evidence_window": { "start": "2026-09-14T12:15:06.771Z", "end": "2026-09-14T12:20:48.402Z" }
+}

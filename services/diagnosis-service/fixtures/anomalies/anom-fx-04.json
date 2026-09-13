@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "catalogue crashed; only its caller front-end reports errors",
+    "shape": "m2_current",
+    "fault_type": "service_crash",
+    "ground_truth_service": "catalogue",
+    "tags": ["root-cause-not-in-services", "no-deploy"],
+    "notes": "A stopped container stops exporting metrics, so the crashed service never appears in an anomaly itself; only its callers do. The dependency graph has to look downstream of front-end. anom-fx-06 has the identical symptom with a different cause."
+  },
+  "anomaly_id": "anom-fx-04",
+  "services": ["front-end"],
+  "metrics": ["error_rate"],
+  "severity": "high",
+  "t_detected": "2026-09-14T11:00:18.472Z",
+  "t_onset": "2026-09-14T11:00:18.466Z",
+  "evidence_window": { "start": "2026-09-14T11:00:18.466Z", "end": "2026-09-14T11:00:18.466Z" }
+}

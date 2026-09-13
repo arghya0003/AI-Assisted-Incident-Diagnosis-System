@@ -346,6 +346,48 @@ a config flag, not a rewrite.
 `anomalies` table; fixtures load and validate against the `AnomalyEvent` model; `/analyze`
 resolves a real `anomaly_id` and 404s an invented one.
 
+#### Phase 2 outcome (2026-09-13) — status: DONE
+
+| Check | Result |
+| --- | --- |
+| Migration | Applied to the existing dev volume with `docker compose exec -T timescaledb psql ... -f /docker-entrypoint-initdb.d/005_diagnosis.sql` (the command is in the SQL header and README). Created `anomalies`, `incidents`, `hypotheses`, plus pgvector 0.7.2. |
+| Real M2 anomalies stored | On first start, the consumer backfilled 184 events from the topic with 0 collisions and 0 malformed. After that, a new event was stored 2 ms after `t_detected`. |
+| Fixtures | 10 files load, validate against `AnomalyEvent`, and are stored with `source='fixture'` |
+| `/analyze` real id (`anom-1789296738161`) | 200, stub hypothesis naming `catalogue (latency_p95_ms)` |
+| `/analyze` fixture id (`anom-fx-08`) | 200 |
+| `/analyze` invented id | 404 |
+| Container | healthy, 0 restarts; `/health` reports `database: ok`, `consumer: running` |
+| Tests | 78 passed inside the compose network (`scripts/test_in_docker.sh`), including 12 real-database tests |
+
+Decisions made while building, beyond what this section specified:
+
+- **`anomalies.source` column (`kafka` or `fixture`).** Fixtures live in the same table as real
+  events so `/analyze` works on them, so evaluation needs a way to exclude them. Fixture ids also
+  start with `anom-fx-` so they can't clash with M2's `anom-<epoch ms>` ids.
+- **Index on `t_onset`, not `t_detected`.** Phase 4's co-anomaly lookup searches by onset.
+- **Never overwrite a stored anomaly.** A redelivered event is a `duplicate`, which is expected
+  with at-least-once Kafka. The same id with different content is a logged `collision`, and the
+  first event is kept (issue #4).
+- **Malformed events are logged and skipped, not retried.** Retrying would fail identically and
+  block every later anomaly on that partition.
+- **Kafka offsets are committed only after the database commit**, so a crash re-reads events
+  rather than losing them.
+- **`/health` stays 200 when the database is down** and reports it in a `database` field. A
+  restart can't fix a database outage, so failing the healthcheck would only add restart noise.
+  `/analyze` returns 503 in that case.
+- **Fixtures carry a `_fixture` block** with the true root cause, fault type and notes, so
+  Phases 3–6 can assert correctness rather than just shape. With that block removed, each file
+  is exactly M2's wire shape. The set deliberately includes a case where the root cause is not in
+  `services` (a crashed container stops exporting metrics), and a pair with an identical symptom
+  but different causes (`anom-fx-04` and `anom-fx-06`).
+- **The API opens a connection per request instead of using a pool.** `/analyze` runs at human
+  pace and will spend seconds in the LLM.
+
+Found on this machine: a **Windows PostgreSQL 18 service listens on port 5432**, so from the host
+`localhost:5432` is that server, not Docker's TimescaleDB. Services inside Docker are unaffected.
+Host-side database tests skip instead of failing, and `scripts/test_in_docker.sh` runs them
+inside the network. Stopping that Windows service is the owner's decision, so it was left running.
+
 ---
 
 ### Phase 3 — Dependency graph (deterministic, no LLM)

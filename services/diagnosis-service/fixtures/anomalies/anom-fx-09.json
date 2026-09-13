@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "Benign: memory_bytes alert on shipping with no fault injected",
+    "shape": "m2_current",
+    "fault_type": null,
+    "ground_truth_service": null,
+    "tags": ["benign", "issue-2"],
+    "notes": "Mirrors the memory_bytes false positives that make up most of M2's output today (issue #2). The correct result is low confidence and no_action; a confident rollback here is a false alarm."
+  },
+  "anomaly_id": "anom-fx-09",
+  "services": ["shipping"],
+  "metrics": ["memory_bytes"],
+  "severity": "medium",
+  "t_detected": "2026-09-14T12:40:55.063Z",
+  "t_onset": "2026-09-14T12:40:55.049Z",
+  "evidence_window": { "start": "2026-09-14T12:40:55.049Z", "end": "2026-09-14T12:40:55.049Z" }
+}

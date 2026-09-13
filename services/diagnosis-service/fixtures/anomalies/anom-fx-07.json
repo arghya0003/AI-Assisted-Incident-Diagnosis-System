@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "catalogue-db connection pool exhausted; catalogue errors and front-end slows",
+    "shape": "contract",
+    "fault_type": "db_pool_saturation",
+    "ground_truth_service": "catalogue",
+    "tags": ["grouped", "no-deploy"],
+    "notes": "No deploy is involved. deploy-emitter fabricates a deploy every two minutes, so an unrelated recent deploy is likely; it must not outrank the saturation, and rollback_deploy is the wrong action."
+  },
+  "anomaly_id": "anom-fx-07",
+  "services": ["catalogue", "front-end"],
+  "metrics": ["error_rate", "latency_p99_ms"],
+  "severity": "high",
+  "t_detected": "2026-09-14T12:00:37.590Z",
+  "t_onset": "2026-09-14T12:00:02.117Z",
+  "evidence_window": { "start": "2026-09-14T11:55:02.117Z", "end": "2026-09-14T12:00:37.590Z" }
+}

@@ -82,10 +82,12 @@ else
     fi
   done
 
-  # M3's own tables should NOT exist yet - Phase 2 creates them
+  # M3's own tables, created by Phase 2's 005_diagnosis.sql
   for T in anomalies incidents hypotheses; do
     if $PSQL "SELECT to_regclass('public.$T') IS NOT NULL" 2>/dev/null | grep -q '^t$'; then
-      warn "table '$T' already exists - Phase 2's 005_diagnosis.sql was applied already?"
+      ok "M3 table '$T' exists"
+    else
+      warn "M3 table '$T' not created yet - apply timescaledb/init/005_diagnosis.sql (see its header)"
     fi
   done
 

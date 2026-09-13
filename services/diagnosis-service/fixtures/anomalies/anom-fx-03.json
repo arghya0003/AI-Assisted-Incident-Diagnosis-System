@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "Bad deploy to payment, a leaf service, raises its p99 latency",
+    "shape": "m2_current",
+    "fault_type": "bad_deploy_latency",
+    "ground_truth_service": "payment",
+    "tags": ["deploy-caused", "leaf-service"],
+    "notes": "payment calls nothing, so there is no downstream service to blame. Medium severity: a smaller regression than anom-fx-01."
+  },
+  "anomaly_id": "anom-fx-03",
+  "services": ["payment"],
+  "metrics": ["latency_p99_ms"],
+  "severity": "medium",
+  "t_detected": "2026-09-14T10:40:30.918Z",
+  "t_onset": "2026-09-14T10:40:30.905Z",
+  "evidence_window": { "start": "2026-09-14T10:40:30.905Z", "end": "2026-09-14T10:40:30.905Z" }
+}

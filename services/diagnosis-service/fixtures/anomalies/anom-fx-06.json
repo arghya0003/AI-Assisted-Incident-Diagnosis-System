@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "carts crashed; front-end reports errors, the same symptom as anom-fx-04",
+    "shape": "m2_current",
+    "fault_type": "service_crash",
+    "ground_truth_service": "carts",
+    "tags": ["root-cause-not-in-services", "no-deploy", "same-symptom-as-fx-04"],
+    "notes": "The anomaly alone cannot separate this from anom-fx-04 (catalogue). Only other evidence, such as which downstream service stopped reporting metrics, can. A pipeline that ranks these two identically is guessing."
+  },
+  "anomaly_id": "anom-fx-06",
+  "services": ["front-end"],
+  "metrics": ["error_rate"],
+  "severity": "medium",
+  "t_detected": "2026-09-14T11:40:03.215Z",
+  "t_onset": "2026-09-14T11:40:03.208Z",
+  "evidence_window": { "start": "2026-09-14T11:40:03.208Z", "end": "2026-09-14T11:40:03.208Z" }
+}

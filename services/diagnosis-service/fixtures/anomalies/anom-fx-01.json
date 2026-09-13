@@ -1,0 +1,17 @@
+{
+  "_fixture": {
+    "description": "Bad deploy to catalogue raises its p95 latency",
+    "shape": "m2_current",
+    "fault_type": "bad_deploy_latency",
+    "ground_truth_service": "catalogue",
+    "tags": ["deploy-caused"],
+    "notes": "The fault injector records a catalogue deploy immediately before throttling its CPU, so the deploy precedes onset by seconds. The expected top hypothesis is rollback_deploy of that deploy."
+  },
+  "anomaly_id": "anom-fx-01",
+  "services": ["catalogue"],
+  "metrics": ["latency_p95_ms"],
+  "severity": "high",
+  "t_detected": "2026-09-14T10:00:12.352Z",
+  "t_onset": "2026-09-14T10:00:12.340Z",
+  "evidence_window": { "start": "2026-09-14T10:00:12.340Z", "end": "2026-09-14T10:00:12.340Z" }
+}

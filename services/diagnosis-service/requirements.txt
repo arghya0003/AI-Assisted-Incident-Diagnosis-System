@@ -1,3 +1,6 @@
 fastapi==0.115.6
 uvicorn==0.32.1
 pydantic==2.10.4
+# Same versions metrics-sink uses.
+psycopg2-binary==2.9.9
+kafka-python-ng==2.2.3

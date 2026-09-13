@@ -8,23 +8,44 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 1 — skeleton service. `POST /analyze` returns a contract-shaped **stub**
-(marked `[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`) so M4 can build against
-the real endpoint now. No diagnosis logic yet.
+**Status:** Phase 2 — storage and fixtures. A background consumer stores every
+`anomalies.detected` event in the `anomalies` table, and `POST /analyze` looks the anomaly up
+there (404 if unknown). The hypothesis itself is still a **stub** (marked `[stub]`,
+confidence 0, `no_action`, `X-Diagnosis-Mode: stub`). No diagnosis logic yet.
 
 ## API
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
-| `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode"}` |
+| `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
 
-Interactive docs: `http://localhost:8000/docs`. Malformed requests return 422.
+Interactive docs: `http://localhost:8000/docs`.
+
+| `/analyze` status | Meaning |
+| --- | --- |
+| 200 | anomaly found; hypotheses returned |
+| 404 | no anomaly with this id has been received |
+| 422 | malformed request body |
+| 503 | TimescaleDB unreachable, or `005_diagnosis.sql` not applied |
+
+`/health` returns 200 whenever the process is up. `database` is `ok`, `unreachable` or
+`schema_missing`, and `consumer` is `running`, `connecting` or `disabled`, so an outage is
+visible without the container being restarted for something a restart can't fix.
 
 `proposed_action` is one of `rollback_deploy:<deploy_id>`, `restart_service:<service>`,
 `scale_service:<service>`, or `no_action`. The vocabulary is still to be confirmed with M4.
 
 ## Run
+
+**Database migration.** `timescaledb/init/005_diagnosis.sql` runs automatically only on a
+fresh TimescaleDB volume. On an existing one, apply it once (safe to re-run):
+
+```
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/005_diagnosis.sql
+```
+
+In Git Bash, prefix the command with `MSYS_NO_PATHCONV=1`.
 
 **With the whole stack** (from the repo root):
 
@@ -39,15 +60,32 @@ curl localhost:8000/health
 python -m venv .venv
 .venv\Scripts\activate            # Windows; use: source .venv/bin/activate elsewhere
 pip install -r requirements-dev.txt
+set CONSUMER_ENABLED=false        # no Kafka outside Docker
 uvicorn app.main:app --port 8000
 ```
 
-**Tests:** `python -m pytest` from `services/diagnosis-service/`.
+**Tests.** From the repo root with the stack up:
+
+```
+bash services/diagnosis-service/scripts/test_in_docker.sh              # all tests
+bash services/diagnosis-service/scripts/test_in_docker.sh --fixtures   # tests, then load fixtures
+```
+
+`python -m pytest` from the host also works, but the database tests in `tests/test_db.py` skip
+unless `localhost:5432` really is Docker's TimescaleDB. On this dev machine a Windows
+PostgreSQL service owns port 5432, so the script runs the tests inside the compose network
+instead. Database tests roll back and leave nothing behind.
+
+**Fixtures.** `fixtures/anomalies/anom-fx-01..10.json` are hand-written anomaly events, each with
+a `_fixture` block recording the injected fault and true root cause. Load them with
+`--fixtures` above so `/analyze` accepts their ids. They are stored with `source='fixture'`,
+which evaluation must exclude, and re-loading replaces them.
 
 **Configuration** — environment variables, defaults in `app/settings.py`:
 `KAFKA_BOOTSTRAP`, `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
-`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`. The container reaches Ollama on the host via
-`host.docker.internal`, which requires Ollama to listen on `0.0.0.0` (`OLLAMA_HOST`).
+`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`, `CONSUMER_ENABLED` (default `true`). The
+container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
+on `0.0.0.0` (`OLLAMA_HOST`).
 
 ---
 

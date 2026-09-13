@@ -1,4 +1,7 @@
-"""Phase 1: the wire contract from CONTRACTS.md, and the /health and /analyze endpoints."""
+"""The wire contract from CONTRACTS.md, and the /health and /analyze endpoints.
+
+Endpoint tests use the in-memory store from conftest.py, which holds anom-0001 only.
+"""
 
 import copy
 
@@ -6,7 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.main import app
+from app.db import DatabaseUnavailable
+from app.main import app, get_store
 from app.models import AnalyzeRequest, AnalyzeResponse, AnomalyEvent
 
 client = TestClient(app)
@@ -128,6 +132,8 @@ def test_health():
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert resp.json()["pipeline_mode"] == "stub"
+    assert resp.json()["database"] == "ok"
+    assert resp.json()["consumer"] == "disabled"
 
 
 def test_analyze_returns_contract_shape():
@@ -147,6 +153,32 @@ def test_analyze_stub_is_honest():
     assert hypothesis["proposed_action"] == "no_action"
     # Cites only the anomaly it was asked about, never invented evidence.
     assert hypothesis["evidence_ids"] == ["anom-0001"]
+
+
+def test_analyze_uses_the_stored_anomaly():
+    cause = client.post("/analyze", json={"anomaly_id": "anom-0001"}).json()["hypotheses"][0]["cause"]
+    assert "catalogue, front-end" in cause
+
+
+def test_analyze_unknown_anomaly_is_404():
+    resp = client.post("/analyze", json={"anomaly_id": "anom-invented-9999"})
+    assert resp.status_code == 404
+    assert "anom-invented-9999" in resp.json()["detail"]
+
+
+def test_analyze_database_down_is_503():
+    class UnavailableStore:
+        def get(self, anomaly_id):
+            raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+
+        def status(self):
+            return "unreachable"
+
+    app.dependency_overrides[get_store] = UnavailableStore
+    assert client.post("/analyze", json={"anomaly_id": "anom-0001"}).status_code == 503
+    health = client.get("/health")
+    assert health.status_code == 200  # a DB outage must not fail the container healthcheck
+    assert health.json()["database"] == "unreachable"
 
 
 @pytest.mark.parametrize(
