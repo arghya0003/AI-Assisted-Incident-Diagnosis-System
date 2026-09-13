@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 
 from app.consumer import AnomalyConsumer
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
+from app.graph import load_graph
 from app.models import NO_ACTION, AnalyzeRequest, AnalyzeResponse, Hypothesis
 from app.settings import settings
 
@@ -24,6 +25,9 @@ SERVICE_VERSION = "0.2.0"
 # mistaken for a real diagnosis. Becomes full/llm_only/no_graph/deterministic in Phase 8.
 PIPELINE_MODE = "stub"
 
+# Loaded at import so a broken or missing YAML stops the container at startup, not on the
+# first /analyze.
+graph = load_graph()
 store = PostgresAnomalyStore(settings)
 consumer = AnomalyConsumer(settings)
 
@@ -40,6 +44,7 @@ async def lifespan(_app: FastAPI):
         settings.llm_context_tokens,
         settings.consumer_enabled,
     )
+    log.info("dependency graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges))
     if settings.consumer_enabled:
         consumer.start()
     yield

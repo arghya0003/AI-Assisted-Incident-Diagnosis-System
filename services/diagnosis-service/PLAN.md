@@ -424,6 +424,37 @@ edges:
 `catalogue-db` at distance 2, `upstream('catalogue-db')` includes `edge-router` at distance 3, and
 `rabbitmq` is not reachable from `catalogue`. All pass.
 
+#### Phase 3 outcome (2026-09-13) — status: DONE
+
+| Check | Result |
+| --- | --- |
+| Definition-of-done assertions | All three pass: `catalogue-db` is 2 hops below `front-end`; `edge-router` is 3 hops above `catalogue-db`; `rabbitmq` is unreachable from `catalogue`. |
+| YAML equals the contract | A test holds its own copy of CONTRACTS.md's 14 edges and fails if the YAML drifts |
+| True cause is always a candidate | For all 8 fixtures that have a ground truth, the true cause is an anomalous service or within 3 hops downstream of one. This includes `anom-fx-04/05/06`, where it is absent from `services`. |
+| Real data | All 7 services M2 has raised anomalies on are graph nodes |
+| Container | loads the graph at startup (`14 nodes, 14 edges`); healthy, 0 restarts |
+| Tests | 114 passed inside the compose network |
+
+Decisions made while building, beyond what this section specified:
+
+- **Node kinds** (`gateway`, `service`, `datastore`, `broker`), transcribed from CONTRACTS.md's
+  annotations (Traefik, MySQL, Mongo). Declaring nodes also lets the loader reject an edge with a
+  misspelled service name. Phase 4 can use the kinds to decide which `proposed_action` targets
+  make sense.
+- **`distance(a, b)` is directed** (caller to callee), matching the definition of done, where
+  `rabbitmq` is unreachable from `catalogue` even though an undirected path exists.
+- **Unknown service names raise `UnknownService`** rather than returning an empty result, so
+  Phase 4 must decide explicitly what to do with a service M2 reports that isn't in the graph.
+- **Traversal order is deterministic** (breadth-first, sorted neighbours), so candidate lists
+  and their evidence are reproducible run to run.
+- **The graph loads at import time** in `main.py`, so a broken YAML stops the container at
+  startup instead of failing the first `/analyze`.
+
+Caveat for the team: in `docs/phase0-decisions.md`, M1 confirmed most edges from the images'
+config, but `orders -> payment`, `orders -> shipping` and `orders -> user` are taken from the
+standard Sock Shop reference architecture. They are the least verified edges, and `anom-fx-05`
+and `anom-fx-08` depend on them.
+
 ---
 
 ### Phase 4 — Candidate scoring (deterministic, no LLM) — review this diff carefully

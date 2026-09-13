@@ -4,3 +4,4 @@ pydantic==2.10.4
 # Same versions metrics-sink uses.
 psycopg2-binary==2.9.9
 kafka-python-ng==2.2.3
+pyyaml==6.0.2

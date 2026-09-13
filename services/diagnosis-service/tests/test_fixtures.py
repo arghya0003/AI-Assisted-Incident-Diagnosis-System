@@ -4,14 +4,10 @@ later phases are developed against."""
 import pytest
 
 from app.fixtures import FIXTURE_ID_PREFIX, load_fixtures
+from app.graph import load_graph
 
 FIXTURES = load_fixtures()
-
-# Every node in CONTRACTS.md's "Service dependency graph".
-GRAPH_SERVICES = {
-    "edge-router", "front-end", "catalogue", "catalogue-db", "carts", "carts-db", "orders",
-    "orders-db", "payment", "shipping", "user", "user-db", "rabbitmq", "queue-master",
-}
+GRAPH = load_graph()
 # Metrics metrics-bridge publishes (services/metrics-bridge/main.py, METRIC_QUERIES).
 METRIC_NAMES = {
     "request_rate", "error_rate", "latency_p50_ms", "latency_p95_ms", "latency_p99_ms",
@@ -39,7 +35,7 @@ def test_ids_are_unique_prefixed_and_match_filenames():
 
 @pytest.mark.parametrize("fixture", FIXTURES, ids=_ids(FIXTURES))
 def test_fixture_uses_real_names(fixture):
-    assert set(fixture.event.services) <= GRAPH_SERVICES
+    assert set(fixture.event.services) <= GRAPH.nodes
     assert set(fixture.event.metrics) <= METRIC_NAMES
     assert fixture.event.severity in {"high", "medium"}  # what the detector emits today
     if fixture.meta.ground_truth_service is not None:

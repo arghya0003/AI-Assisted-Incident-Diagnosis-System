@@ -8,10 +8,13 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 2 — storage and fixtures. A background consumer stores every
+**Status:** Phase 3 — dependency graph. A background consumer stores every
 `anomalies.detected` event in the `anomalies` table, and `POST /analyze` looks the anomaly up
-there (404 if unknown). The hypothesis itself is still a **stub** (marked `[stub]`,
-confidence 0, `no_action`, `X-Diagnosis-Mode: stub`). No diagnosis logic yet.
+there (404 if unknown). `app/graph.py` loads the Sock Shop call graph from
+`config/dependency_graph.yaml` and answers "what does this service call" (root-cause
+candidates) and "who calls it" (blast radius). The hypothesis itself is still a **stub**
+(marked `[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`); scoring arrives in
+Phase 4.
 
 ## API
 
