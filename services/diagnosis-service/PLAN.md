@@ -199,6 +199,22 @@ Findings that change later phases:
    in Phase 6, so it still belongs in `kafka-init`.
 7. **The stack check script needed `MSYS_NO_PATHCONV=1`** — Git Bash rewrote `/opt/kafka/...` into a
    Windows path before it reached the container. Fixed in the script.
+8. **M2's detector floods on `memory_bytes`** — 140 of 157 anomalies over two hours with no fault
+   injected, about 78 alerts/hour. Until fixed, M3 should expect most `/analyze` calls to be noise,
+   and the co-anomaly signal is unreliable because many services look anomalous at once.
+
+Findings 4, 5, 6 and 8 belong to other members and are recorded as GitHub issues rather than worked
+around silently or fixed unilaterally:
+
+| Finding | Issue | Owner |
+| --- | --- | --- |
+| 8 — `memory_bytes` false-positive flood | [#2](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/2) | M2 |
+| 4 — zero-width `evidence_window` | [#3](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/3) | M2 |
+| 5 — no anomaly grouping, `anomaly_id` collision risk | [#4](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/4) | M2 |
+| 6 — `anomalies.detected` missing from `kafka-init` | [#5](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/5) | M1 |
+
+M3's workarounds for 4 and 5 (derive windows from `t_onset`; group same-onset anomalies when scoring)
+are temporary and should be removed once the corresponding issue is closed.
 
 ---
 
