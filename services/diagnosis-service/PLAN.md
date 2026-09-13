@@ -532,8 +532,9 @@ Findings:
    the top candidate got a deploy score of 0.41 from a routine background deploy. Injected
    deploys land seconds before onset (score about 1.0) and still stand out. But a background
    deploy to a *symptom* service within about 7 minutes of onset outranks a no-deploy cause
-   (the `anom-fx-07` xfail). This is Week 8 weight tuning. Ask M1 whether this deploy rate is
-   intended for evaluation runs.
+   (the `anom-fx-07` xfail). This is Week 8 weight tuning. Asked M1 whether this deploy rate is
+   intended for evaluation runs:
+   [#7](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/7).
 2. **The live bad-deploy injection produced no symptom.** `bad_deploy_latency` on `catalogue`
    (60 s at 5% CPU, scenario `scn-bad-deploy-latency-1789299649`) recorded its deploy
    (`dep-2026-09-13-0107`), but catalogue p95 stayed at 4.8 ms at about 0.2 requests/s, and M2
@@ -545,8 +546,9 @@ Findings:
    - no load-generator container was running (M1 dropped `user-sim` in Phase 0).
 
    So end-to-end ranking on live data is
-   **not verified yet**, and the fixture tests are the evidence. Raise with M1 and M2 before the
-   evaluation weeks, because detection and diagnosis both depend on faults being visible.
+   **not verified yet**, and the fixture tests are the evidence. Raised with M1 as
+   [#6](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/6), because
+   detection and diagnosis both depend on faults being visible.
 3. **The memory flood reaches the co-anomaly set.** That real catalogue anomaly had 5 related
    anomalies within ±2 min (carts, orders and shipping `memory_bytes`). They add no candidates,
    but they can mark a downstream service co-anomalous (issue #2).
