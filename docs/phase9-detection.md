@@ -166,6 +166,33 @@ correlation. There is a test asserting the window can only ever raise the bar.
 traffic with no diurnal or weekly cycle, so a time-of-day baseline would be modelling noise
 and could not be validated. Building it would be untested ceremony. Recorded as a known gap.
 
+## A durable record: the `anomalies` table
+
+`anomalies.detected` is a 24h Kafka stream, so an anomaly cannot be looked up by ID
+once it has scrolled past — yet M3's `POST /analyze {anomaly_id}` is exactly that
+lookup. `store.py` therefore writes every emitted event to TimescaleDB's `anomalies`
+table (`timescaledb/init/005_anomalies.sql`) under the same `anomaly_id`.
+
+The table came from a parallel M2 implementation (8 Sep) that was otherwise
+superseded by this one; its schema already fit these events, so it was kept as-is.
+
+Two properties are deliberate:
+
+- **Kafka first, database second.** The write happens after the publish and never
+  raises. A database outage costs the durable copy, not the alert — M4 still hears
+  about the incident.
+- **Re-sending is harmless.** Inserts use `ON CONFLICT (anomaly_id) DO NOTHING`.
+
+Only the live detector writes to the table. `replay` runs are offline experiments and
+leave it alone, so the table is a record of what the deployed system actually said.
+
+The init script only runs when the database volume is first created. On an existing
+volume, apply it once:
+
+```
+docker compose exec -T timescaledb psql -U postgres -d metrics < timescaledb/init/005_anomalies.sql
+```
+
 ## Evaluation harness
 
 `services/evaluation-runner/` — two modes, because they answer different questions.
@@ -221,7 +248,7 @@ previous one, which would look like a detector miss rather than a harness artefa
 
 ## Tests
 
-93 tests, no Docker required: `python -m pytest tests` in either service directory.
+99 tests, no Docker required: `python -m pytest tests` in either service directory.
 
 `services/evaluation-runner/tests/test_replay.py` is the end-to-end one — it generates a
 synthetic metric stream with a known fault and runs the real detector, real grouper and

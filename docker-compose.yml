@@ -280,8 +280,14 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
       DETECTOR: ewma
       REQUIRED_BREACHES: "2"
       WARMUP_SAMPLES: "10"

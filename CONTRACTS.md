@@ -117,6 +117,14 @@ that have stopped reporting. Those events carry `"liveness"` in `metrics[]` and
 M3 should read the gap in that service's samples as the evidence, and
 `t_onset` marks when the data stopped.
 
+**Durable copy: the `anomalies` table.** Every event published here is also
+written to TimescaleDB's `anomalies` table (`timescaledb/init/005_anomalies.sql`)
+under the same `anomaly_id`, so M3 can resolve `POST /analyze {anomaly_id}` long
+after the event has left the 24h topic. The frozen fields have columns of their
+own; `contributors`, `in_deploy_window` and `related_deploy_ids` are kept whole
+in a `detail` JSONB column. Kafka remains the live contract: the table is written
+after the publish, and a failed write never holds an alert back.
+
 ## Evidence model
 
 Evidence is the common structure M3 uses to explain a diagnosis. Each evidence item
@@ -161,7 +169,7 @@ The five categories map to current and planned sources as follows:
 
 | Category | Source |
 | --- | --- |
-| `anomaly` | M2 `anomalies.detected` |
+| `anomaly` | M2 `anomalies.detected`, durable copy in the `anomalies` table |
 | `metrics` | TimescaleDB `metrics` / `metrics_1m` |
 | `deployment` | TimescaleDB `deploys` / `deploys.events` |
 | `dependency` | Service dependency graph above |

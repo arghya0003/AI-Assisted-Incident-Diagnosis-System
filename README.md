@@ -135,7 +135,10 @@ reasoning behind each decision are in [docs/phase9-detection.md](docs/phase9-det
 - **`staleness.py`** — liveness. A crashed container disappears from Prometheus, so it
   emits *no* telemetry rather than bad telemetry; every per-sample detector is blind to it.
   Silence from a previously-healthy service is treated as its own high-severity signal.
-- **`main.py`** — Kafka wiring only.
+- **`store.py`** — writes every emitted event to the `anomalies` table so M3 can look an
+  anomaly up by ID after it has left the 24h Kafka topic. Written after the Kafka publish
+  and never raises, so a database outage cannot hold an alert back.
+- **`main.py`** — Kafka and database wiring only.
 
 Three real bugs found and regression-tested: error-rate anomalies could never fire (a fixed
 noise floor put 3-sigma above a ratio's maximum), a sustained fault was absorbed into the
@@ -164,10 +167,10 @@ root-cause accuracy, MRR, evidence validity — are implemented and tested but r
 "not measured" rather than a zero that would read as a measured failure.
 
 ### Tests
-93 tests, no Docker needed:
+99 tests, no Docker needed:
 
 ```bash
-cd services/anomaly-detector   && python -m pytest tests -q   # 53
+cd services/anomaly-detector   && python -m pytest tests -q   # 59
 cd services/evaluation-runner  && python -m pytest tests -q   # 40
 ```
 

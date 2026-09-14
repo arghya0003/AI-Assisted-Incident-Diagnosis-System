@@ -1,14 +1,21 @@
--- Grouped anomaly detections from both of M2's detectors (EWMA and the
--- frozen static-threshold comparison baseline - see
--- services/anomaly-detector/main.py). One row per flush-window group, not
--- one row per raw (service, metric) trip. `detector` distinguishes which
--- algorithm produced the row so the evaluation runner
--- (services/eval-runner/) can score them independently for the EWMA-vs-
--- static ablation the project plan asks for.
+-- Durable record of every anomalies.detected event, one row per grouped
+-- incident, keyed by the same anomaly_id. Written by
+-- services/anomaly-detector/store.py right after each Kafka publish.
 --
--- Only the `ewma` rows are also published to the anomalies.detected Kafka
--- topic (the contract M4 builds against, per CONTRACTS.md) - this table is
--- the durable, queryable record both detectors write to regardless.
+-- Why it exists: a Kafka topic is a 24h stream, so nothing can look an
+-- anomaly up by ID once it scrolls past - and M3's POST /analyze
+-- {anomaly_id} needs exactly that lookup. Kafka stays the live contract
+-- M4 consumes; this table is the queryable copy.
+--
+-- `detector` is the algorithm that produced the event (ewma, zscore, cusum,
+-- static, or staleness for a service that stopped reporting). `detail`
+-- holds the event's additive fields whole - contributors,
+-- in_deploy_window, related_deploy_ids - so a new field on the event needs
+-- no schema change.
+--
+-- Runs automatically only when the database volume is first created. On an
+-- existing volume, apply it once by hand:
+--   docker compose exec -T timescaledb psql -U postgres -d metrics < timescaledb/init/005_anomalies.sql
 --
 -- Same timescaledb/metrics instance as `metrics`, `deploys`, and
 -- `fault_scenarios` - one Time-Series Store, per the architecture diagram.

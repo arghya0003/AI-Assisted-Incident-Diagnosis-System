@@ -3,7 +3,8 @@ Anomaly detection service (M2).
 
 Consumes `metrics.raw`, runs a per-(service, metric) drift detector, groups
 correlated breaches into a single incident, and publishes to
-`anomalies.detected` in the CONTRACTS.md shape.
+`anomalies.detected` in the CONTRACTS.md shape. Each event is also recorded
+in the `anomalies` table so it can be looked up by ID later (store.py).
 
 The detector itself is swappable via the DETECTOR env var (ewma, zscore,
 cusum, static) so the evaluation runner can measure one against another. See
@@ -17,6 +18,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaConnectionError
 
@@ -24,6 +26,7 @@ from detectors import Detector, build_detector
 from deploy_window import DeployWindowTracker, consume_deploys
 from grouping import AnomalyGrouper, parse_ts
 from staleness import StalenessMonitor
+from store import AnomalyStore
 
 try:
     from kafka.errors import NoBrokersAvailable
@@ -54,6 +57,12 @@ STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_SECONDS", "30"))
 # Metrics with no meaningful "too high" reading. request_rate moves with
 # ordinary traffic, so alerting on it produces noise, not incidents.
 IGNORED_METRICS = {m for m in os.environ.get("IGNORED_METRICS", "request_rate").split(",") if m}
+
+PG_HOST = os.environ.get("PG_HOST", "timescaledb")
+PG_PORT = os.environ.get("PG_PORT", "5432")
+PG_DB = os.environ.get("PG_DB", "metrics")
+PG_USER = os.environ.get("PG_USER", "postgres")
+PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 
 
 def now_utc() -> datetime:
@@ -94,9 +103,22 @@ def connect_kafka_producer() -> KafkaProducer:
             time.sleep(3)
 
 
+def connect_postgres():
+    # One attempt with a short timeout, unlike the Kafka connections above:
+    # AnomalyStore retries on the next event, and a slow database must not
+    # stall the alerting loop.
+    conn = psycopg2.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
+        user=PG_USER, password=PG_PASSWORD, connect_timeout=3,
+    )
+    conn.autocommit = True
+    return conn
+
+
 def run():
     consumer = connect_kafka_consumer()
     producer = connect_kafka_producer()
+    store = AnomalyStore(connect_postgres)
 
     tracker = DeployWindowTracker(window_seconds=DEPLOY_WINDOW_SECONDS)
     stop = threading.Event()
@@ -165,6 +187,8 @@ def run():
         for event in grouper.flush(tick):
             producer.send(OUTPUT_TOPIC, key=event["services"][0], value=event)
             producer.flush()
+            # After the publish, so the alert reaches M4 even if this fails.
+            store.save(event)
             log.info(
                 "emitted %s severity=%s services=%s metrics=%s (%d contributing signals)",
                 event["anomaly_id"], event["severity"], event["services"],
