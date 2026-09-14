@@ -16,9 +16,9 @@ testbed/
 *.py[cod]
 .pytest_cache/
 
-# eval-runner output (regenerate with: docker compose --profile eval run --rm eval-runner)
-eval-results/*
-!eval-results/.gitkeep
+# Evaluation output. Regenerable from a single command, and a committed run
+# would go stale immediately - quote numbers in the report, don't version them.
+results/
 
 # IDE
 .idea/

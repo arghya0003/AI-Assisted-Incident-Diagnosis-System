@@ -1,54 +1,33 @@
 """
-Anomaly detection (M2, Phase 1). Consumes metrics.raw, runs two independent
-per-(service, metric) detectors side by side - an adaptive EWMA z-score
-detector and a frozen static-threshold detector - so the evaluation runner
-(services/eval-runner/) can score EWMA against a real comparison baseline
-instead of just asserting it works.
+Anomaly detection service (M2).
 
-Design decisions, in one place rather than scattered as inline comments:
+Consumes `metrics.raw`, runs a per-(service, metric) drift detector, groups
+correlated breaches into a single incident, and publishes to
+`anomalies.detected` in the CONTRACTS.md shape. Each event is also recorded
+in the `anomalies` table so it can be looked up by ID later (store.py).
 
-- Grouping/dedup: a single fault typically trips several (service, metric)
-  pairs within the same few seconds (metrics-bridge scrapes every 5s - see
-  CONTRACTS.md). Raw per-metric detections are buffered and flushed every
-  FLUSH_INTERVAL_SECONDS into one anomalies.detected event per flush, with
-  services[]/metrics[] deduped - not fifteen separate alerts. This matches
-  the plan's explicit ask ("emit one anomaly event with a member list").
-- Deploy-window suppression: a real deploy can cause a brief, benign metric
-  blip (connection warm-up, JIT warm-up, cache misses) that isn't the kind
-  of anomaly this system should alert a human about. Detections for a
-  service are suppressed for DEPLOY_SETTLE_WINDOW_SECONDS after that
-  service's most recent deploy (tracked by consuming deploys.events). This
-  is a settle window, not a baseline reset: a fault that starts at deploy
-  time (like the bad_deploy_latency fault scenario) and persists past the
-  settle window still fires - it costs that fault type a bit of extra
-  detection latency, which the evaluation report should show honestly
-  rather than hide.
-- Seasonality suppression (day/week cyclic baselines) is explicitly NOT
-  implemented: this testbed has no real diurnal/weekly traffic pattern to
-  suppress against, and faking one would just be a made-up detector with
-  nothing real to validate it. Documented gap, not a silent one - revisit
-  if the testbed ever runs long enough to have real seasonality.
-- Only the EWMA detector's grouped anomalies are published to
-  anomalies.detected (the contract M4 builds against). Both detectors'
-  grouped anomalies are persisted to the `anomalies` table
-  (timescaledb/init/005_anomalies.sql), tagged by `detector`, which is what
-  the evaluation runner reads to compare them.
+The detector itself is swappable via the DETECTOR env var (ewma, zscore,
+cusum, static) so the evaluation runner can measure one against another. See
+detectors.py for why that swap-ability is load-bearing rather than decorative.
 """
 
+import os
 import json
 import logging
-import math
-import os
-import random
-import statistics
 import threading
 import time
-from dataclasses import dataclass, field
+import uuid
 from datetime import datetime, timezone
 
 import psycopg2
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaConnectionError
+
+from detectors import Detector, build_detector
+from deploy_window import DeployWindowTracker, consume_deploys
+from grouping import AnomalyGrouper, parse_ts
+from staleness import StalenessMonitor
+from store import AnomalyStore
 
 try:
     from kafka.errors import NoBrokersAvailable
@@ -59,10 +38,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("anomaly-detector")
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
-METRICS_TOPIC = "metrics.raw"
-DEPLOYS_TOPIC = "deploys.events"
-ANOMALIES_TOPIC = "anomalies.detected"
+INPUT_TOPIC = "metrics.raw"
+OUTPUT_TOPIC = "anomalies.detected"
 GROUP_ID = "anomaly-detector"
+
+DETECTOR_KIND = os.environ.get("DETECTOR", "ewma")
+REQUIRED_BREACHES = int(os.environ.get("REQUIRED_BREACHES", "2"))
+WARMUP_SAMPLES = int(os.environ.get("WARMUP_SAMPLES", "10"))
+GROUP_DELAY_SECONDS = float(os.environ.get("GROUP_DELAY_SECONDS", "15"))
+COOLDOWN_SECONDS = float(os.environ.get("COOLDOWN_SECONDS", "120"))
+# A signal this many times worse than the incident that muted its service
+# breaks through the cooldown as a new incident. See grouping.py.
+ESCALATION_FACTOR = float(os.environ.get("ESCALATION_FACTOR", "3"))
+DEPLOY_WINDOW_SECONDS = float(os.environ.get("DEPLOY_WINDOW_SECONDS", "120"))
+# Six missed 5s scrape cycles: long enough not to flap on a slow scrape,
+# short enough to report an outage well inside the 60s latency target.
+STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_SECONDS", "30"))
+
+# Metrics with no meaningful "too high" reading. request_rate moves with
+# ordinary traffic, so alerting on it produces noise, not incidents.
+IGNORED_METRICS = {m for m in os.environ.get("IGNORED_METRICS", "request_rate").split(",") if m}
 
 PG_HOST = os.environ.get("PG_HOST", "timescaledb")
 PG_PORT = os.environ.get("PG_PORT", "5432")
@@ -70,167 +65,29 @@ PG_DB = os.environ.get("PG_DB", "metrics")
 PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 
-FLUSH_INTERVAL_SECONDS = float(os.environ.get("FLUSH_INTERVAL_SECONDS", "5"))
-DEPLOY_SETTLE_WINDOW_SECONDS = float(os.environ.get("DEPLOY_SETTLE_WINDOW_SECONDS", "8"))
 
-SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-@dataclass
-class EWMAAnomalyDetector:
-    """Adaptive baseline: exponentially-weighted mean/variance, alpha-tuned
-    to keep tracking the "normal" level of a metric as it drifts, flagging
-    samples that are z_threshold standard deviations away from it."""
-
-    alpha: float = 0.2
-    z_threshold: float = 3.0
-    warmup: int = 10
-    service: str = "catalogue"
-    metric: str = "latency_p99_ms"
-    _ewma: float | None = None
-    _ewmvar: float | None = None
-    _count: int = 0
-
-    def _current_mean(self) -> float:
-        return self._ewma if self._ewma is not None else 0.0
-
-    def _current_std(self) -> float:
-        if self._ewmvar is None:
-            return 0.0
-        return math.sqrt(max(self._ewmvar, 0.0))
-
-    def update(self, value: float):
-        if self._count == 0:
-            self._ewma = value
-            self._ewmvar = 0.0
-            self._count = 1
-            return None
-
-        prev_mean = self._current_mean()
-        prev_std = self._current_std()
-
-        if self._count < self.warmup:
-            prev = self._ewma
-            self._ewma = self.alpha * value + (1 - self.alpha) * prev
-            self._ewmvar = self.alpha * (value - prev) ** 2 + (1 - self.alpha) * (self._ewmvar or 0.0)
-            self._count += 1
-            return None
-
-        baseline_std = max(prev_std, 0.5)
-        z = abs(value - prev_mean) / baseline_std
-
-        # update the baseline after deciding whether the sample is anomalous,
-        # so a spike doesn't immediately drag the baseline toward itself
-        prev = self._ewma
-        self._ewma = self.alpha * value + (1 - self.alpha) * prev
-        self._ewmvar = self.alpha * (value - prev) ** 2 + (1 - self.alpha) * (self._ewmvar or 0.0)
-        self._count += 1
-
-        if z >= self.z_threshold:
-            severity = "high" if z >= 4.5 else "medium"
-            return {
-                "service": self.service,
-                "metric": self.metric,
-                "severity": severity,
-                "t_onset": now_iso(),
-                "value": value,
-                "baseline": prev_mean,
-                "z_score": z,
-            }
-        return None
-
-
-@dataclass
-class StaticThresholdDetector:
-    """Comparison baseline (per the plan: "at least one comparison baseline
-    ... so the evaluation can show that EWMA actually earned its place").
-    Learns a plain mean/stdev over the first `warmup` samples, then freezes
-    threshold = mean + k*stdev forever - deliberately naive, so it never
-    adapts to legitimate drift (and will false-alarm on it) and never
-    tightens back up after a real regression subsides."""
-
-    warmup: int = 10
-    k: float = 3.0
-    service: str = "catalogue"
-    metric: str = "latency_p99_ms"
-    _samples: list = field(default_factory=list)
-    _baseline_mean: float | None = None
-    _threshold: float | None = None
-
-    def update(self, value: float):
-        if self._threshold is None:
-            self._samples.append(value)
-            if len(self._samples) >= self.warmup:
-                mean = statistics.fmean(self._samples)
-                std = statistics.pstdev(self._samples)
-                self._baseline_mean = mean
-                self._threshold = mean + self.k * max(std, 0.5)
-            return None
-
-        if value > self._threshold:
-            severity = "high" if value >= self._threshold * 1.5 else "medium"
-            return {
-                "service": self.service,
-                "metric": self.metric,
-                "severity": severity,
-                "t_onset": now_iso(),
-                "value": value,
-                "baseline": self._baseline_mean,
-                "threshold": self._threshold,
-            }
-        return None
-
-
-def is_within_deploy_settle_window(last_deploy_ts: float | None, now: float) -> bool:
-    if last_deploy_ts is None:
-        return False
-    return (now - last_deploy_ts) < DEPLOY_SETTLE_WINDOW_SECONDS
-
-
-def group_detections(detections: list[dict], id_prefix: str) -> dict:
-    """Merge a batch of raw per-(service, metric) detections from one flush
-    window into a single grouped anomaly record. Pure function - no I/O -
-    so it's directly unit-testable without Kafka/Postgres running."""
-    if not detections:
-        raise ValueError("group_detections requires at least one detection")
-
-    services = sorted({d["service"] for d in detections})
-    metrics = sorted({d["metric"] for d in detections})
-    severity = max((d["severity"] for d in detections), key=lambda s: SEVERITY_RANK.get(s, 0))
-    onsets = [d["t_onset"] for d in detections if d.get("t_onset")]
-    t_onset = min(onsets) if onsets else now_iso()
-    t_detected = now_iso()
-
-    return {
-        "anomaly_id": f"anom-{id_prefix}-{int(time.time() * 1000)}-{random.randint(100, 999)}",
-        "services": services,
-        "metrics": metrics,
-        "severity": severity,
-        "t_detected": t_detected,
-        "t_onset": t_onset,
-        "evidence_window": {"start": t_onset, "end": t_detected},
-    }
-
-
-def connect_kafka_consumer(topic: str, group_id: str, offset_reset: str = "earliest") -> KafkaConsumer:
+def connect_kafka_consumer() -> KafkaConsumer:
     while True:
         try:
             return KafkaConsumer(
-                topic,
+                INPUT_TOPIC,
                 bootstrap_servers=KAFKA_BOOTSTRAP,
-                group_id=group_id,
+                group_id=GROUP_ID,
                 value_deserializer=lambda v: json.loads(v.decode("utf-8")),
                 key_deserializer=lambda k: k.decode("utf-8") if k else None,
-                enable_auto_commit=True,
-                auto_offset_reset=offset_reset,
+                enable_auto_commit=False,
+                # On a first start, skip the backlog rather than replaying up
+                # to 24h of retained metrics and alerting on faults that are
+                # long over. Committed offsets still resume normally.
+                auto_offset_reset="latest",
                 consumer_timeout_ms=1000,
             )
         except NoBrokersAvailable:
-            log.warning("kafka not reachable yet (%s), retrying in 3s", topic)
+            log.warning("kafka not reachable yet, retrying in 3s")
             time.sleep(3)
 
 
@@ -248,73 +105,43 @@ def connect_kafka_producer() -> KafkaProducer:
 
 
 def connect_postgres():
-    while True:
-        try:
-            conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
-            conn.autocommit = True
-            return conn
-        except psycopg2.OperationalError as exc:
-            log.warning("timescaledb not reachable yet (%s), retrying in 3s", exc)
-            time.sleep(3)
-
-
-def persist_anomaly(conn, detector: str, grouped: dict, raw_detections: list[dict]) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO anomalies
-               (anomaly_id, detector, services, metrics, severity, t_onset, t_detected,
-                evidence_window_start, evidence_window_end, detail)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (anomaly_id) DO NOTHING""",
-            (
-                grouped["anomaly_id"], detector, grouped["services"], grouped["metrics"],
-                grouped["severity"], grouped["t_onset"], grouped["t_detected"],
-                grouped["evidence_window"]["start"], grouped["evidence_window"]["end"],
-                json.dumps(raw_detections),
-            ),
-        )
-
-
-def publish_anomaly(producer: KafkaProducer, grouped: dict) -> None:
-    producer.send(ANOMALIES_TOPIC, key=grouped["services"][0], value={
-        "anomaly_id": grouped["anomaly_id"],
-        "services": grouped["services"],
-        "metrics": grouped["metrics"],
-        "severity": grouped["severity"],
-        "t_detected": grouped["t_detected"],
-        "t_onset": grouped["t_onset"],
-        "evidence_window": grouped["evidence_window"],
-    })
-    producer.flush()
-
-
-def deploy_listener(last_deploy_ts: dict) -> None:
-    """Watches deploys.events (own consumer group, `latest` offset - this
-    only cares about deploys from now on) so detections can be suppressed
-    during a service's post-deploy settle window."""
-    consumer = connect_kafka_consumer(DEPLOYS_TOPIC, group_id="anomaly-detector-deploy-watch", offset_reset="latest")
-    log.info("watching %s for deploy-window suppression", DEPLOYS_TOPIC)
-    while True:
-        for msg in consumer:
-            service = msg.value.get("service")
-            if service:
-                last_deploy_ts[service] = time.time()
-                log.info("deploy observed for %s; suppressing new detections for %ss", service, DEPLOY_SETTLE_WINDOW_SECONDS)
+    # One attempt with a short timeout, unlike the Kafka connections above:
+    # AnomalyStore retries on the next event, and a slow database must not
+    # stall the alerting loop.
+    conn = psycopg2.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
+        user=PG_USER, password=PG_PASSWORD, connect_timeout=3,
+    )
+    conn.autocommit = True
+    return conn
 
 
 def run():
-    consumer = connect_kafka_consumer(METRICS_TOPIC, group_id=GROUP_ID)
+    consumer = connect_kafka_consumer()
     producer = connect_kafka_producer()
-    db_conn = connect_postgres()
-    log.info("listening on %s, watching %s, publishing to %s", METRICS_TOPIC, DEPLOYS_TOPIC, ANOMALIES_TOPIC)
+    store = AnomalyStore(connect_postgres)
 
-    last_deploy_ts: dict[str, float] = {}
-    threading.Thread(target=deploy_listener, args=(last_deploy_ts,), daemon=True).start()
+    tracker = DeployWindowTracker(window_seconds=DEPLOY_WINDOW_SECONDS)
+    stop = threading.Event()
+    threading.Thread(
+        target=consume_deploys, args=(tracker, KAFKA_BOOTSTRAP, stop), daemon=True
+    ).start()
 
-    ewma_detectors: dict[tuple[str, str], EWMAAnomalyDetector] = {}
-    static_detectors: dict[tuple[str, str], StaticThresholdDetector] = {}
-    pending: dict[str, list[dict]] = {"ewma": [], "static_threshold": []}
-    last_flush = time.time()
+    grouper = AnomalyGrouper(
+        group_delay_seconds=GROUP_DELAY_SECONDS,
+        cooldown_seconds=COOLDOWN_SECONDS,
+        escalation_factor=ESCALATION_FACTOR,
+        # anomaly_id is a primary key downstream (the anomalies table, M3,
+        # M4's incidents), so a restart must never reuse one. See issue #4.
+        id_namespace=uuid.uuid4().hex[:6],
+    )
+    staleness = StalenessMonitor(stale_after_seconds=STALE_AFTER_SECONDS)
+    detectors: dict[tuple[str, str], Detector] = {}
+
+    log.info(
+        "detector=%s listening on %s, publishing grouped events to %s",
+        DETECTOR_KIND, INPUT_TOPIC, OUTPUT_TOPIC,
+    )
 
     while True:
         for msg in consumer:
@@ -324,50 +151,59 @@ def run():
             value = record.get("value")
             if not service or not metric or value is None:
                 continue
-
-            key = (service, metric)
-            if key not in ewma_detectors:
-                ewma_detectors[key] = EWMAAnomalyDetector(service=service, metric=metric)
-                static_detectors[key] = StaticThresholdDetector(service=service, metric=metric)
-
-            ewma_hit = ewma_detectors[key].update(float(value))
-            static_hit = static_detectors[key].update(float(value))
-
-            if not (ewma_hit or static_hit):
+            if metric in IGNORED_METRICS:
                 continue
 
-            suppressed = is_within_deploy_settle_window(last_deploy_ts.get(service), time.time())
-            timestamp = record.get("timestamp")
+            timestamp = record.get("timestamp") or _iso(now_utc())
+            staleness.observe(service, parse_ts(timestamp))
+            key = (service, metric)
+            if key not in detectors:
+                detectors[key] = build_detector(
+                    DETECTOR_KIND, service=service, metric=metric,
+                    warmup=WARMUP_SAMPLES, required_breaches=REQUIRED_BREACHES,
+                )
 
-            if ewma_hit:
-                if suppressed:
-                    log.info("suppressed ewma detection for %s/%s (deploy settle window)", service, metric)
-                else:
-                    ewma_hit["t_onset"] = timestamp or ewma_hit["t_onset"]
-                    pending["ewma"].append(ewma_hit)
+            sample_time = parse_ts(timestamp)
+            needed, deploy_id = tracker.required_breaches(
+                service, sample_time, REQUIRED_BREACHES
+            )
 
-            if static_hit and not suppressed:
-                static_hit["t_onset"] = timestamp or static_hit["t_onset"]
-                pending["static_threshold"].append(static_hit)
+            signal = detectors[key].update(float(value), timestamp, required_breaches=needed)
+            if signal is None:
+                continue
 
-        now = time.time()
-        if now - last_flush >= FLUSH_INTERVAL_SECONDS:
-            for detector_name, items in pending.items():
-                if items:
-                    grouped = group_detections(items, id_prefix=detector_name.replace("_threshold", ""))
-                    try:
-                        persist_anomaly(db_conn, detector_name, grouped, items)
-                    except psycopg2.Error:
-                        log.exception("failed to persist anomaly, reconnecting")
-                        db_conn = connect_postgres()
-                    if detector_name == "ewma":
-                        publish_anomaly(producer, grouped)
-                    log.info("flushed %d %s detection(s) into anomaly %s (services=%s, severity=%s)",
-                              len(items), detector_name, grouped["anomaly_id"], grouped["services"], grouped["severity"])
-                pending[detector_name] = []
-            last_flush = now
+            signal.in_deploy_window = deploy_id is not None
+            signal.deploy_id = deploy_id
+            grouper.add(signal)
+            log.info(
+                "signal %s/%s value=%.4g baseline=%.4g score=%.2f%s",
+                service, metric, signal.value, signal.baseline, signal.score,
+                f" (deploy window {deploy_id})" if deploy_id else "",
+            )
 
-        time.sleep(0.5)
+        # Driven by the clock, not by arriving samples: the whole point is to
+        # notice a service that has stopped sending anything.
+        tick = now_utc()
+        for signal in staleness.check(tick):
+            grouper.add(signal)
+            log.info("%s has sent nothing for %.0fs", signal.service, signal.value)
+
+        for event in grouper.flush(tick):
+            producer.send(OUTPUT_TOPIC, key=event["services"][0], value=event)
+            producer.flush()
+            # After the publish, so the alert reaches M4 even if this fails.
+            store.save(event)
+            log.info(
+                "emitted %s severity=%s services=%s metrics=%s (%d contributing signals)",
+                event["anomaly_id"], event["severity"], event["services"],
+                event["metrics"], len(event["contributors"]),
+            )
+
+        consumer.commit()
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 if __name__ == "__main__":

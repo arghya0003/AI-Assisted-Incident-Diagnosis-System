@@ -61,7 +61,7 @@ Producer: M2's EWMA detector, after dedup/grouping.
 
 ```json
 {
-  "anomaly_id": "anom-0001",
+  "anomaly_id": "anom-20260812T204503-3f9a1c-0001",
   "services": ["catalogue", "front-end"],
   "metrics": ["latency_p99_ms", "error_rate"],
   "severity": "high",
@@ -70,9 +70,81 @@ Producer: M2's EWMA detector, after dedup/grouping.
   "evidence_window": {
     "start": "2026-08-12T20:40:00.000Z",
     "end": "2026-08-12T20:45:03.000Z"
-  }
+  },
+  "detector": "ewma",
+  "in_deploy_window": true,
+  "related_deploy_ids": ["dep-2026-08-12-0007"],
+  "contributors": [
+    {
+      "service": "catalogue",
+      "metric": "latency_p99_ms",
+      "value": 7470.2,
+      "baseline": 36.1,
+      "score": 4.21,
+      "severity": "high",
+      "observed_at": "2026-08-12T20:45:03.000Z"
+    }
+  ]
 }
 ```
+
+`severity` is one of `low`, `medium`, `high` — **resolved by M2**, closing the
+open question below. It is derived from how far past its firing threshold the
+worst contributing metric went, so it is comparable across detectors that
+otherwise produce incomparable scores (a z-score, a CUSUM statistic and a
+threshold overshoot).
+
+The first seven fields are the frozen contract. The rest are additive and safe
+to ignore:
+
+| Field | Why it is there |
+| --- | --- |
+| `detector` | Which algorithm produced this, so ablation runs are self-describing. |
+| `in_deploy_window` | True if any member service was mid-deploy. A strong prior for M3. |
+| `related_deploy_ids` | The deploys implicated, so M3 need not re-derive them by timestamp. |
+| `contributors` | Per-metric detail (value, baseline, score) behind the grouped event, so M3 can build `metrics` evidence items without re-querying TimescaleDB. |
+
+**One event per incident.** A single fault trips many metrics across many
+services; M2 groups them and emits one event carrying the member list, rather
+than one alert per breach. `t_detected` is stamped from the *first* contributing
+signal, not from the moment the grouped event is published, so the grouping
+delay does not inflate detection-latency measurements.
+
+**What the time fields mean** (resolves issue #3). For every event,
+`evidence_window.start == t_onset <= t_detected <= evidence_window.end`:
+
+| Field | Meaning |
+| --- | --- |
+| `t_onset` | When the earliest contributing deviation *began* — the first breaching sample of its streak, which is earlier than the moment the detector was confident enough to fire. For a `liveness` event, when that service's data stopped. |
+| `t_detected` | When the first contributing signal fired. Detection latency is measured from this. |
+| `evidence_window.start` | Same as `t_onset`. |
+| `evidence_window.end` | The latest contributing signal folded into the event before it was published. |
+
+So the window is the span in which the anomalous behaviour was actually observed, typically
+25–45 s for a metric fault and the whole silence for a `liveness` event. It deliberately does
+not include healthy context before onset: how much baseline to chart or how far back to look
+for deploys is the consumer's choice (M3 uses `t_onset − 30 min` for deploys). The event is
+published once, so `end` is not updated if the anomaly carries on afterwards.
+
+**`anomaly_id` is unique** (resolves issue #4). Format
+`anom-<t_detected as YYYYMMDDTHHMMSS>-<process token>-<sequence>`. The 6-hex process token is
+random per detector start, so a restart cannot reuse an id even though the sequence restarts.
+Treat the id as opaque; the format is for humans reading logs.
+
+**`liveness` is a synthetic metric name.** A crashed service disappears from
+Prometheus and therefore emits no telemetry at all, so M2 also reports services
+that have stopped reporting. Those events carry `"liveness"` in `metrics[]` and
+`"detector": "staleness"`. There is no `liveness` row in the `metrics` table —
+M3 should read the gap in that service's samples as the evidence, and
+`t_onset` marks when the data stopped.
+
+**Durable copy: the `anomalies` table.** Every event published here is also
+written to TimescaleDB's `anomalies` table (`timescaledb/init/005_anomalies.sql`)
+under the same `anomaly_id`, so M3 can resolve `POST /analyze {anomaly_id}` long
+after the event has left the 24h topic. The frozen fields have columns of their
+own; `contributors`, `in_deploy_window` and `related_deploy_ids` are kept whole
+in a `detail` JSONB column. Kafka remains the live contract: the table is written
+after the publish, and a failed write never holds an alert back.
 
 ## Evidence model
 
@@ -118,7 +190,7 @@ The five categories map to current and planned sources as follows:
 
 | Category | Source |
 | --- | --- |
-| `anomaly` | M2 `anomalies.detected` |
+| `anomaly` | M2 `anomalies.detected`, durable copy in the `anomalies` table |
 | `metrics` | TimescaleDB `metrics` / `metrics_1m` |
 | `deployment` | TimescaleDB `deploys` / `deploys.events` |
 | `dependency` | Service dependency graph above |
@@ -161,12 +233,22 @@ Direction: M2 → all
 
 ```json
 {
-  "scenario_id": "scn-latency-regression-01",
+  "scenario_id": "scn-bad-deploy-latency-1757764800",
   "fault_type": "bad_deploy_latency",
   "ground_truth_service": "catalogue",
-  "t_inject": "2026-08-12T20:44:00.000Z"
+  "t_inject": "2026-08-12T20:44:00.000Z",
+  "t_recovered": "2026-08-12T20:45:30.000Z",
+  "status": "recovered"
 }
 ```
+
+The `fault_scenarios` table (`timescaledb/init/003_fault_scenarios.sql`) is the
+authority on these values, not any runner's own clock: the injector writes
+`t_inject` at the moment the fault actually starts, and scoring latency against
+anything else would silently bias every number in the report.
+
+`fault_type` is currently one of `bad_deploy_latency`, `service_crash`,
+`db_pool_saturation` — the three the injector can physically produce.
 
 ## Service dependency graph (input to M3)
 
@@ -192,17 +274,7 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
 - [ ] Confirm topic partitioning/retention on `metrics.raw` — **implemented** as proposed
       (3 partitions, keyed by `service`, `retention.ms=86400000`), pending team sign-off.
       Downsampling-after-24h not yet built.
-- [x] Confirm `anomalies.detected` `severity` enum values with M2 — **implemented**
-      as `low` / `medium` / `high` (M2's detectors currently only ever emit
-      `medium`/`high` — see `services/anomaly-detector/main.py`'s `SEVERITY_RANK`).
+- [x] Confirm `anomalies.detected` `severity` enum values with M2 — **resolved:**
+      `low` | `medium` | `high`, derived from the worst contributing metric's
+      overshoot of its firing threshold. See the topic section above.
 - [ ] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4.
-
-## M2 addendum: `anomalies` table
-
-M2's detectors (`services/anomaly-detector/`) persist every grouped anomaly to a new
-`anomalies` table (`timescaledb/init/005_anomalies.sql`), tagged by `detector`
-(`ewma` or `static_threshold`) so the evaluation runner can score them independently.
-This is in addition to, not instead of, publishing to `anomalies.detected` — only
-`detector = 'ewma'` rows are published to Kafka; `static_threshold` is an
-evaluation-only comparison baseline and never reaches M4. This doesn't change the
-`anomalies.detected` wire shape above.
