@@ -1,20 +1,22 @@
-"""/analyze orchestration: scoring inputs -> retrieval -> deterministic scoring -> LLM.
+"""/analyze orchestration: scoring inputs -> retrieval -> deterministic scoring -> LLM -> evidence guardrail.
 
-If the prompt can't fit the context budget, or the LLM gives no valid response (unreachable, or
-invalid on every attempt), the deterministic ranking is returned instead, so /analyze always
-returns a contract-valid response. The evidence guardrail (Phase 7) will sit between the LLM
-and the response.
+The deterministic ranking is returned instead of the LLM's answer when the prompt can't fit the
+context budget, when the LLM gives no valid response (unreachable, or invalid on every attempt), or
+when the guardrail rejects every LLM hypothesis. So /analyze always returns a contract-valid
+response, and every response, LLM or deterministic, passes the guardrail before it leaves.
 """
 
 import dataclasses
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from app.db import AnomalyStore
 from app.deterministic import deterministic_diagnosis
 from app.graph import DependencyGraph
+from app.guardrail import GuardrailResult, GuardrailStats, Rejection, Source, allowed_ids, apply_guardrail
+from app.hypotheses import Diagnosis
 from app.llm import Chat, LLMDiagnoser, LLMOutcome
 from app.models import AnalyzeResponse, CandidateReport
 from app.ollama import OllamaClient
@@ -61,6 +63,8 @@ class PipelineResult:
     llm: LLMOutcome | None  # None when the LLM was not called
     fallback_reason: str | None
     latency_ms: int
+    # Hypotheses the evidence guardrail dropped while producing this result.
+    guardrail_rejections: list[Rejection] = field(default_factory=list)
 
 
 def ollama_embed(client: OllamaClient, settings: Settings) -> Embed:
@@ -87,6 +91,7 @@ class DiagnosisPipeline:
         graph: DependencyGraph,
         scoring: ScoringConfig,
         config: PipelineConfig,
+        stats: GuardrailStats | None = None,
     ):
         self._store = store
         self._embed = embed
@@ -94,6 +99,7 @@ class DiagnosisPipeline:
         self._graph = graph
         self._scoring = scoring
         self._config = config
+        self._stats = stats
 
     def scoring_inputs(self, anomaly_id: str) -> ScoringInputs | None:
         return self._store.scoring_inputs(
@@ -129,23 +135,35 @@ class DiagnosisPipeline:
                 min_candidates=self._config.min_prompt_candidates,
             )
         except PromptTooLarge as exc:
-            return self._fallback(report, None, None, str(exc), started)
+            return self._fallback(report, None, None, str(exc), started, [])
 
         outcome = LLMDiagnoser(self._chat, self._config.llm_max_attempts).diagnose(prompt)
         if outcome.diagnosis is None:
             last_error = outcome.errors[-1] if outcome.errors else "no error recorded"
             reason = f"no valid LLM response after {outcome.attempts} attempt(s); last: {last_error}"
-            return self._fallback(report, prompt, outcome, reason, started)
+            return self._fallback(report, prompt, outcome, reason, started, [])
+
+        guarded = self._guard(outcome.diagnosis, report, prompt, "llm")
+        if not guarded.diagnosis.services:
+            reason = f"the evidence guardrail rejected all {guarded.checked} LLM hypotheses"
+            return self._fallback(report, prompt, outcome, reason, started, guarded.rejections)
         return PipelineResult(
-            response=outcome.diagnosis.response,
-            services=outcome.diagnosis.services,
+            response=guarded.diagnosis.response,
+            services=guarded.diagnosis.services,
             mode="llm",
             report=report,
             prompt=prompt,
             llm=outcome,
             fallback_reason=None,
             latency_ms=_elapsed_ms(started),
+            guardrail_rejections=guarded.rejections,
         )
+
+    def _guard(self, diagnosis: Diagnosis, report: CandidateReport, prompt: Prompt | None, source: Source) -> GuardrailResult:
+        result = apply_guardrail(diagnosis, allowed_ids(report, prompt))
+        if self._stats is not None:
+            self._stats.record(result, source)
+        return result
 
     def _fallback(
         self,
@@ -154,18 +172,22 @@ class DiagnosisPipeline:
         outcome: LLMOutcome | None,
         reason: str,
         started: float,
+        earlier_rejections: list[Rejection],
     ) -> PipelineResult:
         log.warning("anomaly %s: returning the deterministic ranking: %s", report.anomaly_id, reason)
-        diagnosis = deterministic_diagnosis(report)
+        guarded = self._guard(deterministic_diagnosis(report), report, prompt, "deterministic")
+        if guarded.rejections:
+            log.error("the deterministic ranking for %s failed the evidence guardrail; this is a bug", report.anomaly_id)
         return PipelineResult(
-            response=diagnosis.response,
-            services=diagnosis.services,
+            response=guarded.diagnosis.response,
+            services=guarded.diagnosis.services,
             mode="deterministic_fallback",
             report=report,
             prompt=prompt,
             llm=outcome,
             fallback_reason=reason,
             latency_ms=_elapsed_ms(started),
+            guardrail_rejections=[*earlier_rejections, *guarded.rejections],
         )
 
 

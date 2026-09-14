@@ -8,12 +8,14 @@ deterministic ranking that the LLM is given.
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 
 from app.consumer import AnomalyConsumer
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
 from app.graph import load_graph
+from app.guardrail import GuardrailStats
 from app.llm import Chat
 from app.models import AnalyzeRequest, AnalyzeResponse, CandidateReport
 from app.ollama import OllamaClient
@@ -25,7 +27,8 @@ from app.settings import settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("diagnosis-service")
 
-SERVICE_VERSION = "0.6.0"
+SERVICE_VERSION = "0.7.0"
+STARTED_AT = datetime.now(timezone.utc)
 # The configured pipeline. Phase 8 adds llm_only, no_graph and deterministic for ablations.
 PIPELINE_MODE = "full"
 
@@ -37,6 +40,7 @@ pipeline_config = PipelineConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
 consumer = AnomalyConsumer(settings)
 ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeout_seconds)
+guardrail_stats = GuardrailStats()
 
 
 @asynccontextmanager
@@ -92,7 +96,7 @@ def get_chat() -> Chat:
 
 
 def _pipeline(anomalies: AnomalyStore, embed: Embed, chat: Chat) -> DiagnosisPipeline:
-    return DiagnosisPipeline(anomalies, embed, chat, graph, scoring_config, pipeline_config)
+    return DiagnosisPipeline(anomalies, embed, chat, graph, scoring_config, pipeline_config, guardrail_stats)
 
 
 def _unavailable(anomaly_id: str, exc: DatabaseUnavailable) -> HTTPException:
@@ -118,6 +122,12 @@ def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, str]:
     }
 
 
+@app.get("/stats")
+def stats() -> dict[str, object]:
+    """Evidence-guardrail counters since the service started. They reset on restart."""
+    return {"since": STARTED_AT.isoformat(), "guardrail": guardrail_stats.snapshot()}
+
+
 @app.post("/analyze", response_model=AnalyzeResponse, responses=ERROR_RESPONSES)
 def analyze(
     request: AnalyzeRequest,
@@ -136,13 +146,15 @@ def analyze(
     attempts = result.llm.attempts if result.llm else 0
     response.headers["X-Diagnosis-Mode"] = result.mode
     response.headers["X-LLM-Attempts"] = str(attempts)
+    response.headers["X-Guardrail-Rejected"] = str(len(result.guardrail_rejections))
     log.info(
-        "analyze anomaly_id=%s mode=%s attempts=%d latency_ms=%d hypotheses=%d%s",
+        "analyze anomaly_id=%s mode=%s attempts=%d latency_ms=%d hypotheses=%d guardrail_rejected=%d%s",
         request.anomaly_id,
         result.mode,
         attempts,
         result.latency_ms,
         len(result.response.hypotheses),
+        len(result.guardrail_rejections),
         f" fallback_reason={result.fallback_reason}" if result.fallback_reason else "",
     )
     return result.response

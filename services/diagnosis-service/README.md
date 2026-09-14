@@ -17,10 +17,14 @@ event in the `anomalies` table. For a stored anomaly, the pipeline:
 2. gives the top candidates to `phi4-mini`, which writes and ranks up to 3 hypotheses under a JSON
    schema that ties each hypothesis to one candidate and that candidate's own evidence and actions;
 3. validates the reply and retries with the rejection reasons; after 3 invalid attempts, or if
-   Ollama is unreachable, it returns the deterministic ranking with templated causes instead.
+   Ollama is unreachable, it returns the deterministic ranking with templated causes instead;
+4. passes every hypothesis through the **evidence guardrail**. A hypothesis citing any id the
+   service did not supply (the anomaly, the evidence it produced, and the deploy and incident ids
+   put in the prompt) is dropped entirely. If every LLM hypothesis is dropped, the deterministic
+   ranking is returned.
 
-`POST /analyze` therefore always returns a contract-valid response. The evidence-citation
-guardrail arrives in Phase 7.
+`POST /analyze` therefore always returns a contract-valid response in which every evidence id
+resolves to a real anomaly, deploy or incident.
 
 ## API
 
@@ -28,6 +32,7 @@ guardrail arrives in Phase 7.
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
+| `GET` | `/stats` | — | Evidence-guardrail counters since the service started, split into LLM and deterministic hypotheses: checked, rejected, and responses fully rejected. The counters reset on restart. |
 | `GET` | `/candidates/{anomaly_id}` | — | Debug: `{anomaly_id, anomalous_services, related_anomaly_ids, weights, retrieval_status, similar_incidents[], candidates[{rank, service, score, signals, distance, deploy_id, evidence_ids}], evidence[]}`. Read-only, no LLM generation; 404 and 503 as for `/analyze`. `retrieval_status` is `ok`, `empty_corpus` or `embedding_unavailable`; retrieval problems never fail the request. |
 
 Interactive docs: `http://localhost:8000/docs`.
@@ -45,6 +50,7 @@ A model failure never produces an error status. Two response headers say how the
 | --- | --- |
 | `X-Diagnosis-Mode` | `llm` (phi4-mini's hypotheses), or `deterministic_fallback` (the scorer's ranking with causes prefixed `Deterministic ranking (LLM not used):`) |
 | `X-LLM-Attempts` | `0`–`3`: generation attempts made; `0` when the prompt could not fit the context budget |
+| `X-Guardrail-Rejected` | Number of hypotheses the evidence guardrail dropped for this answer |
 
 `/health` returns 200 whenever the process is up. `database` is `ok`, `unreachable` or
 `schema_missing`, and `consumer` is `running`, `connecting` or `disabled`, so an outage is
@@ -296,3 +302,17 @@ Measured with the same 100-run harness.
 - **Titles still carry stories:** one rejected `anom-fx-07` cause was incident-0008's title,
   verbatim.
 - **Next-step options** are listed in PLAN.md, Phase 6 follow-up.
+
+---
+
+## Phase 7 evidence guardrail results — 2026-09-14
+
+| Check | Result |
+| --- | --- |
+| Poisoned replies citing `ev-9999` / `dep-fake-001` (tests, all 10 fixtures) | Never reach a response. Partly poisoned: only the clean hypothesis survives. Fully poisoned: the deterministic ranking is returned. |
+| Real phi4-mini, 1 run per fixture | 10/10 valid; **0** hypotheses dropped |
+| Live `POST /analyze` (3 calls) | `X-Guardrail-Rejected: 0`; `GET /stats` showed 7 checked, 0 rejected |
+
+The guardrail doesn't fire on phi4-mini, because Ollama's response schema already restricts
+evidence ids while the model generates. It is the enforced backstop, and it becomes the active
+filter if the service moves to a provider without schema enforcement.

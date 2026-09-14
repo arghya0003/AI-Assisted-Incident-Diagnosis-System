@@ -871,6 +871,46 @@ measured hope.
 citing `ev-9999` and `dep-fake-001`, and asserts those hypotheses never appear in the output. A
 counter of rejected hypotheses is exposed for the evaluation report.
 
+#### Phase 7 outcome (2026-09-14) — status: DONE
+
+| Check | Result |
+| --- | --- |
+| Poisoned LLM reply (`ev-9999`, `dep-fake-001`) | `tests/test_guardrail.py` runs it through the pipeline for all 10 fixtures. Neither id ever reaches a response. A partly poisoned reply keeps only its clean hypothesis; a fully poisoned one returns the deterministic ranking. |
+| Validation alone would not catch it | A test shows the poisoned reply passes `validate_reply`, because its service and action are legitimate. The guardrail is the layer that enforces citations. |
+| A hypothesis is dropped, not repaired | A hypothesis with one unknown id among valid ones is removed entirely, not returned with the bad id stripped |
+| Deterministic ranking always passes | 0 rejections for every fixture |
+| Counter exposed | `GET /stats` (checked, rejected, and fully-rejected counts, split into LLM and deterministic); `X-Guardrail-Rejected` header per response; a `guardrail_rejections` list on every pipeline result; and a total in `scripts/eval_llm.py` |
+| Live `POST /analyze` (`anom-fx-01/07/09`) | 200, `X-Guardrail-Rejected: 0`; `/stats` showed 7 LLM hypotheses checked, 0 rejected |
+| Real phi4-mini, 1 run per fixture | 10/10 contract-valid, **0 hypotheses dropped by the guardrail** |
+| Tests | 378 passed, 4 xfailed, inside the compose network |
+
+Decisions made while building, beyond what this section specified:
+
+- **Allowed set**: the anomaly id, every evidence id scoring produced, and every id placed in the
+  prompt (the anomaly, related anomalies, deploys and incidents across all shown candidates). When
+  no prompt was built, the report's own citable source ids take the prompt's place. A deploy that
+  exists but was never shown to the LLM is not citable.
+- **The check is global, not per candidate.** Citing another candidate's real deploy is not a
+  hallucination, and the contract only requires that ids resolve to real records. The
+  per-candidate binding is already enforced earlier, by the response schema.
+- **Every response passes the guardrail, including the deterministic fallback.** A fallback
+  rejection is logged as a bug rather than silently allowed.
+- **Surviving hypotheses are re-ranked 1..n**, as the contract requires; nothing else about them
+  is changed.
+- **Counters are in memory** and reset on restart. Phase 8's `hypotheses` table will make durable
+  counts possible.
+
+Findings:
+
+1. **On phi4-mini with Ollama, the guardrail never fires** (0 of 10 real runs, and 0 live),
+   because the response schema already limits evidence ids during decoding. It is a verified
+   backstop, not an active filter. It becomes the active one if the service switches to a provider
+   that doesn't enforce JSON schemas, which the instructor has allowed as an option.
+2. **This one run repeated Phase 6's picture**: 40% of runs needed a retry, 1 fell back, and p95
+   was 41 s. The AI's rank 1 matched the true cause in 4/8, against the scorer's 5/8: for
+   `anom-fx-07`, check B's retry left a single front-end hypothesis. One run is too few to
+   conclude from, but it reinforces Phase 6 finding 2.
+
 ---
 
 ### Phase 8 — Persistence, ablations, evaluation support

@@ -78,6 +78,7 @@ def main() -> None:
                     "scorer_top": result.report.candidates[0].service,
                     "action": top.proposed_action,
                     "adjustments": diagnosis.adjustments if diagnosis else [],
+                    "guardrail_rejected": len(result.guardrail_rejections),
                     "truth": truth,
                     "errors": result.llm.errors if result.llm else [result.fallback_reason],
                 }
@@ -121,6 +122,7 @@ def main() -> None:
         print(f"  rank-1 service is the true root cause  {sum(r['top_service'] == r['truth'] for r in with_truth)}/{len(with_truth)}")
         print(f"  scorer's rank-1 is the true root cause {sum(r['scorer_top'] == r['truth'] for r in with_truth)}/{len(with_truth)}")
     print(f"  replies adjusted (duplicate dropped or reordered)  {sum(bool(r['adjustments']) for r in rows)}/{len(rows)}")
+    print(f"  hypotheses dropped by the evidence guardrail       {sum(r['guardrail_rejected'] for r in rows)}")
     print(f"  rank-1 actions                         {dict(Counter(r['action'].split(':')[0] for r in rows))}")
     if ratios:
         print(f"  actual/estimated prompt tokens       mean {statistics.mean(ratios):.2f} "
