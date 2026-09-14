@@ -1,0 +1,11 @@
+ANOMALY
+$anomaly
+
+RECENT DEPLOYS (in the $lookback minutes before onset, most recent first)
+$deploys
+
+SERVICES
+The Sock Shop services. Each lists the ids a hypothesis about it may cite and the actions it may propose.
+$services
+
+Return 1 to 3 hypotheses as JSON.

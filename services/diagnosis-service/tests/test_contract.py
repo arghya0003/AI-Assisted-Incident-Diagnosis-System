@@ -4,6 +4,7 @@ Endpoint tests use the in-memory store from conftest.py, which holds anom-0001 o
 """
 
 import copy
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -133,6 +134,7 @@ def test_health():
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert resp.json()["pipeline_mode"] == "full"
+    assert len(resp.json()["config_fingerprint"]) == 12
     assert resp.json()["database"] == "ok"
     assert resp.json()["consumer"] == "disabled"
 
@@ -200,6 +202,9 @@ class UnavailableStore:
     def get(self, anomaly_id):
         raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
 
+    def analyses(self, anomaly_id, pipeline_mode=None, limit=20):
+        raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+
     def scoring_inputs(self, anomaly_id, window_seconds, lookback_minutes):
         raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
 
@@ -249,6 +254,92 @@ def test_candidates_uses_retrieved_incidents(fake_store):
     assert [i["incident_id"] for i in body["similar_incidents"]] == ["incident-0020"]
     catalogue = next(c for c in body["candidates"] if c["service"] == "catalogue")
     assert catalogue["signals"]["incident_similarity"] == 0.7
+
+
+def analyze(query=""):
+    return client.post(f"/analyze{query}", json={"anomaly_id": "anom-0001"})
+
+
+def test_analyze_mode_can_be_chosen_per_request():
+    resp = analyze("?mode=deterministic")
+    assert resp.status_code == 200
+    assert resp.headers["X-Pipeline-Mode"] == "deterministic"
+    assert resp.headers["X-Diagnosis-Mode"] == "deterministic"
+    assert resp.headers["X-LLM-Attempts"] == "0"
+    assert resp.json()["hypotheses"][0]["cause"].startswith("Deterministic ranking")
+
+
+def test_analyze_rejects_an_unknown_mode():
+    assert analyze("?mode=creative").status_code == 422
+
+
+def test_analyze_stores_the_run_then_serves_it_again(fake_store):
+    first = analyze()
+    assert (first.headers["X-Cache"], first.headers["X-Persisted"]) == ("miss", "true")
+    (analysis, evidence), = fake_store.saved
+    assert analysis.analysis_id == first.headers["X-Analysis-Id"]
+    assert analysis.answered_by == "llm" and analysis.hypotheses[0].service is not None
+    assert evidence, "the evidence behind the ranking is stored with the run"
+
+    second = analyze()
+    assert second.headers["X-Cache"] == "hit"
+    assert second.headers["X-Analysis-Id"] == first.headers["X-Analysis-Id"]
+    assert second.json() == first.json()
+    assert len(fake_store.saved) == 1
+
+    third = analyze("?refresh=true")
+    assert third.headers["X-Cache"] == "miss" and len(fake_store.saved) == 2
+
+
+def test_the_cache_is_per_mode(fake_store):
+    assert analyze().headers["X-Cache"] == "miss"
+    assert analyze("?mode=deterministic").headers["X-Cache"] == "miss"
+    assert analyze("?mode=deterministic").headers["X-Cache"] == "hit"
+
+
+def test_a_fallback_is_never_served_from_the_cache(fake_store):
+    def down(messages, schema):
+        raise OllamaUnavailable("connection refused")
+
+    app.dependency_overrides[get_chat] = lambda: down
+    assert analyze().headers["X-Diagnosis-Mode"] == "deterministic_fallback"
+    assert analyze().headers["X-Cache"] == "miss"  # the next request gets a fresh attempt
+    assert len(fake_store.saved) == 2
+
+
+def test_a_run_made_before_related_anomalies_could_arrive_is_not_reused(fake_store):
+    now = datetime.now(timezone.utc)
+    fresh = fake_store.events["anom-0001"].model_copy(update={"anomaly_id": "anom-fresh", "t_onset": now, "t_detected": now})
+    fake_store.events["anom-fresh"] = fresh
+    for _ in range(2):
+        resp = client.post("/analyze", json={"anomaly_id": "anom-fresh"})
+        assert resp.headers["X-Cache"] == "miss"
+
+
+def test_a_failed_save_still_returns_the_answer(fake_store):
+    fake_store.fail_saves = True
+    resp = analyze()
+    assert resp.status_code == 200 and resp.headers["X-Persisted"] == "false"
+    assert resp.json()["hypotheses"]
+
+
+def test_hypotheses_lists_stored_runs_newest_first(fake_store):
+    analyze()
+    analyze("?mode=deterministic")
+    runs = client.get("/hypotheses/anom-0001").json()
+    assert [run["pipeline_mode"] for run in runs] == ["deterministic", "full"]
+    assert runs[0]["hypotheses"][0]["service"] and runs[0]["created_at"]
+    only = client.get("/hypotheses/anom-0001?mode=full").json()
+    assert [run["pipeline_mode"] for run in only] == ["full"]
+
+
+def test_hypotheses_unknown_anomaly_is_404():
+    assert client.get("/hypotheses/anom-invented-9999").status_code == 404
+
+
+def test_hypotheses_database_down_is_503():
+    app.dependency_overrides[get_store] = UnavailableStore
+    assert client.get("/hypotheses/anom-0001").status_code == 503
 
 
 def test_candidates_survives_an_unreachable_embedding_model(fake_store):

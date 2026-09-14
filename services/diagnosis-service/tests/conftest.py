@@ -2,14 +2,16 @@
 
 import json
 import os
+from datetime import datetime, timezone
 
 # Unit tests must never start a real Kafka consumer.
 os.environ.setdefault("CONSUMER_ENABLED", "false")
 
 import pytest  # noqa: E402
 
+from app.db import DatabaseUnavailable  # noqa: E402
 from app.main import app, get_chat, get_embedder, get_store  # noqa: E402
-from app.models import AnomalyEvent  # noqa: E402
+from app.models import REUSABLE_ANSWERS, AnomalyEvent  # noqa: E402
 from app.ollama import ChatReply  # noqa: E402
 from app.retrieval import EMBEDDING_DIMENSIONS  # noqa: E402
 from app.scoring import ScoringInputs  # noqa: E402
@@ -29,14 +31,16 @@ STORED_ANOMALY = AnomalyEvent.model_validate(
 
 class FakeAnomalyStore:
     def __init__(self, *events: AnomalyEvent):
-        self._events = {event.anomaly_id: event for event in events}
+        self.events = {event.anomaly_id: event for event in events}
         self.incidents: list = []  # what search_incidents returns; empty means no corpus
+        self.saved: list = []  # (StoredAnalysis, evidence) pairs, oldest first
+        self.fail_saves = False
 
     def get(self, anomaly_id: str) -> AnomalyEvent | None:
-        return self._events.get(anomaly_id)
+        return self.events.get(anomaly_id)
 
     def scoring_inputs(self, anomaly_id: str, window_seconds: float, lookback_minutes: float):
-        event = self._events.get(anomaly_id)
+        event = self.events.get(anomaly_id)
         return None if event is None else ScoringInputs(anomaly=event, related=[], deploys=[])
 
     def incident_count(self) -> int:
@@ -44,6 +48,25 @@ class FakeAnomalyStore:
 
     def search_incidents(self, vector, services, fault_types, top_k, hybrid):
         return self.incidents[:top_k]
+
+    def save_analysis(self, analysis, evidence):
+        if self.fail_saves:
+            raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+        stored = analysis.model_copy(update={"created_at": datetime.now(timezone.utc)})
+        self.saved.append((stored, list(evidence)))
+        return stored.created_at
+
+    def latest_reusable_analysis(self, anomaly_id, pipeline_mode, model_version, config_fingerprint):
+        key = (anomaly_id, pipeline_mode, model_version, config_fingerprint)
+        for analysis, _ in reversed(self.saved):
+            identity = (analysis.anomaly_id, analysis.pipeline_mode, analysis.model_version, analysis.config_fingerprint)
+            if identity == key and analysis.answered_by in REUSABLE_ANSWERS:
+                return analysis
+        return None
+
+    def analyses(self, anomaly_id, pipeline_mode=None, limit=20):
+        found = [a for a, _ in reversed(self.saved) if a.anomaly_id == anomaly_id and pipeline_mode in (None, a.pipeline_mode)]
+        return found[:limit]
 
     def status(self) -> str:
         return "ok"
@@ -54,7 +77,7 @@ def fake_embed(texts: list[str]) -> list[list[float]]:
 
 
 def fake_chat(messages, schema) -> ChatReply:
-    """A well-behaved LLM: one hypothesis about the top candidate, citing only the anomaly."""
+    """A well-behaved LLM: one hypothesis about the first listed candidate, citing only the anomaly."""
     top = schema["properties"]["hypotheses"]["items"]["anyOf"][0]["properties"]
     content = {
         "hypotheses": [

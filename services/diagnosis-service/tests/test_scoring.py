@@ -83,6 +83,20 @@ def test_invalid_config_is_rejected(changes, message):
         dataclasses.replace(CONFIG, **changes)
 
 
+def test_without_graph_zeroes_the_graph_weight_and_rescales_the_rest():
+    no_graph = CONFIG.without_graph()
+    assert no_graph.weights["graph_proximity"] == 0.0
+    assert sum(no_graph.weights.values()) == pytest.approx(1.0)
+    assert no_graph.weights["deploy_proximity"] / no_graph.weights["co_anomaly"] == pytest.approx(0.40 / 0.20)
+    report = score(["front-end"], config=no_graph)
+    # The signal is still computed and shown; it just no longer counts.
+    assert report.weights["graph_proximity"] == 0.0
+    assert all(c.signals.graph_proximity > 0 for c in report.candidates)
+    for candidate in report.candidates:
+        expected = sum(w * getattr(candidate.signals, name) for name, w in no_graph.weights.items())
+        assert candidate.score == pytest.approx(expected)
+
+
 # ------------------------------------------------------------------ candidates
 
 

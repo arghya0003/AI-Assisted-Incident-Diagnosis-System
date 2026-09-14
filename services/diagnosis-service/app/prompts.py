@@ -7,6 +7,7 @@ and Ollama enforces it while decoding. Instructions alone were not enough: with 
 allowed actions, phi4-mini proposed rolling back one service's deploy as the fix for another.
 """
 
+import dataclasses
 import logging
 import math
 import string
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.hypotheses import MAX_HYPOTHESES, CandidateOptions, candidate_options
-from app.models import AnomalyEvent, Candidate, CandidateReport, Evidence, SimilarIncident
+from app.models import NO_ACTION, AnomalyEvent, Candidate, CandidateReport, Deploy, Evidence, SimilarIncident
 
 log = logging.getLogger("diagnosis-service.prompts")
 
@@ -23,6 +24,9 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT = (PROMPTS_DIR / "analyze_system.txt").read_text(encoding="utf-8").strip()
 USER_TEMPLATE = string.Template((PROMPTS_DIR / "analyze_user.txt").read_text(encoding="utf-8").strip())
 RETRY_TEMPLATE = string.Template((PROMPTS_DIR / "analyze_retry.txt").read_text(encoding="utf-8").strip())
+# The llm_only ablation's prompt: no scores, graph positions or past incidents.
+LLM_ONLY_SYSTEM_PROMPT = (PROMPTS_DIR / "analyze_llm_only_system.txt").read_text(encoding="utf-8").strip()
+LLM_ONLY_USER_TEMPLATE = string.Template((PROMPTS_DIR / "analyze_llm_only_user.txt").read_text(encoding="utf-8").strip())
 
 # Measured on phi4-mini in Phase 6: 1,983 characters of prompt became 575 prompt tokens (3.45 per
 # token, chat template included). Assuming 3.0 overestimates by about 15%, so the budget errs safe.
@@ -167,8 +171,119 @@ def response_schema(options: list[CandidateOptions]) -> dict:
     }
 
 
-def _anomaly_block(anomaly: AnomalyEvent, related: list[Evidence]) -> str:
-    lines = [
+def build_llm_only_prompt(
+    anomaly: AnomalyEvent,
+    related: list[AnomalyEvent],
+    deploys: list[Deploy],
+    services: list[str],
+    window_seconds: float,
+    lookback_minutes: float,
+    rollback_max_minutes: float,
+    context_tokens: int,
+    response_reserve_tokens: int,
+) -> Prompt:
+    """The llm_only ablation's prompt: the anomaly, related anomalies and raw deploys, with every
+    service as a possible cause and no scores, graph or retrieval. Each service may cite the anomaly,
+    related anomalies naming it and its own deploys, and may propose rolling back its own deploys
+    within `rollback_max_minutes`: the same limits the scored modes apply."""
+    budget = context_tokens - response_reserve_tokens
+    prompt = _render_llm_only(anomaly, related, deploys, services, window_seconds, lookback_minutes, rollback_max_minutes, True)
+    truncations = []
+    if prompt.estimated_tokens > budget:
+        log.warning("llm_only prompt for %s is ~%d tokens, over the %d-token budget: dropped deploy config diffs",
+                    anomaly.anomaly_id, prompt.estimated_tokens, budget)
+        truncations.append("dropped deploy config diffs")
+        prompt = _render_llm_only(anomaly, related, deploys, services, window_seconds, lookback_minutes, rollback_max_minutes, False)
+    if prompt.estimated_tokens > budget:
+        raise PromptTooLarge(
+            f"llm_only prompt for {anomaly.anomaly_id} is ~{prompt.estimated_tokens} tokens without config diffs; "
+            f"budget is {budget}"
+        )
+    return dataclasses.replace(prompt, truncations=truncations)
+
+
+def _render_llm_only(
+    anomaly: AnomalyEvent,
+    related: list[AnomalyEvent],
+    deploys: list[Deploy],
+    services: list[str],
+    window_seconds: float,
+    lookback_minutes: float,
+    rollback_max_minutes: float,
+    config_diffs: bool,
+) -> Prompt:
+    onset = anomaly.t_onset
+    nearby = sorted(
+        (
+            other
+            for other in related
+            if other.anomaly_id != anomaly.anomaly_id and abs((other.t_onset - onset).total_seconds()) <= window_seconds
+        ),
+        key=lambda other: (other.t_onset, other.anomaly_id),
+    )
+    recent = sorted(
+        (
+            ((onset - deploy.time).total_seconds() / 60, deploy)
+            for deploy in deploys
+            if 0 <= (onset - deploy.time).total_seconds() / 60 <= lookback_minutes
+        ),
+        key=lambda pair: (pair[0], pair[1].deploy_id),
+    )
+
+    options = []
+    for service in services:
+        own = [(minutes, deploy) for minutes, deploy in recent if deploy.service == service]
+        citable = [anomaly.anomaly_id]
+        citable += [other.anomaly_id for other in nearby if service in other.services]
+        citable += [deploy.deploy_id for _, deploy in own]
+        actions = [NO_ACTION] + [f"rollback_deploy:{d.deploy_id}" for minutes, d in own if minutes <= rollback_max_minutes]
+        options.append(
+            CandidateOptions(
+                service=service,
+                citable_ids=list(dict.fromkeys(citable)),
+                actions=actions,
+                has_recent_deploy=bool(own),
+            )
+        )
+
+    lines = _anomaly_lines(anomaly)
+    if nearby:
+        lines.append("related anomalies with a nearby onset:")
+        for other in nearby:
+            offset = (other.t_onset - onset).total_seconds()
+            lines.append(
+                f"  {other.anomaly_id}: {', '.join(other.metrics)} on {', '.join(other.services)} "
+                f"({other.severity}), onset {offset:+.1f} s"
+            )
+    else:
+        lines.append("related anomalies with a nearby onset: none")
+
+    deploy_lines = []
+    for minutes, deploy in recent:
+        line = f"{deploy.deploy_id}: {deploy.service} version {deploy.version}, {minutes:.1f} min before onset"
+        if config_diffs and deploy.config_diff:
+            line += f"; config diff: {_truncate(deploy.config_diff, CONFIG_DIFF_LIMIT)}"
+        deploy_lines.append(line)
+
+    user = LLM_ONLY_USER_TEMPLATE.substitute(
+        anomaly="\n".join(lines),
+        lookback=f"{lookback_minutes:g}",
+        deploys="\n".join(deploy_lines) or "none",
+        services="\n".join(
+            f"{option.service}\n   may cite: {', '.join(option.citable_ids)}\n   may propose: {', '.join(option.actions)}"
+            for option in options
+        ),
+    )
+    return Prompt(
+        messages=[{"role": "system", "content": LLM_ONLY_SYSTEM_PROMPT}, {"role": "user", "content": user}],
+        schema=response_schema(options),
+        options=options,
+        estimated_tokens=estimate_tokens(LLM_ONLY_SYSTEM_PROMPT + user),
+    )
+
+
+def _anomaly_lines(anomaly: AnomalyEvent) -> list[str]:
+    return [
         f"anomaly_id: {anomaly.anomaly_id}",
         f"services: {', '.join(anomaly.services)}",
         f"metrics: {', '.join(anomaly.metrics)}",
@@ -176,6 +291,10 @@ def _anomaly_block(anomaly: AnomalyEvent, related: list[Evidence]) -> str:
         f"onset: {_iso(anomaly.t_onset)}",
         "observed and baseline values: not provided by the anomaly detector",
     ]
+
+
+def _anomaly_block(anomaly: AnomalyEvent, related: list[Evidence]) -> str:
+    lines = _anomaly_lines(anomaly)
     if not related:
         lines.append("related anomalies with a nearby onset: none")
     else:

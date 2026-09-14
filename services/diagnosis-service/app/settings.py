@@ -77,6 +77,7 @@ class Settings:
     llm_max_output_tokens: int
     prompt_max_candidates: int
     prompt_min_candidates: int
+    pipeline_mode: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -127,6 +128,9 @@ class Settings:
             # Candidates shown to the LLM, trimmed to the minimum when the prompt is over budget.
             prompt_max_candidates=_int_env("PROMPT_MAX_CANDIDATES", 5),
             prompt_min_candidates=_int_env("PROMPT_MIN_CANDIDATES", 3),
+            # Default /analyze pipeline mode; a request can override it with ?mode=. The other modes
+            # exist for the evaluation's ablations (PLAN.md, Phase 8).
+            pipeline_mode=_choice_env("PIPELINE_MODE", "full", ("full", "llm_only", "no_graph", "deterministic")),
         )
 
 

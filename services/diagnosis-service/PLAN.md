@@ -929,6 +929,67 @@ Findings:
 output; results are queryable from SQL in one statement, which is what makes the Week 10
 "regenerable from a single script" criterion achievable.
 
+#### Phase 8 outcome (2026-09-14) — status: DONE
+
+| Check | Result |
+| --- | --- |
+| Same fixture in all four modes, comparably shaped output | All 10 fixtures ran in `full`, `no_graph`, `llm_only` and `deterministic`: 40/40 contract-valid, all stored. A unit test does the same for every fixture. |
+| Results queryable from SQL in one statement | One `analyses` ⟕ `hypotheses` query returns all 40 runs with rank-1 service, action, confidence, attempts and latency (query in `README.md`) |
+| Every returned hypothesis written with `model_version`, `pipeline_mode`, `latency_ms` | Yes, plus `analysis_id` and `service`. Every run gets an `analyses` row, including `llm_failed` runs with no hypotheses. The scorer's evidence is upserted into M1's `evidence` table. |
+| Mode per request or by env var | `?mode=` and `PIPELINE_MODE`; an unknown mode returns 422 |
+| `GET /hypotheses/{anomaly_id}` | Live: two stored runs newest first, each with hypotheses and service; 404 for an unknown anomaly |
+| Response cache | Live, on a real anomaly: miss, then hit with the same `X-Analysis-Id`, then `?refresh=true` gave a miss and a new run |
+| Tests | 427 passed, 4 xfailed, inside the compose network |
+
+Ablation, 1 run per fixture per mode, with fixture context:
+
+| Mode | Rank-1 = true cause (8 labelled) | Answered by | Retried | p50 / p95 | Rank-1 rollbacks (wrong) |
+| --- | --- | --- | --- | --- | --- |
+| `deterministic` | 5/8 | scorer 10 | — | 52 ms / 77 ms | 6 (2) |
+| `full` | 4/8 | LLM 8, fallback 2 | 5 | 15.0 s / 40.7 s | 6 (2) |
+| `no_graph` | 5/8 | LLM 9, fallback 1 | 3 | 13.1 s / 38.3 s | 6 (2) |
+| `llm_only` | 3/8 | LLM 10 | 2 | 11.9 s / 26.1 s | 7 (4) |
+
+Decisions made while building, beyond what this section specified:
+
+- **An `analyses` table (migration `006_diagnosis_analyses.sql`) as well as `hypotheses`.** A run
+  with no hypotheses (an `llm_only` failure) still needs a row, so failures, fallbacks and latency
+  can be counted in SQL.
+- **The cache key adds a configuration fingerprint** to anomaly, mode and model version. The
+  fingerprint is a hash of the service version, LLM settings, scoring weights, pipeline settings
+  and every prompt file, so an edited prompt never serves an old answer.
+- **Only intended answers are cached.** A fallback or `llm_failed` run is never reused, so the next
+  request makes a fresh attempt.
+- **A run made before the anomaly's co-anomaly window closed is never reused**, because related
+  anomalies may have arrived since. `?refresh=true` bypasses the cache. A failed database write
+  still returns the answer, with `X-Persisted: false`.
+- **`llm_only` gives the LLM the anomaly, related anomalies and raw deploys**, with every service as
+  a possible cause and no scores, graph or retrieved incidents. It keeps the same per-service limits
+  (cite its own records; roll back its own deploys within about 7 minutes). It has **no fallback**:
+  a failure is an empty answer, so the ablation measures the LLM alone.
+- **`no_graph` zeroes the graph weight and rescales the other weights to sum to 1**, as the plan
+  said. The graph still defines the candidate set, and the LLM prompt still shows each candidate's
+  position, so this ablation removes graph *scoring*, not graph *knowledge*.
+- **`model_version` is the model name** (`phi4-mini`), or `none` in deterministic mode. The
+  quantisation is not recorded separately; the fingerprint covers model settings.
+- **Evidence rows are written with the run.** This completes the Phase 4 item that was deferred to
+  "when `/analyze` cites evidence".
+
+Findings:
+
+1. **The LLM does not beat the deterministic baseline on these fixtures.** Rank-1 accuracy was 5/8
+   for `deterministic` against 4/8 for `full`, with the same rollbacks, at about 300 times the
+   latency. This matches Phase 6 finding 2.
+2. **The structure is what produces correct answers.** `llm_only` was worst: 3/8, and 4 wrong
+   rollbacks, including routine deploys on the benign `anom-fx-09` and ambiguous `anom-fx-10` where
+   every scored mode said `no_action`.
+3. **The sample is small and optimistic**: one run per mode on 8 labelled fixtures written by the
+   same author as the corpus. The Week 8–9 evaluation needs real injected faults, which depends on
+   issue #6 (no standing traffic).
+4. **Latency under load:** while this evaluation ran, a live `deterministic` request took 2.6–11 s
+   instead of about 50 ms. Its retrieval embedding call queued behind LLM generations on the same
+   GPU. In production, deterministic requests would share Ollama with LLM requests.
+
 ---
 
 ## 4. Mapping to the 10-week plan

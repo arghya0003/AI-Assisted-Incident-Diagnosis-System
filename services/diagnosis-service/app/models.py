@@ -166,9 +166,63 @@ class CandidateReport(BaseModel):
     t_onset: datetime
     anomalous_services: list[str]  # this event's services plus those of related anomalies
     related_anomaly_ids: list[str]
-    weights: dict[str, float]
+    weights: dict[str, float]  # as used for this ranking (the no_graph mode zeroes graph_proximity)
     # not_run | ok | empty_corpus | embedding_unavailable (app/retrieval.py)
     retrieval_status: str
     similar_incidents: list[SimilarIncident]
     candidates: list[Candidate]
     evidence: list[Evidence]
+
+
+PipelineMode = Literal["full", "llm_only", "no_graph", "deterministic"]
+# How an answer was produced: by the LLM; by the deterministic ranking by design (deterministic mode);
+# by the deterministic ranking because the LLM failed; or not at all (llm_only has no fallback).
+AnsweredBy = Literal["llm", "deterministic", "deterministic_fallback", "llm_failed"]
+# Answers the response cache may serve again. A fallback or failure is never reused: the next request
+# should get a fresh attempt.
+REUSABLE_ANSWERS = ("llm", "deterministic")
+
+
+class StoredHypothesis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int
+    service: str | None  # the candidate the hypothesis is about
+    cause: str
+    confidence: float
+    evidence_ids: list[str]
+    proposed_action: str
+
+
+class StoredAnalysis(BaseModel):
+    """One /analyze run, as stored in the analyses and hypotheses tables
+    (timescaledb/init/006_diagnosis_analyses.sql). Returned by GET /hypotheses/{anomaly_id}."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    analysis_id: str
+    anomaly_id: str
+    pipeline_mode: PipelineMode
+    answered_by: AnsweredBy
+    model_version: str
+    config_fingerprint: str
+    llm_attempts: int
+    guardrail_rejected: int
+    latency_ms: int
+    fallback_reason: str | None
+    created_at: datetime | None = None  # set by the database when the run is stored
+    hypotheses: list[StoredHypothesis]
+
+    def response(self) -> AnalyzeResponse:
+        return AnalyzeResponse(
+            hypotheses=[
+                Hypothesis(
+                    rank=h.rank,
+                    cause=h.cause,
+                    confidence=h.confidence,
+                    evidence_ids=h.evidence_ids,
+                    proposed_action=h.proposed_action,
+                )
+                for h in self.hypotheses
+            ]
+        )

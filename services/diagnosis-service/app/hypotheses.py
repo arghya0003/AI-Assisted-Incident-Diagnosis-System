@@ -4,6 +4,7 @@ Shared by the LLM prompt and response schema (app/prompts.py), LLM reply validat
 and the deterministic fallback (app/deterministic.py), so all three obey exactly the same limits.
 """
 
+import math
 from dataclasses import dataclass, field
 
 from app.models import NO_ACTION, AnalyzeResponse, Candidate, CandidateReport
@@ -15,6 +16,13 @@ ROLLBACK_MIN_DEPLOY_PROXIMITY = 0.5
 # Evidence categories whose source ids are records a hypothesis may cite
 # (CONTRACTS.md: every evidence id resolves to an anomaly, deploy or incident).
 CITABLE_CATEGORIES = ("anomaly", "deployment", "similar_incident")
+
+
+def rollback_window_minutes(deploy_decay_minutes: float) -> float:
+    """How recent a deploy must be to be offered for rollback: the age at which its deploy score,
+    exp(-minutes / decay), falls to ROLLBACK_MIN_DEPLOY_PROXIMITY (about 7 minutes by default). For the
+    llm_only mode, which has no deploy scores but must apply the same rule."""
+    return -deploy_decay_minutes * math.log(ROLLBACK_MIN_DEPLOY_PROXIMITY)
 
 
 @dataclass(frozen=True)

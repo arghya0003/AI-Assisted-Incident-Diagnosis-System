@@ -74,7 +74,7 @@ def test_the_allowed_set_is_what_the_service_supplied():
     fixture = FIXTURES["anom-fx-08"]
     report = score_candidates(fixture.scoring_inputs(), GRAPH, SCORING)
     prompt = build_prompt(fixture.event, report, context_tokens=100_000, response_reserve_tokens=1024)
-    allowed = allowed_ids(report, prompt)
+    allowed = allowed_ids(report.anomaly_id, report, prompt)
     assert "anom-fx-08" in allowed and "dep-fx-08-inj" in allowed
     assert {item.evidence_id for item in report.evidence} <= allowed
     assert set(prompt.citable_ids) <= allowed
@@ -87,7 +87,11 @@ def test_the_allowed_set_is_what_the_service_supplied():
 def test_without_a_prompt_the_report_evidence_is_the_allowed_set():
     fixture = FIXTURES["anom-fx-01"]
     report = score_candidates(fixture.scoring_inputs(), GRAPH, SCORING)
-    assert {"anom-fx-01", "dep-fx-01-inj", "anom-fx-01-p99"} <= allowed_ids(report, None)
+    assert {"anom-fx-01", "dep-fx-01-inj", "anom-fx-01-p99"} <= allowed_ids(report.anomaly_id, report, None)
+
+
+def test_llm_only_allows_only_what_its_prompt_supplied():
+    assert allowed_ids("anom-fx-01", None, None) == {"anom-fx-01"}
 
 
 # ------------------------------------------------------------------ in the pipeline
@@ -126,9 +130,9 @@ def poisoned_llm(poison_every_hypothesis):
     return chat
 
 
-def run(anomaly_id, chat, stats=None):
+def run(anomaly_id, chat, stats=None, mode="full"):
     pipeline = DiagnosisPipeline(EmptyCorpus(), lambda texts: [], chat, GRAPH, SCORING, CONFIG, stats)
-    return pipeline.analyze_inputs(FIXTURES[anomaly_id].scoring_inputs())
+    return pipeline.analyze_inputs(FIXTURES[anomaly_id].scoring_inputs(), mode)
 
 
 def cited(result):
@@ -173,6 +177,15 @@ def test_the_deterministic_ranking_always_passes_the_guardrail(anomaly_id):
 
     result = run(anomaly_id, down)
     assert result.mode == "deterministic_fallback" and result.guardrail_rejections == []
+
+
+@pytest.mark.parametrize("anomaly_id", sorted(FIXTURES))
+def test_llm_only_poison_is_dropped_too(anomaly_id):
+    partly = run(anomaly_id, poisoned_llm(poison_every_hypothesis=False), mode="llm_only")
+    assert partly.mode == "llm" and not cited(partly) & set(POISON)
+    fully = run(anomaly_id, poisoned_llm(poison_every_hypothesis=True), mode="llm_only")
+    assert fully.mode == "llm_failed" and fully.response.hypotheses == []
+    assert "evidence guardrail rejected all" in fully.fallback_reason
 
 
 def test_the_counters_record_llm_and_deterministic_hypotheses_separately():

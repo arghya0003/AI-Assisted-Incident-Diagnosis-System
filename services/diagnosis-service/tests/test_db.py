@@ -24,11 +24,15 @@ from app.db import (
     delete_incidents_except,
     get_anomaly,
     get_scoring_inputs,
+    latest_reusable_analysis,
+    list_analyses,
     missing_tables,
+    save_analysis,
     save_anomaly,
     search_incidents,
     upsert_incident,
 )
+from app.models import Evidence, StoredAnalysis, StoredHypothesis
 from app.models import AnomalyEvent
 from app.settings import settings
 
@@ -230,6 +234,76 @@ def test_delete_incidents_except_removes_the_rest(cur):
     delete_incidents_except(cur, ["incident-9901"])
     cur.execute("SELECT incident_id FROM incidents")
     assert cur.fetchall() == [("incident-9901",)]  # rolled back after the test
+
+
+P8_ANOMALY = "anom-test-p8-0001"
+
+
+def _run(analysis_id, mode="full", answered_by="llm", fingerprint="fp0000000001", hypotheses=None):
+    if hypotheses is None:
+        hypotheses = [
+            StoredHypothesis(rank=1, service="catalogue", cause="catalogue deploy", confidence=0.8,
+                             evidence_ids=[P8_ANOMALY, "dep-test-p8"], proposed_action="rollback_deploy:dep-test-p8"),
+            StoredHypothesis(rank=2, service="front-end", cause="front-end symptom", confidence=0.2,
+                             evidence_ids=[P8_ANOMALY], proposed_action="no_action"),
+        ]
+    return StoredAnalysis(
+        analysis_id=analysis_id, anomaly_id=P8_ANOMALY, pipeline_mode=mode, answered_by=answered_by,
+        model_version="none" if mode == "deterministic" else "phi4-mini", config_fingerprint=fingerprint,
+        llm_attempts=0 if mode == "deterministic" else 1, guardrail_rejected=0, latency_ms=1234,
+        fallback_reason=None if answered_by in ("llm", "deterministic") else "ollama unavailable",
+        hypotheses=hypotheses,
+    )
+
+
+def _evidence(relevance=0.9):
+    return Evidence(
+        evidence_id=f"ev:{P8_ANOMALY}:deployment:dep-test-p8", incident_id=P8_ANOMALY, category="deployment",
+        source_id="dep-test-p8", service="catalogue", observed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        relevance=relevance, summary="catalogue deployed", payload={"version": "1.0.0"},
+    )
+
+
+def test_a_stored_run_reads_back_with_its_hypotheses_and_evidence(cur):
+    created = save_analysis(cur, _run("an-test-p8-a"), [_evidence()])
+    (run,) = list_analyses(cur, P8_ANOMALY)
+    assert run.created_at == created
+    assert [(h.rank, h.service) for h in run.hypotheses] == [(1, "catalogue"), (2, "front-end")]
+    assert run.hypotheses[0].evidence_ids == [P8_ANOMALY, "dep-test-p8"]
+    cur.execute("SELECT hypothesis_id FROM hypotheses WHERE analysis_id = 'an-test-p8-a' ORDER BY rank")
+    assert cur.fetchall() == [("an-test-p8-a-1",), ("an-test-p8-a-2",)]
+    cur.execute("SELECT relevance, payload FROM evidence WHERE incident_id = %s", (P8_ANOMALY,))
+    assert cur.fetchall() == [(0.9, {"version": "1.0.0"})]
+
+
+def test_evidence_is_updated_when_an_anomaly_is_analysed_again(cur):
+    save_analysis(cur, _run("an-test-p8-a"), [_evidence(0.9)])
+    save_analysis(cur, _run("an-test-p8-b"), [_evidence(0.4)])
+    cur.execute("SELECT relevance FROM evidence WHERE incident_id = %s", (P8_ANOMALY,))
+    assert cur.fetchall() == [(0.4,)]
+
+
+def test_a_run_without_hypotheses_is_still_recorded(cur):
+    save_analysis(cur, _run("an-test-p8-failed", mode="llm_only", answered_by="llm_failed", hypotheses=[]), [])
+    (run,) = list_analyses(cur, P8_ANOMALY)
+    assert run.answered_by == "llm_failed" and run.hypotheses == []
+
+
+def test_the_cache_lookup_serves_only_the_newest_reusable_run_for_its_key(cur):
+    save_analysis(cur, _run("an-test-p8-old"), [])
+    save_analysis(cur, _run("an-test-p8-new"), [])
+    save_analysis(cur, _run("an-test-p8-fallback", answered_by="deterministic_fallback"), [])  # newest, not reusable
+    save_analysis(cur, _run("an-test-p8-otherfp", fingerprint="fp0000000002"), [])
+    save_analysis(cur, _run("an-test-p8-det", mode="deterministic", answered_by="deterministic"), [])
+
+    found = latest_reusable_analysis(cur, P8_ANOMALY, "full", "phi4-mini", "fp0000000001")
+    assert found.analysis_id == "an-test-p8-new"
+    assert latest_reusable_analysis(cur, P8_ANOMALY, "deterministic", "none", "fp0000000001").analysis_id == "an-test-p8-det"
+    assert latest_reusable_analysis(cur, P8_ANOMALY, "no_graph", "phi4-mini", "fp0000000001") is None
+    assert [r.analysis_id for r in list_analyses(cur, P8_ANOMALY, pipeline_mode="full")][:2] == [
+        "an-test-p8-otherfp",
+        "an-test-p8-fallback",
+    ]
 
 
 def test_store_reports_an_unreachable_database():

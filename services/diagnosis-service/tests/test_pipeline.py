@@ -123,3 +123,59 @@ def test_a_prompt_over_budget_falls_back_without_calling_the_llm():
 
 def test_unknown_anomaly_is_none():
     assert pipeline(top_candidate_llm).analyze("anom-does-not-exist") is None
+
+
+# ------------------------------------------------------------------ pipeline modes
+
+FIXTURES_BY_ID = {f.event.anomaly_id: f for f in FIXTURES}
+MODES = ("full", "no_graph", "llm_only", "deterministic")
+
+
+def never_called(messages, schema):
+    raise AssertionError("the LLM was called")
+
+
+class NoRetrieval(EmptyCorpus):
+    def incident_count(self):
+        raise AssertionError("retrieval ran")
+
+
+@pytest.mark.parametrize("fixture", FIXTURES, ids=IDS)
+def test_every_mode_returns_a_comparably_shaped_answer(fixture):
+    for mode in MODES:
+        chat = never_called if mode == "deterministic" else top_candidate_llm
+        result = pipeline(chat).analyze_inputs(fixture.scoring_inputs(), mode)
+        assert result.pipeline_mode == mode
+        response = AnalyzeResponse.model_validate(result.response.model_dump())
+        assert 1 <= len(response.hypotheses) <= 3
+        assert response.hypotheses[0].evidence_ids[0] == fixture.event.anomaly_id
+        assert len(result.services) == len(response.hypotheses)
+        assert result.mode == ("deterministic" if mode == "deterministic" else "llm")
+
+
+def test_deterministic_mode_is_the_baseline_not_a_fallback():
+    result = pipeline(never_called).analyze_inputs(FIXTURES_BY_ID["anom-fx-01"].scoring_inputs(), "deterministic")
+    assert result.mode == "deterministic"
+    assert (result.fallback_reason, result.llm, result.prompt) == (None, None, None)
+    assert result.services[0] == "catalogue"
+
+
+def test_no_graph_mode_scores_without_graph_proximity():
+    result = pipeline(top_candidate_llm).analyze_inputs(FIXTURES_BY_ID["anom-fx-08"].scoring_inputs(), "no_graph")
+    assert result.report.weights["graph_proximity"] == 0.0
+    full = pipeline(top_candidate_llm).analyze_inputs(FIXTURES_BY_ID["anom-fx-08"].scoring_inputs(), "full")
+    assert full.report.weights["graph_proximity"] == 0.25
+
+
+def test_llm_only_mode_skips_scoring_retrieval_and_the_graph():
+    llm_only = DiagnosisPipeline(NoRetrieval(), never_called, top_candidate_llm, GRAPH, SCORING, CONFIG)
+    result = llm_only.analyze_inputs(FIXTURES_BY_ID["anom-fx-01"].scoring_inputs(), "llm_only")
+    assert result.mode == "llm" and result.report is None
+    assert "score" not in result.prompt.messages[1]["content"].lower()
+
+
+def test_llm_only_mode_has_no_deterministic_fallback():
+    result = pipeline(unreachable_llm).analyze_inputs(FIXTURES_BY_ID["anom-fx-01"].scoring_inputs(), "llm_only")
+    assert result.mode == "llm_failed"
+    assert result.response.hypotheses == [] and result.services == []
+    assert "connection refused" in result.fallback_reason

@@ -18,6 +18,7 @@ score = weighted sum of the signals, with weights from settings. Every candidate
 evidence behind its signals, and those evidence ids are what the LLM may later cite.
 """
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 
@@ -69,6 +70,20 @@ class ScoringConfig:
             deploy_lookback_minutes=settings.deploy_lookback_minutes,
             deploy_decay_minutes=settings.deploy_decay_minutes,
             co_anomaly_window_seconds=settings.co_anomaly_window_seconds,
+        )
+
+    def without_graph(self) -> "ScoringConfig":
+        """The no_graph ablation: graph proximity weighted 0 and the other weights scaled back up to sum
+        to 1. The graph still decides which services are candidates, and the signal is still shown."""
+        remaining = 1.0 - self.weight_graph
+        if remaining <= 0:
+            raise ValueError("cannot remove the graph weight when it is the only non-zero weight")
+        return dataclasses.replace(
+            self,
+            weight_deploy=self.weight_deploy / remaining,
+            weight_graph=0.0,
+            weight_co_anomaly=self.weight_co_anomaly / remaining,
+            weight_incident=self.weight_incident / remaining,
         )
 
 

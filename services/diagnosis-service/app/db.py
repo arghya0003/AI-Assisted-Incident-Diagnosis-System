@@ -8,6 +8,7 @@ consumer keeps its own long-lived connection.
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Literal, Protocol, TypeVar
 
 import psycopg2
@@ -15,12 +16,12 @@ import psycopg2.errors
 from psycopg2.extras import Json
 
 from app.corpus import IncidentRecord, section
-from app.models import AnomalyEvent, Deploy, SimilarIncident
+from app.models import REUSABLE_ANSWERS, AnomalyEvent, Deploy, Evidence, SimilarIncident, StoredAnalysis
 from app.scoring import ScoringInputs
 from app.settings import Settings
 
-M3_TABLES = ("anomalies", "incidents", "hypotheses")
-MIGRATION = "timescaledb/init/005_diagnosis.sql"
+M3_TABLES = ("anomalies", "incidents", "hypotheses", "analyses")
+MIGRATION = "timescaledb/init/005_diagnosis.sql and 006_diagnosis_analyses.sql"
 
 SaveResult = Literal["inserted", "duplicate", "collision"]
 DbStatus = Literal["ok", "unreachable", "schema_missing"]
@@ -219,6 +220,116 @@ def search_incidents(
     ]
 
 
+# ------------------------------------------------------------------ analyses
+
+_INSERT_ANALYSIS = """
+    INSERT INTO analyses (analysis_id, anomaly_id, pipeline_mode, answered_by, model_version, config_fingerprint,
+                          llm_attempts, guardrail_rejected, latency_ms, fallback_reason, created_at)
+    VALUES (%(analysis_id)s, %(anomaly_id)s, %(pipeline_mode)s, %(answered_by)s, %(model_version)s,
+            %(config_fingerprint)s, %(llm_attempts)s, %(guardrail_rejected)s, %(latency_ms)s, %(fallback_reason)s,
+            clock_timestamp())
+    RETURNING created_at
+"""
+
+_INSERT_HYPOTHESIS = """
+    INSERT INTO hypotheses (hypothesis_id, analysis_id, anomaly_id, rank, service, cause, confidence, evidence_ids,
+                            proposed_action, model_version, pipeline_mode, latency_ms)
+    VALUES (%(hypothesis_id)s, %(analysis_id)s, %(anomaly_id)s, %(rank)s, %(service)s, %(cause)s, %(confidence)s,
+            %(evidence_ids)s, %(proposed_action)s, %(model_version)s, %(pipeline_mode)s, %(latency_ms)s)
+"""
+
+# Evidence ids are deterministic per anomaly, so re-analysing an anomaly updates its rows in place.
+_UPSERT_EVIDENCE = """
+    INSERT INTO evidence (evidence_id, incident_id, category, source_id, service, observed_at, relevance, summary, payload)
+    VALUES (%(evidence_id)s, %(incident_id)s, %(category)s, %(source_id)s, %(service)s, %(observed_at)s,
+            %(relevance)s, %(summary)s, %(payload)s)
+    ON CONFLICT (evidence_id) DO UPDATE SET
+        observed_at = EXCLUDED.observed_at,
+        relevance = EXCLUDED.relevance,
+        summary = EXCLUDED.summary,
+        payload = EXCLUDED.payload
+"""
+
+
+def save_analysis(cur, analysis: StoredAnalysis, evidence: list[Evidence]) -> datetime:
+    """Store one run, its hypotheses, and the evidence behind them. Returns the stored created_at, taken
+    from clock_timestamp() so runs saved in one transaction still order correctly."""
+    cur.execute(_INSERT_ANALYSIS, analysis.model_dump(exclude={"hypotheses", "created_at"}))
+    (created_at,) = cur.fetchone()
+    for hypothesis in analysis.hypotheses:
+        cur.execute(
+            _INSERT_HYPOTHESIS,
+            {
+                **hypothesis.model_dump(),
+                "hypothesis_id": f"{analysis.analysis_id}-{hypothesis.rank}",
+                "analysis_id": analysis.analysis_id,
+                "anomaly_id": analysis.anomaly_id,
+                "model_version": analysis.model_version,
+                "pipeline_mode": analysis.pipeline_mode,
+                "latency_ms": analysis.latency_ms,
+            },
+        )
+    for item in evidence:
+        cur.execute(_UPSERT_EVIDENCE, {**item.model_dump(), "payload": Json(item.payload)})
+    return created_at
+
+
+_ANALYSES = """
+    SELECT a.analysis_id, a.anomaly_id, a.pipeline_mode, a.answered_by, a.model_version, a.config_fingerprint,
+           a.llm_attempts, a.guardrail_rejected, a.latency_ms, a.fallback_reason, a.created_at,
+           COALESCE(
+               json_agg(json_build_object(
+                   'rank', h.rank, 'service', h.service, 'cause', h.cause, 'confidence', h.confidence,
+                   'evidence_ids', h.evidence_ids, 'proposed_action', h.proposed_action
+               ) ORDER BY h.rank) FILTER (WHERE h.hypothesis_id IS NOT NULL),
+               '[]'::json
+           ) AS hypotheses
+    FROM analyses AS a
+    LEFT JOIN hypotheses AS h ON h.analysis_id = a.analysis_id
+    WHERE a.anomaly_id = %(anomaly_id)s
+      AND (%(pipeline_mode)s::text IS NULL OR a.pipeline_mode = %(pipeline_mode)s)
+      AND (%(model_version)s::text IS NULL OR a.model_version = %(model_version)s)
+      AND (%(config_fingerprint)s::text IS NULL OR a.config_fingerprint = %(config_fingerprint)s)
+      AND (NOT %(reusable_only)s OR a.answered_by = ANY(%(reusable)s))
+    GROUP BY a.analysis_id
+    ORDER BY a.created_at DESC, a.analysis_id
+    LIMIT %(limit)s
+"""
+
+
+def list_analyses(
+    cur,
+    anomaly_id: str,
+    pipeline_mode: str | None = None,
+    model_version: str | None = None,
+    config_fingerprint: str | None = None,
+    reusable_only: bool = False,
+    limit: int = 20,
+) -> list[StoredAnalysis]:
+    """Stored runs for an anomaly, newest first, each with its hypotheses in rank order."""
+    cur.execute(
+        _ANALYSES,
+        {
+            "anomaly_id": anomaly_id,
+            "pipeline_mode": pipeline_mode,
+            "model_version": model_version,
+            "config_fingerprint": config_fingerprint,
+            "reusable_only": reusable_only,
+            "reusable": list(REUSABLE_ANSWERS),
+            "limit": limit,
+        },
+    )
+    columns = [column.name for column in cur.description]
+    return [StoredAnalysis.model_validate(dict(zip(columns, row))) for row in cur.fetchall()]
+
+
+def latest_reusable_analysis(
+    cur, anomaly_id: str, pipeline_mode: str, model_version: str, config_fingerprint: str
+) -> StoredAnalysis | None:
+    found = list_analyses(cur, anomaly_id, pipeline_mode, model_version, config_fingerprint, reusable_only=True, limit=1)
+    return found[0] if found else None
+
+
 def missing_tables(cur) -> list[str]:
     cur.execute(
         "SELECT t FROM unnest(%s::text[]) AS t WHERE to_regclass(t) IS NULL",
@@ -241,6 +352,14 @@ class AnomalyStore(Protocol):
     def search_incidents(
         self, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool
     ) -> list[SimilarIncident]: ...
+
+    def save_analysis(self, analysis: StoredAnalysis, evidence: list[Evidence]) -> datetime: ...
+
+    def latest_reusable_analysis(
+        self, anomaly_id: str, pipeline_mode: str, model_version: str, config_fingerprint: str
+    ) -> StoredAnalysis | None: ...
+
+    def analyses(self, anomaly_id: str, pipeline_mode: str | None = None, limit: int = 20) -> list[StoredAnalysis]: ...
 
     def status(self) -> DbStatus: ...
 
@@ -266,9 +385,9 @@ class PostgresAnomalyStore:
         try:
             with self._cursor() as cur:
                 return query(cur, *args)
-        except psycopg2.errors.UndefinedTable as exc:
+        except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn) as exc:
             raise DatabaseUnavailable(
-                f"a required table is missing ({exc.diag.message_primary}); apply {MIGRATION}"
+                f"the database schema is out of date ({exc.diag.message_primary}); apply {MIGRATION}"
             ) from exc
         except psycopg2.OperationalError as exc:
             raise DatabaseUnavailable(f"TimescaleDB query failed: {exc}") from exc
@@ -288,6 +407,17 @@ class PostgresAnomalyStore:
         self, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool
     ) -> list[SimilarIncident]:
         return self._query(search_incidents, vector, services, fault_types, top_k, hybrid)
+
+    def save_analysis(self, analysis: StoredAnalysis, evidence: list[Evidence]) -> datetime:
+        return self._query(save_analysis, analysis, evidence)
+
+    def latest_reusable_analysis(
+        self, anomaly_id: str, pipeline_mode: str, model_version: str, config_fingerprint: str
+    ) -> StoredAnalysis | None:
+        return self._query(latest_reusable_analysis, anomaly_id, pipeline_mode, model_version, config_fingerprint)
+
+    def analyses(self, anomaly_id: str, pipeline_mode: str | None = None, limit: int = 20) -> list[StoredAnalysis]:
+        return self._query(list_analyses, anomaly_id, pipeline_mode, None, None, False, limit)
 
     def status(self) -> DbStatus:
         try:

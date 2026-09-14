@@ -8,8 +8,8 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 6 — LLM reasoning. A background consumer stores every `anomalies.detected`
-event in the `anomalies` table. For a stored anomaly, the pipeline:
+**Status:** Phase 8 — all planned phases built. A background consumer stores every
+`anomalies.detected` event in the `anomalies` table. For a stored anomaly, the full pipeline:
 
 1. ranks possible root causes deterministically: the anomalous services plus everything they
    call, scored on recent deploys, graph distance, being the deepest anomalous service, and
@@ -26,12 +26,33 @@ event in the `anomalies` table. For a stored anomaly, the pipeline:
 `POST /analyze` therefore always returns a contract-valid response in which every evidence id
 resolves to a real anomaly, deploy or incident.
 
+**Pipeline modes**, for the evaluation's ablations. Choose one per request with `?mode=`, or set the
+default with `PIPELINE_MODE`:
+
+| Mode | What runs |
+| --- | --- |
+| `full` (default) | Everything above |
+| `deterministic` | Scoring and retrieval only; the scorer's ranking is the answer. This is the no-LLM baseline. |
+| `no_graph` | The full pipeline with the graph-proximity weight set to 0 and the other weights rescaled |
+| `llm_only` | The anomaly, related anomalies and raw deploys go straight to phi4-mini, with no scores, graph or past incidents. There is no fallback: a failure returns an empty answer, so the mode measures the LLM alone. |
+
+**Stored runs and caching.** Every `/analyze` run is stored in the `analyses` and `hypotheses`
+tables, and the evidence behind the ranking in `evidence`. A repeat request for the same anomaly,
+mode, model and configuration returns the stored answer (`X-Cache: hit`).
+
+- **When a stored answer is not reused:** after a fallback or a failure, or when the run was made
+  before the anomaly's 2-minute co-anomaly window closed.
+- **Configuration changes:** a change to the prompt, weights or model settings changes the
+  configuration fingerprint (shown in `/health`), so old answers are not served.
+- **Forcing a new run:** add `?refresh=true`.
+
 ## API
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
 | `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
+| `GET` | `/hypotheses/{anomaly_id}` | — | Stored `/analyze` runs for an anomaly, newest first: `[{analysis_id, pipeline_mode, answered_by, model_version, config_fingerprint, llm_attempts, guardrail_rejected, latency_ms, fallback_reason, created_at, hypotheses[{rank, service, cause, confidence, evidence_ids, proposed_action}]}]`. Optional `?mode=` and `?limit=` (default 20). 404 for an unknown anomaly. |
 | `GET` | `/stats` | — | Evidence-guardrail counters since the service started, split into LLM and deterministic hypotheses: checked, rejected, and responses fully rejected. The counters reset on restart. |
 | `GET` | `/candidates/{anomaly_id}` | — | Debug: `{anomaly_id, anomalous_services, related_anomaly_ids, weights, retrieval_status, similar_incidents[], candidates[{rank, service, score, signals, distance, deploy_id, evidence_ids}], evidence[]}`. Read-only, no LLM generation; 404 and 503 as for `/analyze`. `retrieval_status` is `ok`, `empty_corpus` or `embedding_unavailable`; retrieval problems never fail the request. |
 
@@ -48,7 +69,11 @@ A model failure never produces an error status. Two response headers say how the
 
 | Header | Values |
 | --- | --- |
-| `X-Diagnosis-Mode` | `llm` (phi4-mini's hypotheses), or `deterministic_fallback` (the scorer's ranking with causes prefixed `Deterministic ranking (LLM not used):`) |
+| `X-Diagnosis-Mode` | `llm` (phi4-mini's hypotheses); `deterministic` (the scorer's ranking, by design in `deterministic` mode); `deterministic_fallback` (the scorer's ranking because the LLM failed, with causes prefixed `Deterministic ranking (LLM not used):`); or `llm_failed` (no answer, `llm_only` mode only) |
+| `X-Pipeline-Mode` | The mode that ran: `full`, `no_graph`, `llm_only` or `deterministic` |
+| `X-Analysis-Id` | The stored run's id, as listed by `GET /hypotheses/{anomaly_id}` |
+| `X-Cache` | `hit` when a stored answer was returned, otherwise `miss` |
+| `X-Persisted` | `false` if the run could not be stored; the answer is still returned |
 | `X-LLM-Attempts` | `0`–`3`: generation attempts made; `0` when the prompt could not fit the context budget |
 | `X-Guardrail-Rejected` | Number of hypotheses the evidence guardrail dropped for this answer |
 
@@ -65,11 +90,13 @@ outcome).
 
 ## Run
 
-**Database migration.** `timescaledb/init/005_diagnosis.sql` runs automatically only on a
-fresh TimescaleDB volume. On an existing one, apply it once (safe to re-run):
+**Database migrations.** `timescaledb/init/005_diagnosis.sql` and `006_diagnosis_analyses.sql`
+run automatically only on a fresh TimescaleDB volume. On an existing one, apply both once, in
+order (safe to re-run):
 
 ```
 docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/005_diagnosis.sql
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/006_diagnosis_analyses.sql
 ```
 
 In Git Bash, prefix the command with `MSYS_NO_PATHCONV=1`.
@@ -122,8 +149,9 @@ Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO
 `DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. Retrieval: `RETRIEVAL_MODE` `hybrid`
 (or `vector`), `RETRIEVAL_TOP_K` 3, `OLLAMA_TIMEOUT_SECONDS` 60. LLM: `LLM_TEMPERATURE` 0.1,
 `LLM_TIMEOUT_SECONDS` 120, `LLM_MAX_ATTEMPTS` 3, `LLM_MAX_OUTPUT_TOKENS` 768,
-`LLM_RESPONSE_RESERVE_TOKENS` 1024, `PROMPT_MAX_CANDIDATES` 5, `PROMPT_MIN_CANDIDATES` 3. The
-prompt text is in `app/prompts/*.txt`. The
+`LLM_RESPONSE_RESERVE_TOKENS` 1024, `PROMPT_MAX_CANDIDATES` 5, `PROMPT_MIN_CANDIDATES` 3.
+`PIPELINE_MODE` `full` (or `no_graph`, `llm_only`, `deterministic`). The prompt text is in
+`app/prompts/*.txt`. The
 container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
 on `0.0.0.0` (`OLLAMA_HOST`).
 
@@ -316,3 +344,57 @@ Measured with the same 100-run harness.
 The guardrail doesn't fire on phi4-mini, because Ollama's response schema already restricts
 evidence ids while the model generates. It is the enforced backstop, and it becomes the active
 filter if the service moves to a provider without schema enforcement.
+
+---
+
+## Phase 8 ablation results — 2026-09-14
+
+Reproduce, storing every run:
+
+```
+EVAL_RUNS=1 EVAL_ARGS="--modes full,no_graph,llm_only,deterministic --persist" \
+  bash services/diagnosis-service/scripts/test_in_docker.sh --eval
+```
+
+Each of the 10 fixtures ran once in each mode, with its scenario context. Eight fixtures have a
+known root cause.
+
+| Mode | Rank-1 service = true cause | Answered by | Needed a retry | Latency p50 / p95 | Rank-1 rollbacks (wrong) |
+| --- | --- | --- | --- | --- | --- |
+| `deterministic` | **5/8** | scorer 10 | — | **52 ms** / 77 ms | 6 (2 wrong) |
+| `full` | 4/8 | LLM 8, fallback 2 | 5/10 | 15.0 s / 40.7 s | 6 (2 wrong) |
+| `no_graph` | 5/8 | LLM 9, fallback 1 | 3/10 | 13.1 s / 38.3 s | 6 (2 wrong) |
+| `llm_only` | 3/8 | LLM 10 | 2/10 | 11.9 s / 26.1 s | 7 (**4 wrong**) |
+
+The guardrail dropped 0 hypotheses in every mode.
+
+**Per fixture:**
+- **All modes:**
+  - The bad-deploy fixtures (`anom-fx-01/03/08`) get the injected rollback.
+  - The crash fixtures (`anom-fx-04/05/06`) are wrong.
+- **`deterministic`, `full` and `no_graph`:**
+  - `anom-fx-02` gets the injected rollback.
+  - Two wrong rollbacks: routine deploys on `anom-fx-05` and `anom-fx-06`.
+- **`llm_only`:**
+  - `anom-fx-02`: rolls back front-end's routine deploy instead of orders' injected one.
+  - Benign `anom-fx-09` and ambiguous `anom-fx-10`: proposes rolling back routine deploys; every other mode chose `no_action`.
+- **`full`:** `anom-fx-07` put front-end first after check B's retry.
+
+**Reading:**
+- **The LLM adds nothing measurable here.** On these fixtures it does not beat the
+  deterministic baseline, which is also about 300 times faster.
+- **Structure does the work.** Removing scoring, graph and retrieval (`llm_only`) gave the fewest
+  correct causes and the most harmful proposals.
+- **Treat this as indicative.** It is one run per mode on 8 labelled fixtures written by the
+  same author as the corpus; the evaluation weeks need real injected faults (issue #6).
+
+**Querying stored runs in one statement:**
+
+```sql
+SELECT a.anomaly_id, a.pipeline_mode, a.answered_by, a.llm_attempts, a.latency_ms,
+       h.service AS rank1_service, h.proposed_action AS rank1_action, h.confidence
+FROM analyses a
+LEFT JOIN hypotheses h ON h.analysis_id = a.analysis_id AND h.rank = 1
+WHERE a.anomaly_id LIKE 'anom-fx-%'
+ORDER BY a.anomaly_id, a.pipeline_mode;
+```

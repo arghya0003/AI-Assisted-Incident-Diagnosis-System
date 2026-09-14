@@ -40,13 +40,17 @@ class GuardrailResult:
     rejections: list[Rejection] = field(default_factory=list)
 
 
-def allowed_ids(report: CandidateReport, prompt: Prompt | None) -> frozenset[str]:
-    ids = {report.anomaly_id} | {item.evidence_id for item in report.evidence}
+def allowed_ids(anomaly_id: str, report: CandidateReport | None, prompt: Prompt | None) -> frozenset[str]:
+    """`report` is None in llm_only mode, which does no scoring; `prompt` is None when no LLM prompt was
+    built (deterministic mode, or a prompt over budget)."""
+    ids = {anomaly_id}
+    if report is not None:
+        ids |= {item.evidence_id for item in report.evidence}
     if prompt is not None:
         ids |= set(prompt.citable_ids)
-    else:
-        # No prompt was built (it didn't fit the budget), so only the deterministic ranking can be
-        # answering; it may cite the records behind the report's own evidence.
+    elif report is not None:
+        # Only the deterministic ranking can be answering; it may cite the records behind the
+        # report's own evidence.
         ids |= {item.source_id for item in report.evidence if item.category in CITABLE_CATEGORIES}
     return frozenset(ids)
 

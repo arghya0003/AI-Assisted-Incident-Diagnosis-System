@@ -8,12 +8,14 @@ import pytest
 
 from app.fixtures import load_fixtures
 from app.graph import load_graph
-from app.hypotheses import candidate_options
+from app.hypotheses import candidate_options, rollback_window_minutes
 from app.models import SimilarIncident
 from app.prompts import (
+    LLM_ONLY_SYSTEM_PROMPT,
     PROMPTS_DIR,
     SYSTEM_PROMPT,
     PromptTooLarge,
+    build_llm_only_prompt,
     build_prompt,
     estimate_tokens,
     render_prompt,
@@ -53,7 +55,8 @@ def options_by_service(prompt):
 
 
 def test_prompt_files_exist_and_every_placeholder_is_filled():
-    for name in ("analyze_system.txt", "analyze_user.txt", "analyze_retry.txt"):
+    for name in ("analyze_system.txt", "analyze_user.txt", "analyze_retry.txt",
+                 "analyze_llm_only_system.txt", "analyze_llm_only_user.txt"):
         assert (PROMPTS_DIR / name).is_file()
     anomaly, report = report_for("anom-fx-01")
     prompt = build_prompt(anomaly, report, **BIG)
@@ -182,6 +185,49 @@ def test_context_budget_truncates_in_the_planned_order():
 
     with pytest.raises(PromptTooLarge):
         build(three - 1)
+
+
+def llm_only_prompt(anomaly_id, context_tokens=100_000):
+    inputs = FIXTURES[anomaly_id].scoring_inputs()
+    return build_llm_only_prompt(
+        inputs.anomaly,
+        inputs.related,
+        inputs.deploys,
+        sorted(GRAPH.nodes),
+        window_seconds=120,
+        lookback_minutes=30,
+        rollback_max_minutes=rollback_window_minutes(10),
+        context_tokens=context_tokens,
+        response_reserve_tokens=1024,
+    )
+
+
+def test_llm_only_prompt_has_no_scores_graph_or_past_incidents():
+    prompt = llm_only_prompt("anom-fx-08")
+    text = user_text(prompt).lower()
+    assert prompt.messages[0]["content"] == LLM_ONLY_SYSTEM_PROMPT
+    for absent in ("score", "downstream", "deepest", "incident", "position"):
+        assert absent not in text, absent
+    assert [o.service for o in prompt.options] == sorted(GRAPH.nodes)
+    assert "dep-fx-08-inj" in text and "perf regression" in text
+
+
+def test_llm_only_options_follow_the_same_rollback_rule_from_raw_deploy_times():
+    assert rollback_window_minutes(10) == pytest.approx(6.93, abs=0.01)
+    options = options_by_service(llm_only_prompt("anom-fx-01"))
+    assert options["catalogue"].actions == ["no_action", "rollback_deploy:dep-fx-01-inj"]  # 14 s before onset
+    assert "dep-fx-01-bg3" in options["catalogue"].citable_ids  # 18.8 min: citable, too old to roll back
+    assert "anom-fx-01-p99" in options["catalogue"].citable_ids
+    assert options["user"].citable_ids == ["anom-fx-01"] and not options["user"].has_recent_deploy
+
+
+def test_llm_only_prompt_drops_config_diffs_when_over_budget():
+    full = llm_only_prompt("anom-fx-08")
+    trimmed = llm_only_prompt("anom-fx-08", context_tokens=full.estimated_tokens - 1 + 1024)
+    assert trimmed.truncations == ["dropped deploy config diffs"]
+    assert "perf regression" not in user_text(trimmed)
+    with pytest.raises(PromptTooLarge):
+        llm_only_prompt("anom-fx-08", context_tokens=1100)
 
 
 def test_retry_message_lists_every_error():
