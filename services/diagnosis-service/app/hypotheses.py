@@ -22,6 +22,9 @@ class CandidateOptions:
     service: str
     citable_ids: list[str]  # the anomaly itself first
     actions: list[str]  # no_action first
+    # Whether any deploy to this candidate falls in the lookback window. A cause may only talk about a
+    # deploy when this is true (app/llm.py).
+    has_recent_deploy: bool = False
 
 
 def candidate_options(report: CandidateReport, candidate: Candidate) -> CandidateOptions:
@@ -39,7 +42,12 @@ def candidate_options(report: CandidateReport, candidate: Candidate) -> Candidat
     actions = [NO_ACTION]
     if candidate.deploy_id and candidate.signals.deploy_proximity >= ROLLBACK_MIN_DEPLOY_PROXIMITY:
         actions.append(f"rollback_deploy:{candidate.deploy_id}")
-    return CandidateOptions(service=candidate.service, citable_ids=citable, actions=actions)
+    return CandidateOptions(
+        service=candidate.service,
+        citable_ids=citable,
+        actions=actions,
+        has_recent_deploy=candidate.deploy_id is not None,
+    )
 
 
 @dataclass(frozen=True)

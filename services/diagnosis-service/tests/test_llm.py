@@ -7,13 +7,18 @@ import httpx
 import pytest
 
 from app.hypotheses import CandidateOptions
-from app.llm import LLMDiagnoser, validate_reply
+from app.llm import LLMDiagnoser, claims_a_deploy, validate_reply
 from app.ollama import ChatReply, OllamaClient, OllamaUnavailable
 from app.prompts import Prompt, response_schema
 
 OPTIONS = [
-    CandidateOptions(service="catalogue", citable_ids=["anom-1", "dep-1"], actions=["no_action", "rollback_deploy:dep-1"]),
-    CandidateOptions(service="user", citable_ids=["anom-1"], actions=["no_action"]),
+    CandidateOptions(
+        service="catalogue",
+        citable_ids=["anom-1", "dep-1"],
+        actions=["no_action", "rollback_deploy:dep-1"],
+        has_recent_deploy=True,
+    ),
+    CandidateOptions(service="user", citable_ids=["anom-1"], actions=["no_action"], has_recent_deploy=False),
 ]
 PROMPT = Prompt(
     messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "facts"}],
@@ -79,6 +84,49 @@ def test_invalid_replies_are_rejected_with_a_reason(content, fragment):
     diagnosis, errors = validate_reply(content, PROMPT)
     assert diagnosis is None
     assert any(fragment in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        # Invented causes phi4-mini actually wrote in Phase 6, for candidates with no deploy.
+        "The catalogue service's recent deployment lowered its CPU limit, causing throttling.",
+        "Recent carts release enabled debug logging on the hot path.",
+        "The recent deploy in catalogue-db lowered the connection pool maximum.",
+        "A config rollout to user broke logins.",
+        "user was rolled out with a slower hashing library after an upgrade.",
+    ],
+)
+def test_a_cause_claiming_a_deploy_that_does_not_exist_is_rejected(cause):
+    diagnosis, errors = validate_reply(reply(user_hypothesis(cause=cause)), PROMPT)
+    assert diagnosis is None
+    assert any("has no recent deploy listed" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "The shipping service is anomalous, has no recent deploy, and nothing it calls is anomalous.",
+        "user shows high latency without any recent deploy or related anomaly.",
+        "user is not a recent deploy target; it resembles incident-0024.",
+        "user is one of the anomalous services.",
+    ],
+)
+def test_a_cause_that_mentions_no_deploy_is_accepted(cause):
+    diagnosis, errors = validate_reply(reply(user_hypothesis(cause=cause)), PROMPT)
+    assert errors == [] and diagnosis is not None
+
+
+def test_a_cause_may_mention_a_deploy_the_candidate_has():
+    diagnosis, errors = validate_reply(reply(hypothesis(cause="catalogue deploy dep-1 landed 0.2 min before onset")), PROMPT)
+    assert errors == []
+
+
+def test_claims_a_deploy():
+    assert claims_a_deploy("catalogue was redeployed")
+    assert claims_a_deploy("the Release went out at noon")
+    assert not claims_a_deploy("no deploys or related anomalies")
+    assert not claims_a_deploy("error rate and p99 latency rose together")
 
 
 def test_a_repeated_candidate_is_dropped():

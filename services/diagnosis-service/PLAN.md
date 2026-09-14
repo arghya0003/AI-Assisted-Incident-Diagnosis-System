@@ -777,6 +777,78 @@ Findings:
 5. **Ten runs per fixture measure stability, not spread**: at temperature 0.1 the output barely
    varies.
 
+#### Phase 6 follow-up (2026-09-14): fixes A and B for finding 1
+
+Chosen by the team member from the three options in finding 1:
+
+- **A. Past incidents appear in the prompt without their root-cause or resolution text.** Only the
+  id, title, fault type, root-cause service and similarity remain. The text is still stored and
+  shown in `GET /candidates`. This removes the plan's first truncation step, so the budget now drops
+  config diffs first, then candidates beyond the top 3.
+- **B. A cause that asserts a deploy for a candidate with no recent deploy is rejected**, and the
+  reply is retried with the reason (`claims_a_deploy` in `app/llm.py`). It matches deploy, release,
+  rollout and upgrade wording, but not negated forms such as "no recent deploy". Its test cases
+  include the invented causes phi4-mini actually wrote.
+
+Live `POST /analyze` on the four fixtures whose causes had invented deploys (fixture deploys are
+not in the database, so no candidate has one):
+
+| Fixture | Before A and B | After A and B |
+| --- | --- | --- |
+| `anom-fx-01` | "catalogue's recent deployment lowered its CPU limit" | B rejected attempt 1; attempt 2 cites only the related anomaly |
+| `anom-fx-06` | Orders "resembles incident-0009 where a missing configuration variable caused errors" | B rejected attempt 1; attempt 2: "1 hop downstream of the anomalous front-end, despite no recent deploy listed" |
+| `anom-fx-07` | Claimed recent deploys to catalogue, front-end and catalogue-db | B rejected attempt 1; attempt 2 states only listed facts |
+| `anom-fx-10` | "carts release enabled debug logging on the hot path" | Valid first time; no copied incident story |
+
+What A and B do not fix:
+- **Speed.** Retries raised those calls from about 12 s to 24–41 s.
+- **Non-deploy slips remain.** `anom-fx-07` said front-end has "nothing it calls anomalous", but
+  it calls catalogue, which is anomalous. Such errors are less likely to push an operator toward a
+  wrong action than an invented deploy, but causes are still not fully trustworthy.
+
+Evaluation after A and B (same 100-run harness with fixture context):
+
+| Measure | Before A and B | After A and B |
+| --- | --- | --- |
+| Contract-valid responses | 100/100 | 100/100 |
+| Valid on the first attempt | 100 | 56 |
+| Needed a retry | 0 | 32 |
+| Deterministic fallback | 0 | 12 (`anom-fx-01` ×2, `anom-fx-05` ×4, `anom-fx-07` ×6) |
+| Latency p50 / p95 | 14.1 s / 17.0 s | 15.6 s / 40.2 s |
+| Rank-1 service is the true root cause | 50/80 | 50/80 |
+| Rank-1 rollbacks | 50, of which 10 wrong (`anom-fx-06`) | 54, of which 14 wrong: `anom-fx-06` ×10, plus `anom-fx-05` ×4, where the fallback rolled back a routine shipping deploy from 2 minutes before onset |
+| Rejected attempts | 0 | 77, all from check B |
+
+What those rejections were, from a diagnostic re-run of `anom-fx-05/07/08/09` printing every attempt:
+
+- **Genuine invented deploys.** For `anom-fx-07`, the catalogue cause "catalogue deploy lowers its
+  CPU limit and throttles the service" is incident-0008's title, word for word. Fix A kept titles,
+  and titles carry the same stories.
+- **Narration of a past incident rather than a claim about now**, such as "resembles a past
+  incident where a front-end release disabled template caching" (`anom-fx-05`) and "Similar past
+  incident incident-0003 suggests a bad deploy latency" (`anom-fx-08`). Rule 4 allows
+  resemblance, but these still read as if a deploy were involved; `anom-fx-09`'s even described a
+  shipping incident as evidence about rabbitmq. So they aren't clear-cut false positives.
+- **Retries rarely change the reply.** At temperature 0.1, `anom-fx-05` and `anom-fx-07` returned
+  the identical rejected sentence on all three attempts, so most retries only add about 12 s each
+  before the fallback.
+- **The token-budget estimate still holds.** Actual/estimated prompt tokens reached 1.30, but only
+  because retry turns (the previous reply plus the rejection) are appended to the conversation,
+  while the estimate covers the first attempt. First attempts stayed at about 0.74.
+
+Net effect: no rejected cause reaches M4, so invented deploy claims are gone from responses. The
+cost is 12% fallbacks, a 40 s p95, and four more wrong rollbacks through the fallback. Options for
+the team member to choose from:
+
+1. Drop incident titles from the prompt as well, leaving id, fault type, root-cause service and
+   similarity.
+2. When check B rejects a hypothesis, drop only that hypothesis instead of retrying the whole reply,
+   and fall back only if none survive. This is faster, but for `anom-fx-07` it would drop the
+   correct top candidate.
+3. Retry at a higher temperature, so a retry can actually produce something different.
+4. Make the fallback always propose `no_action`. That removes its wrong rollbacks, but also its
+   correct ones.
+
 ---
 
 ### Phase 7 — Evidence guardrail — read this diff carefully, do not skim it

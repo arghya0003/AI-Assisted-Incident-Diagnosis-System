@@ -139,7 +139,7 @@ class SimilarIncident(BaseModel):
     fault_type: str | None
     source: str | None
     similarity: float = Field(ge=-1.0, le=1.0)
-    # From the incident body, for the LLM prompt.
+    # From the incident body. Shown in GET /candidates; deliberately not given to the LLM.
     root_cause: str = ""
     resolution: str = ""
 

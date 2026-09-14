@@ -129,6 +129,21 @@ def test_prompt_options_match_candidate_options():
     assert prompt.options == [candidate_options(report, c) for c in report.candidates[:5]]
 
 
+def test_past_incidents_appear_without_their_root_cause_or_resolution_text():
+    anomaly, report = report_for("anom-fx-08", [INCIDENT])
+    text = user_text(build_prompt(anomaly, report, **BIG))
+    assert "incident-0007: shipping release retries queue publishes without backoff" in text
+    assert "fault type: bad_deploy_latency" in text and "root cause in: shipping" in text
+    assert "tight loop" not in text and "exponential backoff" not in text
+
+
+def test_candidate_options_know_whether_a_deploy_exists():
+    anomaly, report = report_for("anom-fx-07")
+    options = options_by_service(build_prompt(anomaly, report, **BIG))
+    assert options["front-end"].has_recent_deploy  # a routine deploy 12 minutes earlier
+    assert not options["catalogue"].has_recent_deploy
+
+
 def test_prompt_without_retrieval_says_so():
     anomaly, report = report_for("anom-fx-09")
     assert "none retrieved" in user_text(build_prompt(anomaly, report, **BIG))
@@ -147,21 +162,18 @@ def test_context_budget_truncates_in_the_planned_order():
     def size(**options):
         return render_prompt(anomaly, report, **options).estimated_tokens
 
-    full = size(candidates=5, resolutions=True, config_diffs=True)
-    no_resolutions = size(candidates=5, resolutions=False, config_diffs=True)
-    no_diffs = size(candidates=5, resolutions=False, config_diffs=False)
-    three = size(candidates=3, resolutions=False, config_diffs=False)
-    assert full > no_resolutions > no_diffs > three
+    full = size(candidates=5, config_diffs=True)
+    no_diffs = size(candidates=5, config_diffs=False)
+    three = size(candidates=3, config_diffs=False)
+    assert full > no_diffs > three
 
     def build(total_tokens):
         return build_prompt(anomaly, report, context_tokens=total_tokens + 1024, response_reserve_tokens=1024)
 
-    first = build(no_resolutions)
-    assert first.truncations == ["dropped similar-incident resolutions"]
-    assert "exponential backoff" not in user_text(first) and "tight loop" in user_text(first)
+    assert build(full).truncations == []
 
     second = build(no_diffs)
-    assert second.truncations == ["dropped similar-incident resolutions", "dropped deploy config diffs"]
+    assert second.truncations == ["dropped deploy config diffs"]
     assert "perf regression" not in user_text(second)
 
     third = build(three)

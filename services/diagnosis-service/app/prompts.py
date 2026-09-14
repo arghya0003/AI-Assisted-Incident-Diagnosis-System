@@ -31,7 +31,6 @@ CHARS_PER_TOKEN = 3.0
 # output token limit (Phase 6); bounded arrays and strings make that loop impossible.
 MAX_CITATIONS = 6
 CAUSE_MAX_CHARS = 400
-INCIDENT_TEXT_LIMIT = 300
 CONFIG_DIFF_LIMIT = 200
 
 
@@ -73,13 +72,12 @@ def build_prompt(
     max_candidates: int = 5,
     min_candidates: int = 3,
 ) -> Prompt:
-    """Render the prompt, dropping detail in a fixed order until it fits the budget: similar-
-    incident resolutions first (titles and root causes stay), then deploy config diffs, then
-    candidates beyond the minimum. Every truncation is logged and recorded on the prompt."""
+    """Render the prompt, dropping detail in a fixed order until it fits the budget: deploy config
+    diffs first, then candidates beyond the minimum. Every truncation is logged and recorded on the
+    prompt. (Similar-incident bodies, the plan's first truncation, are never included at all.)"""
     budget = context_tokens - response_reserve_tokens
-    options = {"candidates": max_candidates, "resolutions": True, "config_diffs": True}
+    options = {"candidates": max_candidates, "config_diffs": True}
     reductions = [
-        ("dropped similar-incident resolutions", {"resolutions": False}),
         ("dropped deploy config diffs", {"config_diffs": False}),
         (f"kept only the top {min_candidates} candidates", {"candidates": min_candidates}),
     ]
@@ -112,9 +110,7 @@ def build_prompt(
     )
 
 
-def render_prompt(
-    anomaly: AnomalyEvent, report: CandidateReport, candidates: int, resolutions: bool, config_diffs: bool
-) -> Prompt:
+def render_prompt(anomaly: AnomalyEvent, report: CandidateReport, candidates: int, config_diffs: bool) -> Prompt:
     evidence = {item.evidence_id: item for item in report.evidence}
     shown = report.candidates[:candidates]
     options = [candidate_options(report, candidate) for candidate in shown]
@@ -127,7 +123,7 @@ def render_prompt(
             _candidate_block(rank, candidate, option, evidence, report.anomaly_id, config_diffs)
             for rank, (candidate, option) in enumerate(zip(shown, options), start=1)
         ),
-        incidents=_incident_block(report.similar_incidents, resolutions),
+        incidents=_incident_block(report.similar_incidents),
     )
     return Prompt(
         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
@@ -234,7 +230,10 @@ def _candidate_block(
     return "\n".join(lines)
 
 
-def _incident_block(incidents: list[SimilarIncident], resolutions: bool) -> str:
+def _incident_block(incidents: list[SimilarIncident]) -> str:
+    """Id, title, fault type, root-cause service and similarity only. The root-cause and resolution
+    text is deliberately left out: phi4-mini copied it into causes as if it described the current
+    anomaly (PLAN.md, Phase 6 outcome)."""
     if not incidents:
         return "none retrieved"
     lines = []
@@ -244,9 +243,6 @@ def _incident_block(incidents: list[SimilarIncident], resolutions: bool) -> str:
             f"{incident.incident_id}: {incident.title} (root cause in: {root}; "
             f"fault type: {incident.fault_type or 'unknown'}; similarity {incident.similarity:.2f})"
         )
-        lines.append(f"   root cause: {_truncate(incident.root_cause, INCIDENT_TEXT_LIMIT) or 'not recorded'}")
-        if resolutions:
-            lines.append(f"   resolution: {_truncate(incident.resolution, INCIDENT_TEXT_LIMIT) or 'not recorded'}")
     return "\n".join(lines)
 
 

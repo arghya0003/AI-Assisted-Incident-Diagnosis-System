@@ -275,3 +275,24 @@ with its scenario context (deploys and related anomalies) plus live retrieval.
   Phase 6 finding 1 is resolved.
 - **Background deploys lead to a wrong rollback.** One `anom-fx-06` proposal would roll back an
   unrelated orders deploy, which illustrates issue #7.
+
+### After fixes A and B
+
+**A:** past incidents appear in the prompt without their root-cause and resolution text. **B:** a
+cause that claims a deploy for a candidate with no recent deploy is rejected and retried.
+Measured with the same 100-run harness.
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Valid on first attempt / retried / fallback | 100 / 0 / 0 | 56 / 32 / 12 |
+| Latency p50 / p95 | 14.1 s / 17.0 s | 15.6 s / 40.2 s |
+| Rank 1 = true cause | 50/80 | 50/80 |
+| Wrong rank-1 rollbacks | 10 | 14 (4 more from the fallback on `anom-fx-05`) |
+
+- **Invented deploy stories are gone** from the live answers for `anom-fx-01/06/07/10`, and a
+  rejected cause is never returned.
+- **The cost is retries and fallbacks.** At temperature 0.1, retries mostly repeat the same
+  rejected sentence.
+- **Titles still carry stories:** one rejected `anom-fx-07` cause was incident-0008's title,
+  verbatim.
+- **Next-step options** are listed in PLAN.md, Phase 6 follow-up.

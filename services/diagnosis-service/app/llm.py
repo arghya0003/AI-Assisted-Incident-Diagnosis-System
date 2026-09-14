@@ -1,7 +1,8 @@
 """phi4-mini call with validate-and-retry.
 
 Each reply is parsed and checked against the prompt's candidates: every hypothesis must name a
-listed candidate and propose one of that candidate's actions. A rejected reply is sent back with
+listed candidate and propose one of that candidate's actions, and its cause may not talk about a
+deploy unless that candidate has one listed. A rejected reply is sent back with
 the reasons, so the next attempt can correct it. After the last attempt, or if Ollama is
 unreachable, the outcome carries no diagnosis and the pipeline falls back to the deterministic
 ranking. Evidence citations are checked separately by the guardrail (Phase 7), not here.
@@ -12,6 +13,7 @@ follows confidence. Both are recorded as adjustments, so evaluation can count th
 """
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,6 +29,18 @@ log = logging.getLogger("diagnosis-service.llm")
 
 # (messages, JSON schema) -> reply
 Chat = Callable[[list[dict[str, str]], dict], ChatReply]
+
+_DEPLOY_WORDS = r"(?:re)?deploy\w*|releases?|released|rollouts?|roll(?:ed|s|ing)? out|upgrade\w*"
+_DEPLOY_CLAIM = re.compile(rf"\b(?:{_DEPLOY_WORDS})\b", re.IGNORECASE)
+# "no recent deploy", "not a deploy", "without any release": saying there was none is fine.
+_NEGATED_DEPLOY = re.compile(rf"\b(?:no|not|without|never|nor)\s+(?:\w+\s+){{0,3}}?(?:{_DEPLOY_WORDS})\b", re.IGNORECASE)
+
+
+def claims_a_deploy(cause: str) -> bool:
+    """Whether a cause asserts that a deploy, release, rollout or upgrade happened. A cheap check
+    for the most harmful invented fact: phi4-mini copied deploy stories from similar past incidents
+    into causes for candidates that had no deploy at all."""
+    return bool(_DEPLOY_CLAIM.search(_NEGATED_DEPLOY.sub(" ", cause)))
 
 
 class LLMHypothesis(BaseModel):
@@ -77,6 +91,11 @@ def validate_reply(content: str, prompt: Prompt) -> tuple[Diagnosis | None, list
             errors.append(
                 f"hypothesis {hypothesis.rank}: proposed_action {hypothesis.proposed_action!r} is not in "
                 f"{hypothesis.service}'s may-propose list"
+            )
+        elif not option.has_recent_deploy and claims_a_deploy(hypothesis.cause):
+            errors.append(
+                f"hypothesis {hypothesis.rank}: the cause mentions a deploy or release, but {hypothesis.service} "
+                "has no recent deploy listed; state only facts listed under that candidate"
             )
     if errors:
         return None, errors
