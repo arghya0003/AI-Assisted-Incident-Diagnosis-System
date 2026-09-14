@@ -1,13 +1,11 @@
 """diagnosis-service HTTP API.
 
-Phase 5: /analyze resolves the anomaly from the anomalies table (fed by the Kafka consumer)
-and 404s unknown ids, but the hypothesis is still a stub. GET /candidates/{anomaly_id} exposes
-the deterministic candidate ranking, including similar past incidents from retrieval, that
-later phases hand to the LLM. Later phases replace the stub with the scoring -> retrieval ->
-LLM -> guardrail pipeline without changing the request or response shape.
+POST /analyze runs the full pipeline: stored anomaly -> retrieval -> deterministic scoring ->
+phi4-mini, with a deterministic fallback so the response is always contract-valid. The
+X-Diagnosis-Mode header says which produced the answer. GET /candidates/{anomaly_id} exposes the
+deterministic ranking that the LLM is given.
 """
 
-import dataclasses
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,24 +14,26 @@ from fastapi import Depends, FastAPI, HTTPException, Response
 from app.consumer import AnomalyConsumer
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
 from app.graph import load_graph
-from app.models import NO_ACTION, AnalyzeRequest, AnalyzeResponse, CandidateReport, Hypothesis
+from app.llm import Chat
+from app.models import AnalyzeRequest, AnalyzeResponse, CandidateReport
 from app.ollama import OllamaClient
-from app.retrieval import Embed, Retriever
-from app.scoring import ScoringConfig, score_candidates
+from app.pipeline import DiagnosisPipeline, PipelineConfig, ollama_chat, ollama_embed
+from app.retrieval import Embed
+from app.scoring import ScoringConfig
 from app.settings import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("diagnosis-service")
 
-SERVICE_VERSION = "0.5.0"
-# Returned in /health and the X-Diagnosis-Mode header so a stub response is never
-# mistaken for a real diagnosis. Becomes full/llm_only/no_graph/deterministic in Phase 8.
-PIPELINE_MODE = "stub"
+SERVICE_VERSION = "0.6.0"
+# The configured pipeline. Phase 8 adds llm_only, no_graph and deterministic for ablations.
+PIPELINE_MODE = "full"
 
 # Loaded at import so a broken graph file or invalid settings stop the container at startup,
 # not on the first request.
 graph = load_graph()
 scoring_config = ScoringConfig.from_settings(settings)
+pipeline_config = PipelineConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
 consumer = AnomalyConsumer(settings)
 ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeout_seconds)
@@ -52,12 +52,13 @@ async def lifespan(_app: FastAPI):
         settings.consumer_enabled,
     )
     log.info(
-        "dependency graph: %d nodes, %d edges; score weights %s; retrieval %s top_k=%d",
+        "dependency graph: %d nodes, %d edges; score weights %s; retrieval %s top_k=%d; llm attempts=%d",
         len(graph.nodes),
         len(graph.edges),
         scoring_config.weights,
         settings.retrieval_mode,
         settings.retrieval_top_k,
+        settings.llm_max_attempts,
     )
     if settings.consumer_enabled:
         consumer.start()
@@ -83,7 +84,15 @@ def get_store() -> AnomalyStore:
 
 
 def get_embedder() -> Embed:
-    return lambda texts: ollama.embed(texts, settings.embed_model)
+    return ollama_embed(ollama, settings)
+
+
+def get_chat() -> Chat:
+    return ollama_chat(ollama, settings)
+
+
+def _pipeline(anomalies: AnomalyStore, embed: Embed, chat: Chat) -> DiagnosisPipeline:
+    return DiagnosisPipeline(anomalies, embed, chat, graph, scoring_config, pipeline_config)
 
 
 def _unavailable(anomaly_id: str, exc: DatabaseUnavailable) -> HTTPException:
@@ -114,31 +123,29 @@ def analyze(
     request: AnalyzeRequest,
     response: Response,
     anomalies: AnomalyStore = Depends(get_store),
+    embed: Embed = Depends(get_embedder),
+    chat: Chat = Depends(get_chat),
 ) -> AnalyzeResponse:
     try:
-        anomaly = anomalies.get(request.anomaly_id)
+        result = _pipeline(anomalies, embed, chat).analyze(request.anomaly_id)
     except DatabaseUnavailable as exc:
         raise _unavailable(request.anomaly_id, exc) from exc
-    if anomaly is None:
+    if result is None:
         raise _not_found(request.anomaly_id)
 
-    response.headers["X-Diagnosis-Mode"] = PIPELINE_MODE
-    log.info("analyze anomaly_id=%s mode=%s", anomaly.anomaly_id, PIPELINE_MODE)
-    # Still a stub: it cites only the anomaly itself, which is now a real stored record,
-    # and proposes no action.
-    return AnalyzeResponse(
-        hypotheses=[
-            Hypothesis(
-                rank=1,
-                cause=f"[stub] Anomaly on {', '.join(anomaly.services)} "
-                f"({', '.join(anomaly.metrics)}) was found, but the diagnosis pipeline "
-                "is not implemented yet.",
-                confidence=0.0,
-                evidence_ids=[anomaly.anomaly_id],
-                proposed_action=NO_ACTION,
-            )
-        ]
+    attempts = result.llm.attempts if result.llm else 0
+    response.headers["X-Diagnosis-Mode"] = result.mode
+    response.headers["X-LLM-Attempts"] = str(attempts)
+    log.info(
+        "analyze anomaly_id=%s mode=%s attempts=%d latency_ms=%d hypotheses=%d%s",
+        request.anomaly_id,
+        result.mode,
+        attempts,
+        result.latency_ms,
+        len(result.response.hypotheses),
+        f" fallback_reason={result.fallback_reason}" if result.fallback_reason else "",
     )
+    return result.response
 
 
 @app.get("/candidates/{anomaly_id}", response_model=CandidateReport, responses=ERROR_RESPONSES)
@@ -146,23 +153,15 @@ def candidates(
     anomaly_id: str,
     anomalies: AnomalyStore = Depends(get_store),
     embed: Embed = Depends(get_embedder),
+    chat: Chat = Depends(get_chat),
 ) -> CandidateReport:
     """Debug view of the deterministic ranking: every candidate with its per-signal breakdown,
     the similar past incidents retrieved, and the evidence behind it. Read-only; no LLM
     generation (retrieval embeds the query with nomic-embed-text)."""
     try:
-        inputs = anomalies.scoring_inputs(
-            anomaly_id, scoring_config.co_anomaly_window_seconds, scoring_config.deploy_lookback_minutes
-        )
-        if inputs is None:
-            raise _not_found(anomaly_id)
-        retriever = Retriever(
-            embed, anomalies, graph, mode=settings.retrieval_mode, top_k=settings.retrieval_top_k
-        )
-        retrieval = retriever.retrieve(inputs.anomaly)
+        report = _pipeline(anomalies, embed, chat).candidate_report(anomaly_id)
     except DatabaseUnavailable as exc:
         raise _unavailable(anomaly_id, exc) from exc
-    inputs = dataclasses.replace(
-        inputs, similar_incidents=retrieval.incidents, retrieval_status=retrieval.status
-    )
-    return score_candidates(inputs, graph, scoring_config)
+    if report is None:
+        raise _not_found(anomaly_id)
+    return report

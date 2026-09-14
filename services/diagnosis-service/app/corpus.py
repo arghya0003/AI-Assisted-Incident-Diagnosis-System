@@ -44,8 +44,7 @@ class IncidentRecord(BaseModel):
     @property
     def symptoms(self) -> str:
         """The Symptoms section: what was observed, which is all an anomaly query can describe."""
-        match = re.search(r"\*\*Symptoms:\*\*\s*(.*?)(?=\n\s*\*\*[A-Z][A-Za-z ]*:\*\*|\Z)", self.body, re.DOTALL)
-        return match.group(1).strip() if match else ""
+        return section(self.body, "Symptoms")
 
     @model_validator(mode="after")
     def _consistent(self) -> "IncidentRecord":
@@ -60,6 +59,13 @@ class IncidentRecord(BaseModel):
         elif not self.services:
             raise ValueError("synthetic records must name the root-cause service(s)")
         return self
+
+
+def section(body: str, name: str) -> str:
+    """The text of one `**Name:**` section of an incident body, up to the next section."""
+    pattern = r"\*\*" + re.escape(name) + r":\*\*\s*(.*?)(?=\n\s*\*\*[A-Z][A-Za-z ]*:\*\*|\Z)"
+    match = re.search(pattern, body, re.DOTALL)
+    return match.group(1).strip() if match else ""
 
 
 def parse_incident(text: str, name: str = "<string>") -> IncidentRecord:

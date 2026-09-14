@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.db import DatabaseUnavailable
-from app.main import app, get_embedder, get_store
+from app.main import app, get_chat, get_embedder, get_store
 from app.models import AnalyzeRequest, AnalyzeResponse, AnomalyEvent, SimilarIncident
-from app.ollama import OllamaUnavailable
+from app.ollama import ChatReply, OllamaUnavailable
 
 client = TestClient(app)
 
@@ -132,7 +132,7 @@ def test_health():
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
-    assert resp.json()["pipeline_mode"] == "stub"
+    assert resp.json()["pipeline_mode"] == "full"
     assert resp.json()["database"] == "ok"
     assert resp.json()["consumer"] == "disabled"
 
@@ -145,20 +145,41 @@ def test_analyze_returns_contract_shape():
     assert body.hypotheses[0].rank == 1
 
 
-def test_analyze_stub_is_honest():
+def test_analyze_returns_the_llm_hypotheses():
     resp = client.post("/analyze", json={"anomaly_id": "anom-0001"})
+    assert resp.headers["X-Diagnosis-Mode"] == "llm"
+    assert resp.headers["X-LLM-Attempts"] == "1"
     hypothesis = resp.json()["hypotheses"][0]
-    assert resp.headers["X-Diagnosis-Mode"] == "stub"
-    assert hypothesis["cause"].startswith("[stub]")
-    assert hypothesis["confidence"] == 0.0
-    assert hypothesis["proposed_action"] == "no_action"
-    # Cites only the anomaly it was asked about, never invented evidence.
+    assert hypothesis["cause"] == "fake LLM cause"
     assert hypothesis["evidence_ids"] == ["anom-0001"]
 
 
-def test_analyze_uses_the_stored_anomaly():
-    cause = client.post("/analyze", json={"anomaly_id": "anom-0001"}).json()["hypotheses"][0]["cause"]
-    assert "catalogue, front-end" in cause
+def test_analyze_falls_back_when_the_llm_is_unreachable():
+    def down(messages, schema):
+        raise OllamaUnavailable("connection refused")
+
+    app.dependency_overrides[get_chat] = lambda: down
+    resp = client.post("/analyze", json={"anomaly_id": "anom-0001"})
+    assert resp.status_code == 200  # M4 must never see a 500 because the model is down
+    assert resp.headers["X-Diagnosis-Mode"] == "deterministic_fallback"
+    body = AnalyzeResponse.model_validate(resp.json())
+    assert body.hypotheses[0].cause.startswith("Deterministic ranking")
+    assert body.hypotheses[0].evidence_ids[0] == "anom-0001"
+
+
+def test_analyze_falls_back_when_the_llm_keeps_answering_invalid_json():
+    calls = []
+
+    def garbage(messages, schema):
+        calls.append(messages)
+        return ChatReply(content="I think the catalogue service is broken.")
+
+    app.dependency_overrides[get_chat] = lambda: garbage
+    resp = client.post("/analyze", json={"anomaly_id": "anom-0001"})
+    assert resp.status_code == 200
+    assert resp.headers["X-Diagnosis-Mode"] == "deterministic_fallback"
+    assert resp.headers["X-LLM-Attempts"] == "3"
+    assert len(calls) == 3
 
 
 def test_analyze_unknown_anomaly_is_404():

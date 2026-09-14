@@ -1,5 +1,6 @@
 """Shared test setup. pytest imports this before any test module imports app.main."""
 
+import json
 import os
 
 # Unit tests must never start a real Kafka consumer.
@@ -7,8 +8,9 @@ os.environ.setdefault("CONSUMER_ENABLED", "false")
 
 import pytest  # noqa: E402
 
-from app.main import app, get_embedder, get_store  # noqa: E402
+from app.main import app, get_chat, get_embedder, get_store  # noqa: E402
 from app.models import AnomalyEvent  # noqa: E402
+from app.ollama import ChatReply  # noqa: E402
 from app.retrieval import EMBEDDING_DIMENSIONS  # noqa: E402
 from app.scoring import ScoringInputs  # noqa: E402
 
@@ -51,6 +53,24 @@ def fake_embed(texts: list[str]) -> list[list[float]]:
     return [[0.0] * EMBEDDING_DIMENSIONS for _ in texts]
 
 
+def fake_chat(messages, schema) -> ChatReply:
+    """A well-behaved LLM: one hypothesis about the top candidate, citing only the anomaly."""
+    top = schema["properties"]["hypotheses"]["items"]["anyOf"][0]["properties"]
+    content = {
+        "hypotheses": [
+            {
+                "rank": 1,
+                "service": top["service"]["enum"][0],
+                "cause": "fake LLM cause",
+                "confidence": 0.5,
+                "evidence_ids": [top["evidence_ids"]["items"]["enum"][0]],
+                "proposed_action": "no_action",
+            }
+        ]
+    }
+    return ChatReply(content=json.dumps(content), prompt_tokens=100, output_tokens=40)
+
+
 @pytest.fixture(autouse=True)
 def fake_store():
     """Endpoint tests run against an in-memory store holding anom-0001 only, and never call
@@ -58,5 +78,6 @@ def fake_store():
     store = FakeAnomalyStore(STORED_ANOMALY)
     app.dependency_overrides[get_store] = lambda: store
     app.dependency_overrides[get_embedder] = lambda: fake_embed
+    app.dependency_overrides[get_chat] = lambda: fake_chat
     yield store
     app.dependency_overrides.clear()

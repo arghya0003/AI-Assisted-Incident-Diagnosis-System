@@ -70,6 +70,13 @@ class Settings:
     ollama_timeout_seconds: float
     retrieval_mode: str
     retrieval_top_k: int
+    llm_temperature: float
+    llm_timeout_seconds: float
+    llm_max_attempts: int
+    llm_response_reserve_tokens: int
+    llm_max_output_tokens: int
+    prompt_max_candidates: int
+    prompt_min_candidates: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -105,6 +112,21 @@ class Settings:
             retrieval_mode=_choice_env("RETRIEVAL_MODE", "hybrid", ("hybrid", "vector")),
             # Capped because retrieved incidents go into the 8K-token LLM prompt in Phase 6.
             retrieval_top_k=_int_env("RETRIEVAL_TOP_K", 3),
+            # Low so the ranking is stable, which reproducible evaluation needs.
+            llm_temperature=_float_env("LLM_TEMPERATURE", 0.1),
+            # Per generation call. Phase 0 measured ~5 s warm; a cold model load adds ~30 s.
+            llm_timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", 120.0),
+            # Validate-and-retry attempts before falling back to the deterministic ranking.
+            llm_max_attempts=_int_env("LLM_MAX_ATTEMPTS", 3),
+            # Kept free in the context window for the response (and retry turns).
+            llm_response_reserve_tokens=_int_env("LLM_RESPONSE_RESERVE_TOKENS", 1024),
+            # Hard cap on generated tokens (Ollama num_predict). Three hypotheses need ~400. Without a
+            # cap, schema-constrained decoding was seen to run for over 5 minutes on a prompt that
+            # pushed disallowed ids; with it, a runaway reply ends and is rejected as invalid.
+            llm_max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 768),
+            # Candidates shown to the LLM, trimmed to the minimum when the prompt is over budget.
+            prompt_max_candidates=_int_env("PROMPT_MAX_CANDIDATES", 5),
+            prompt_min_candidates=_int_env("PROMPT_MIN_CANDIDATES", 3),
         )
 
 

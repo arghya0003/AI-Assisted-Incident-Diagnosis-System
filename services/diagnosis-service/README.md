@@ -8,14 +8,19 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 5 — retrieval of similar past incidents. A background consumer stores every
-`anomalies.detected` event in the `anomalies` table. `GET /candidates/{anomaly_id}` ranks the
-possible root causes (the anomalous services plus everything they call, from
-`config/dependency_graph.yaml`). Each candidate is scored on recent deploys, graph distance,
-whether it is the deepest anomalous service, and similarity to past incidents retrieved from a
-61-incident corpus. The response shows every signal and the evidence behind it. No LLM
-generation is involved yet. `POST /analyze` still returns a **stub** hypothesis (marked
-`[stub]`, confidence 0, `no_action`, `X-Diagnosis-Mode: stub`); the LLM arrives in Phase 6.
+**Status:** Phase 6 — LLM reasoning. A background consumer stores every `anomalies.detected`
+event in the `anomalies` table. For a stored anomaly, the pipeline:
+
+1. ranks possible root causes deterministically: the anomalous services plus everything they
+   call, scored on recent deploys, graph distance, being the deepest anomalous service, and
+   similarity to retrieved past incidents (`GET /candidates/{anomaly_id}` shows this ranking);
+2. gives the top candidates to `phi4-mini`, which writes and ranks up to 3 hypotheses under a JSON
+   schema that ties each hypothesis to one candidate and that candidate's own evidence and actions;
+3. validates the reply and retries with the rejection reasons; after 3 invalid attempts, or if
+   Ollama is unreachable, it returns the deterministic ranking with templated causes instead.
+
+`POST /analyze` therefore always returns a contract-valid response. The evidence-citation
+guardrail arrives in Phase 7.
 
 ## API
 
@@ -34,12 +39,23 @@ Interactive docs: `http://localhost:8000/docs`.
 | 422 | malformed request body |
 | 503 | TimescaleDB unreachable, or `005_diagnosis.sql` not applied |
 
+A model failure never produces an error status. Two response headers say how the answer was made:
+
+| Header | Values |
+| --- | --- |
+| `X-Diagnosis-Mode` | `llm` (phi4-mini's hypotheses), or `deterministic_fallback` (the scorer's ranking with causes prefixed `Deterministic ranking (LLM not used):`) |
+| `X-LLM-Attempts` | `0`–`3`: generation attempts made; `0` when the prompt could not fit the context budget |
+
 `/health` returns 200 whenever the process is up. `database` is `ok`, `unreachable` or
 `schema_missing`, and `consumer` is `running`, `connecting` or `disabled`, so an outage is
 visible without the container being restarted for something a restart can't fix.
 
 `proposed_action` is one of `rollback_deploy:<deploy_id>`, `restart_service:<service>`,
 `scale_service:<service>`, or `no_action`. The vocabulary is still to be confirmed with M4.
+Currently only `no_action` and `rollback_deploy` are ever proposed. A rollback is offered only
+for a candidate's own deploy within about 7 minutes before onset. Restart and scale are never
+offered, because no signal yet shows a service has failed or is overloaded (PLAN.md, Phase 6
+outcome).
 
 ## Run
 
@@ -98,7 +114,10 @@ Both need Ollama on the host.
 Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO_ANOMALY` 0.20,
 `SCORE_WEIGHT_INCIDENT` 0.15 (must sum to 1, checked at startup), `DEPLOY_LOOKBACK_MINUTES` 30,
 `DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. Retrieval: `RETRIEVAL_MODE` `hybrid`
-(or `vector`), `RETRIEVAL_TOP_K` 3, `OLLAMA_TIMEOUT_SECONDS` 60. The
+(or `vector`), `RETRIEVAL_TOP_K` 3, `OLLAMA_TIMEOUT_SECONDS` 60. LLM: `LLM_TEMPERATURE` 0.1,
+`LLM_TIMEOUT_SECONDS` 120, `LLM_MAX_ATTEMPTS` 3, `LLM_MAX_OUTPUT_TOKENS` 768,
+`LLM_RESPONSE_RESERVE_TOKENS` 1024, `PROMPT_MAX_CANDIDATES` 5, `PROMPT_MIN_CANDIDATES` 3. The
+prompt text is in `app/prompts/*.txt`. The
 container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
 on `0.0.0.0` (`OLLAMA_HOST`).
 
@@ -212,3 +231,47 @@ that led to embedding symptoms only is in PLAN.md, Phase 5 outcome.
 - Similarities cluster between about 0.63 and 0.77, so the `incident_similarity` signal is weak.
 - These numbers are optimistic: the synthetic corpus and the fixtures share an author and fault
   types, and no public postmortem reached any fixture's top 3.
+
+---
+
+## Phase 6 LLM results — 2026-09-14
+
+Reproduce with `EVAL_RUNS=10 bash services/diagnosis-service/scripts/test_in_docker.sh --eval`.
+The run used `phi4-mini`, `num_ctx` 8192, temperature 0.1, and 3 attempts. Each fixture runs
+with its scenario context (deploys and related anomalies) plus live retrieval.
+
+| Fixture | True cause | 1st-try valid | Retried | Fallback | p50 ms | p95 ms | Rank 1 = true cause | Rank-1 action |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `anom-fx-01` | catalogue | 10 | 0 | 0 | 15,998 | 19,502 | 10/10 | `rollback_deploy:dep-fx-01-inj` |
+| `anom-fx-02` | orders | 10 | 0 | 0 | 16,422 | 17,535 | 10/10 | `rollback_deploy:dep-fx-02-inj` |
+| `anom-fx-03` | payment | 10 | 0 | 0 | 12,201 | 13,006 | 10/10 | `rollback_deploy:dep-fx-03-inj` |
+| `anom-fx-04` | catalogue | 10 | 0 | 0 | 13,654 | 15,145 | 0/10 | `no_action` |
+| `anom-fx-05` | user | 10 | 0 | 0 | 13,094 | 13,548 | 0/10 | `no_action` |
+| `anom-fx-06` | carts | 10 | 0 | 0 | 14,240 | 14,881 | 0/10 | `rollback_deploy:dep-fx-06-bg2` (wrong: a routine orders deploy) |
+| `anom-fx-07` | catalogue | 10 | 0 | 0 | 15,807 | 17,434 | 10/10 | `no_action` |
+| `anom-fx-08` | shipping | 10 | 0 | 0 | 16,204 | 16,972 | 10/10 | `rollback_deploy:dep-fx-08-inj` |
+| `anom-fx-09` | none (benign) | 10 | 0 | 0 | 13,284 | 14,482 | n/a | `no_action` |
+| `anom-fx-10` | none (ambiguous) | 10 | 0 | 0 | 11,367 | 11,576 | n/a | `no_action` |
+
+**Overall:**
+- **Validity:** 100/100 contract-valid, all on the first attempt; 0 retries, 0 fallbacks.
+- **Latency:** p50 14.1 s, p95 17.0 s. Live `POST /analyze` over HTTP (10 calls): p50 12.1 s,
+  p95 14.0 s.
+- **Accuracy:** rank 1 is the true cause in 50/80 runs, exactly matching the deterministic
+  scorer's rank 1.
+- **Normalisation:** 35/100 replies were adjusted (a repeated candidate dropped, or reordered).
+- **Token estimate:** Ollama's prompt-token counts were 0.71–0.76 of the estimate.
+
+### Reading
+
+- **Reliability is solved; accuracy and truthfulness are not.** The schema, validation and
+  fallback make `/analyze` always valid.
+- **Ranking follows the scorer.** The crash fixtures (`anom-fx-04/05/06`) stay wrong, as Phase 4
+  predicted.
+- **Explanations can invent facts.** On live `/analyze` calls for fixtures, whose deploys are not
+  stored, phi4-mini wrote causes such as "catalogue's recent deployment lowered its CPU limit"
+  (`anom-fx-01`) and "carts release enabled debug logging" (`anom-fx-10`). Both were copied from
+  similar past incidents and stated as current facts. Treat `cause` as unverified until PLAN.md
+  Phase 6 finding 1 is resolved.
+- **Background deploys lead to a wrong rollback.** One `anom-fx-06` proposal would roll back an
+  unrelated orders deploy, which illustrates issue #7.

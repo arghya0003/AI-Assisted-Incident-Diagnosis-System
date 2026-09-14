@@ -255,6 +255,14 @@ def test_gives_up_after_three_attempts():
     assert len(calls) == 3 and sleeps == [1.0, 2.0]
 
 
+def test_read_timeouts_are_not_retried():
+    sleeps = []
+    client, calls = make_client([httpx.ReadTimeout("timed out")], sleeps)
+    with pytest.raises(OllamaUnavailable, match="timed out"):
+        client.embed(["hello"], "nomic-embed-text")
+    assert len(calls) == 1 and sleeps == []
+
+
 def test_client_errors_are_not_retried():
     sleeps = []
     client, calls = make_client([404], sleeps)

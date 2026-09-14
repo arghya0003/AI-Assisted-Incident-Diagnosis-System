@@ -11,17 +11,19 @@
 #   bash services/diagnosis-service/scripts/test_in_docker.sh --ingest     # + embed and load corpus/incidents
 #   bash services/diagnosis-service/scripts/test_in_docker.sh --fixtures   # + load fixtures into anomalies
 #   bash services/diagnosis-service/scripts/test_in_docker.sh --compare    # + vector vs hybrid retrieval
-# --ingest and --compare need Ollama running on the host with OLLAMA_HOST=0.0.0.0.
+#   bash services/diagnosis-service/scripts/test_in_docker.sh --eval       # + LLM runs per fixture (EVAL_RUNS, default 10)
+# --ingest, --compare and --eval need Ollama running on the host with OLLAMA_HOST=0.0.0.0.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # Git Bash would otherwise rewrite /src into a Windows path
 
-INGEST=0 FIXTURES=0 COMPARE=0
+INGEST=0 FIXTURES=0 COMPARE=0 EVAL=0
 for arg in "$@"; do
   case "$arg" in
     --ingest) INGEST=1 ;;
     --fixtures) FIXTURES=1 ;;
     --compare) COMPARE=1 ;;
-    *) echo "unknown option: $arg (expected --ingest, --fixtures, --compare)" >&2; exit 2 ;;
+    --eval) EVAL=1 ;;
+    *) echo "unknown option: $arg (expected --ingest, --fixtures, --compare, --eval)" >&2; exit 2 ;;
   esac
 done
 
@@ -39,6 +41,7 @@ CMD="pip install -q --root-user-action=ignore -r requirements-dev.txt && python 
 if [ "$INGEST" = 1 ]; then CMD="$CMD && python corpus/ingest.py"; fi
 if [ "$FIXTURES" = 1 ]; then CMD="$CMD && python scripts/load_fixtures.py"; fi
 if [ "$COMPARE" = 1 ]; then CMD="$CMD && python scripts/compare_retrieval.py"; fi
+if [ "$EVAL" = 1 ]; then CMD="$CMD && python scripts/eval_llm.py --runs ${EVAL_RUNS:-10}"; fi
 
 docker run --rm --network "$NETWORK" -v "$MOUNT:/src" -w /src \
   --add-host host.docker.internal:host-gateway \

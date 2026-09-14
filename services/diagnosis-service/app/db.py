@@ -14,7 +14,7 @@ import psycopg2
 import psycopg2.errors
 from psycopg2.extras import Json
 
-from app.corpus import IncidentRecord
+from app.corpus import IncidentRecord, section
 from app.models import AnomalyEvent, Deploy, SimilarIncident
 from app.scoring import ScoringInputs
 from app.settings import Settings
@@ -178,7 +178,7 @@ def count_incidents(cur) -> int:
 # Hybrid keeps an incident if it names a candidate service OR its fault type fits the metrics.
 # A NULL services array or fault type simply fails its half of the filter.
 _SEARCH_INCIDENTS = """
-    SELECT incident_id, title, services, fault_type, source,
+    SELECT incident_id, title, services, fault_type, source, body,
            1 - (embedding <=> %(query)s::vector) AS similarity
     FROM incidents
     WHERE embedding IS NOT NULL
@@ -212,8 +212,10 @@ def search_incidents(
             source=source,
             # Float rounding can put an identical vector a hair outside [-1, 1].
             similarity=max(-1.0, min(1.0, similarity)),
+            root_cause=section(body, "Root cause"),
+            resolution=section(body, "Resolution"),
         )
-        for incident_id, title, services, fault_type, source, similarity in cur.fetchall()
+        for incident_id, title, services, fault_type, source, body, similarity in cur.fetchall()
     ]
 
 

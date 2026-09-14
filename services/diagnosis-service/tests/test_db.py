@@ -207,6 +207,7 @@ def test_incident_search_vector_versus_hybrid(cur):
     assert _test_ids(vector_results) == ["incident-9901", "incident-9903", "incident-9902"]
     best = next(r for r in vector_results if r.incident_id == "incident-9901")
     assert best.similarity == pytest.approx(1.0) and best.services == ["catalogue"]
+    assert (best.root_cause, best.resolution) == ("r", "x")
 
     # 9901 names a candidate service, 9902 has a matching fault type, 9903 matches neither.
     hybrid_results = search_incidents(cur, query, ["catalogue"], ["bad_deploy_latency"], top_k=1000, hybrid=True)

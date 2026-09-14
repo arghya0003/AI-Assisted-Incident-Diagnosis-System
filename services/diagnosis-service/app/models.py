@@ -139,6 +139,9 @@ class SimilarIncident(BaseModel):
     fault_type: str | None
     source: str | None
     similarity: float = Field(ge=-1.0, le=1.0)
+    # From the incident body, for the LLM prompt.
+    root_cause: str = ""
+    resolution: str = ""
 
 
 class Candidate(BaseModel):

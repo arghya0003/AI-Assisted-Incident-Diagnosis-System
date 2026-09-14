@@ -700,6 +700,83 @@ one `proposed_action` from the enum with a real target ID.
 10 runs per fixture are recorded in `README.md`. Measured `/analyze` p50 and p95 latency recorded.
 The prompt lives in a file, not an f-string buried in logic, because Week 8 iterates on it heavily.
 
+#### Phase 6 outcome (2026-09-14) — status: DONE against the definition of done; the cause text is not yet trustworthy (finding 1)
+
+| Check | Result |
+| --- | --- |
+| Every fixture produces schema-valid hypotheses | **100/100** runs (10 fixtures × 10 runs) contract-valid |
+| Retry and fallback rates | **0/100** needed a retry, **0/100** fell back. One Ollama runner crash (HTTP 500, `0xc0000409`) on the warm-up call was recovered by the client's retry. |
+| `/analyze` latency | Live over HTTP, 10 calls: **p50 12.1 s, p95 14.0 s**. In-process pipeline with fixture context, 100 runs: p50 14.1 s, p95 17.0 s, max 19.5 s. |
+| Prompt in files | `app/prompts/analyze_system.txt`, `analyze_user.txt`, `analyze_retry.txt` |
+| Context budget estimate | Ollama's prompt-token counts were 0.71–0.76 of the estimate, so the budget errs safe as intended |
+| Always contract-valid | Tested for every fixture with an unreachable model and with a model that returns prose |
+| Tests | 327 passed, 4 xfailed, inside the compose network |
+
+Quality, from the same 100 runs (beyond the definition of done):
+
+| Measure | Result |
+| --- | --- |
+| Rank-1 service is the true root cause | **50/80**, identical to the deterministic scorer's rank 1 (50/80). The LLM kept the scorer's top candidate in 90/100 runs. |
+| Bad-deploy fixtures (`anom-fx-01/02/03/08`) | 40/40: correct service, and rollback of the injected deploy |
+| Benign and ambiguous fixtures (`anom-fx-09/10`) | 20/20 `no_action` |
+| Harmful action | `anom-fx-06` (carts crash): rolled back orders' routine deploy from 4 minutes before onset, 10/10 |
+| Replies normalised | 35/100 (a repeated candidate dropped, or hypotheses reordered by confidence) |
+| Run-to-run variation | None of substance at temperature 0.1: each fixture's 10 runs gave the same rank-1 service and action |
+
+Decisions made while building, beyond what this section specified:
+
+- **Ollama's JSON-schema output instead of `format: "json"`.** Measured at no latency cost, and
+  enums are enforced during decoding. With plain JSON mode, a prompt that pushed `ev-9999` and
+  `dep-fake-001` got both emitted verbatim.
+- **Each hypothesis is bound to one candidate in the schema**, through an internal `service` field
+  and one schema variant per candidate listing only that candidate's citable ids and actions.
+  The first version had flat lists of allowed ids and actions, plus rules in the prompt.
+  phi4-mini proposed rolling back front-end's deploy as the fix for catalogue, proposed
+  `restart_service` for every fixture including the benign ones, and ignored rules added to stop
+  it. `service` is stripped before the response, so the contract is unchanged.
+- **Only `no_action` and `rollback_deploy` are offered.** A rollback is offered only for the
+  candidate's own deploy with deploy score >= 0.5 (within about 7 minutes). Restart and scale are
+  never offered, because no signal shows a service has failed or is overloaded. The fallback uses
+  the same rule (`app/hypotheses.py`).
+- **Output bounds**: `num_predict` 768, at most 6 citations, cause at most 400 characters. On a
+  poisoned prompt, schema-constrained decoding first ran for over 5 minutes; with a token cap it
+  repeated one allowed id until the cap (42 s); with bounded arrays it finished normally in 10 s.
+  Read timeouts are no longer retried, so a stuck generation can't cost three timeouts.
+- **Two cosmetic reply problems are normalised rather than retried** (a repeated candidate, or rank
+  disagreeing with confidence). Retrying costs about 12 s, and the model tends to repeat itself at
+  temperature 0.1. Each normalisation is recorded and counted.
+- **Hypotheses cite source ids** (anomaly, deploy, incident), as in the CONTRACTS.md example, not
+  `ev:` evidence ids. Phase 4 open item 5 is still for the team to settle.
+- **Fallback causes start with `Deterministic ranking (LLM not used):`**, and the
+  `X-Diagnosis-Mode` header says which path answered.
+- **Token estimate** is 3 characters per token; measured 3.45, and confirmed safe above.
+
+Findings:
+
+1. **The cause text still invents facts.** The schema fixed ids and actions, not prose. On live
+   `/analyze` calls for fixtures (whose deploys are not in M1's `deploys` table), `anom-fx-01`
+   said "catalogue's recent deployment lowered its CPU limit"; `anom-fx-07` claimed recent
+   deploys to catalogue, front-end and catalogue-db; and `anom-fx-10` said "carts release enabled
+   debug logging". Each was copied from a similar past incident (0008, 0022, 0006) and stated as
+   current fact, despite rule 4. Two causes were just "Anom-fx-10". The Phase 7 citation
+   guardrail cannot catch this. Options to decide before evaluation:
+   - drop incident root-cause and resolution text from the prompt, keeping ids, titles and fault
+     types;
+   - reject in code a cause that mentions a deploy for a candidate that has none;
+   - generate the cause text deterministically, leaving the LLM only ranking and confidence.
+2. **The LLM adds no ranking accuracy on these fixtures** (50/80, the same as the scorer). Its
+   value would have to be explanation, which finding 1 makes unreliable. Phase 8's
+   `deterministic` versus `full` ablation should measure this on real injected faults.
+3. **Background deploys now cause a harmful action.** For `anom-fx-06`, a routine orders deploy
+   4 minutes before onset was offered for rollback and chosen. This is Phase 4 finding 1
+   ([#7](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/7)) reaching
+   the proposed action.
+4. **Latency is 12–17 s**, against 5 s in Phase 0, because of a longer prompt and up to three
+   hypotheses at about 25 tokens/s. That's acceptable for a human-approval workflow, but
+   evaluation runs will need Phase 8's response cache.
+5. **Ten runs per fixture measure stability, not spread**: at temperature 0.1 the output barely
+   varies.
+
 ---
 
 ### Phase 7 — Evidence guardrail — read this diff carefully, do not skim it
