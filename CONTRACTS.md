@@ -61,7 +61,7 @@ Producer: M2's EWMA detector, after dedup/grouping.
 
 ```json
 {
-  "anomaly_id": "anom-0001",
+  "anomaly_id": "anom-20260812T204503-0001",
   "services": ["catalogue", "front-end"],
   "metrics": ["latency_p99_ms", "error_rate"],
   "severity": "high",
@@ -70,9 +70,52 @@ Producer: M2's EWMA detector, after dedup/grouping.
   "evidence_window": {
     "start": "2026-08-12T20:40:00.000Z",
     "end": "2026-08-12T20:45:03.000Z"
-  }
+  },
+  "detector": "ewma",
+  "in_deploy_window": true,
+  "related_deploy_ids": ["dep-2026-08-12-0007"],
+  "contributors": [
+    {
+      "service": "catalogue",
+      "metric": "latency_p99_ms",
+      "value": 7470.2,
+      "baseline": 36.1,
+      "score": 4.21,
+      "severity": "high",
+      "observed_at": "2026-08-12T20:45:03.000Z"
+    }
+  ]
 }
 ```
+
+`severity` is one of `low`, `medium`, `high` — **resolved by M2**, closing the
+open question below. It is derived from how far past its firing threshold the
+worst contributing metric went, so it is comparable across detectors that
+otherwise produce incomparable scores (a z-score, a CUSUM statistic and a
+threshold overshoot).
+
+The first seven fields are the frozen contract. The rest are additive and safe
+to ignore:
+
+| Field | Why it is there |
+| --- | --- |
+| `detector` | Which algorithm produced this, so ablation runs are self-describing. |
+| `in_deploy_window` | True if any member service was mid-deploy. A strong prior for M3. |
+| `related_deploy_ids` | The deploys implicated, so M3 need not re-derive them by timestamp. |
+| `contributors` | Per-metric detail (value, baseline, score) behind the grouped event, so M3 can build `metrics` evidence items without re-querying TimescaleDB. |
+
+**One event per incident.** A single fault trips many metrics across many
+services; M2 groups them and emits one event carrying the member list, rather
+than one alert per breach. `t_detected` is stamped from the *first* contributing
+signal, not from the moment the grouped event is published, so the grouping
+delay does not inflate detection-latency measurements.
+
+**`liveness` is a synthetic metric name.** A crashed service disappears from
+Prometheus and therefore emits no telemetry at all, so M2 also reports services
+that have stopped reporting. Those events carry `"liveness"` in `metrics[]` and
+`"detector": "staleness"`. There is no `liveness` row in the `metrics` table —
+M3 should read the gap in that service's samples as the evidence, and
+`t_onset` marks when the data stopped.
 
 ## Evidence model
 
@@ -161,12 +204,22 @@ Direction: M2 → all
 
 ```json
 {
-  "scenario_id": "scn-latency-regression-01",
+  "scenario_id": "scn-bad-deploy-latency-1757764800",
   "fault_type": "bad_deploy_latency",
   "ground_truth_service": "catalogue",
-  "t_inject": "2026-08-12T20:44:00.000Z"
+  "t_inject": "2026-08-12T20:44:00.000Z",
+  "t_recovered": "2026-08-12T20:45:30.000Z",
+  "status": "recovered"
 }
 ```
+
+The `fault_scenarios` table (`timescaledb/init/003_fault_scenarios.sql`) is the
+authority on these values, not any runner's own clock: the injector writes
+`t_inject` at the moment the fault actually starts, and scoring latency against
+anything else would silently bias every number in the report.
+
+`fault_type` is currently one of `bad_deploy_latency`, `service_crash`,
+`db_pool_saturation` — the three the injector can physically produce.
 
 ## Service dependency graph (input to M3)
 
@@ -192,5 +245,7 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
 - [ ] Confirm topic partitioning/retention on `metrics.raw` — **implemented** as proposed
       (3 partitions, keyed by `service`, `retention.ms=86400000`), pending team sign-off.
       Downsampling-after-24h not yet built.
-- [ ] Confirm `anomalies.detected` `severity` enum values with M2.
+- [x] Confirm `anomalies.detected` `severity` enum values with M2 — **resolved:**
+      `low` | `medium` | `high`, derived from the worst contributing metric's
+      overshoot of its firing threshold. See the topic section above.
 - [ ] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4.

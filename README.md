@@ -1,9 +1,21 @@
-# AI-Assisted Incident Diagnosis System — Member 1: Testbed & Ingestion Pipeline
+# AI-Assisted Incident Diagnosis System
+
+Capstone project repository. See [CONTRACTS.md](CONTRACTS.md) for the Kafka/REST schemas
+every slice produces and consumes.
+
+| Slice | Owner | Status |
+| --- | --- | --- |
+| Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
+| Anomaly detection & evaluation | M2 | Detector and harness built; no testbed run yet |
+| Retrieval-augmented reasoning | M3 | Not started |
+| Orchestration, HITL UI & safety | M4 | Not started |
+
+---
+
+# Member 1: Testbed & Ingestion Pipeline
 
 Data-plane owner for the capstone project. Nothing blocks this slice — M2/M3/M4 are blocked
 on it, so it front-loads hard in weeks 1-6, then tapers into supporting M2's fault injection.
-
-See [CONTRACTS.md](CONTRACTS.md) for the Kafka/REST schemas this slice produces and consumes.
 
 ## Phased plan
 
@@ -63,9 +75,11 @@ partitioning/retention, silently falling back to Kafka's wrong defaults. Fixed w
 restarts, schema auto-initialized, topic config correct, real traffic flowing end-to-end.
 See `docs/phase6-orchestration.md`.
 
-### Phase 7 (Week 6-7) — Integration support ⬜ blocked
+### Phase 7 (Week 6-7) — Integration support ◐ partially unblocked
 Help M2 wire onto `metrics.raw` / TimescaleDB, help M3 get deploy-log and dependency-graph
-read access. Can't start — M2/M3 don't exist as code yet, nothing to integrate with.
+read access. M2 now exists and consumes `metrics.raw`, `deploys.events` and the
+`fault_scenarios` / `metrics` / `deploys` tables — see the Member 2 section below. M3 still
+does not exist, so the deploy-log and dependency-graph handoff is still pending.
 
 ### Phase 8 (Week 7+) — Fault injection harness (pulled forward) ✅ partial
 Skipped ahead to the part of Phase 8 that doesn't depend on teammates: a real
@@ -94,7 +108,103 @@ services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into 
 timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
 services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
 services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
+services/anomaly-detector/  Phase 9 (M2) — swappable detectors, grouping, deploy-window policy
+services/evaluation-runner/ Phase 9 (M2) — fault injection + scoring; produces the report tables
+results/                    Evaluation output (gitignored — regenerate, don't commit)
 ```
+
+---
+
+# Member 2: Anomaly Detection & Evaluation Framework
+
+Owns "something is wrong" — and "how do we know we're right". Full design notes and the
+reasoning behind each decision are in [docs/phase9-detection.md](docs/phase9-detection.md).
+
+### Phase 9 — Detector ✅
+`services/anomaly-detector/` rebuilt from a single-file EWMA z-score into four modules:
+
+- **`detectors.py`** — four swappable detectors (`ewma`, `static`, `zscore`, `cusum`) behind
+  one interface, selected by the `DETECTOR` env var. The comparison detectors exist so the
+  evaluation can show EWMA earned its place rather than asserting it.
+- **`grouping.py`** — collapses the dozen metric breaches one fault produces into a single
+  `anomalies.detected` event with a member list, with a per-service cooldown so an ongoing
+  fault does not re-alert every cycle.
+- **`deploy_window.py`** — a service that is mid-deploy must clear a higher evidence bar.
+  It never fully suppresses: hard-muting during a deploy would silence `bad_deploy_latency`,
+  the most important fault class in the project.
+- **`staleness.py`** — liveness. A crashed container disappears from Prometheus, so it
+  emits *no* telemetry rather than bad telemetry; every per-sample detector is blind to it.
+  Silence from a previously-healthy service is treated as its own high-severity signal.
+- **`main.py`** — Kafka wiring only.
+
+Three real bugs found and regression-tested: error-rate anomalies could never fire (a fixed
+noise floor put 3-sigma above a ratio's maximum), a sustained fault was absorbed into the
+baseline so the detector went quiet mid-incident, and CUSUM could never fire at all
+(threshold crossings cleared the accumulator before the corroboration gate could pass it).
+
+The liveness gap was found by the evaluation harness, not by the tests — the first live run
+missed a `service_crash` completely. See [docs/phase9-detection.md](docs/phase9-detection.md).
+
+### Phase 9 — Evaluation harness ✅ (built, not yet run against the testbed)
+`services/evaluation-runner/` — the command every number in the final report comes from.
+
+```bash
+docker compose run --rm evaluation-runner live                      # inject faults, score the live detector
+docker compose run --rm evaluation-runner live --suite smoke        # quick wiring check
+docker compose run --rm evaluation-runner replay --since-minutes 120  # ablation over recorded data
+```
+
+`live` measures the real end-to-end pipeline. `replay` re-runs every detector over an
+identical recorded stream, which is what makes the ablation a claim about detectors rather
+than about testbed conditions. Reports land in `./results/` as Markdown and CSV.
+
+Scoring separates *misattributed* (alerted, wrong service) from *missed* (never alerted),
+because collapsing them would flatter the detector. Metrics that depend on M3's ranker —
+root-cause accuracy, MRR, evidence validity — are implemented and tested but report
+"not measured" rather than a zero that would read as a measured failure.
+
+### Tests
+93 tests, no Docker needed:
+
+```bash
+cd services/anomaly-detector   && python -m pytest tests -q   # 53
+cd services/evaluation-runner  && python -m pytest tests -q   # 40
+```
+
+`test_replay.py` runs the real detector, grouper and scoring code over a synthetic metric
+stream with a known fault — an end-to-end check of the whole chain.
+
+### Results
+Full seven-scenario suite against the live stack: **4/7 detected (80% of observable),
+median latency 36.5s** against a 60s target, and **zero false positives** across 11.9
+minutes of quiet observation. `service_crash` is 3/3.
+
+**Ablation (18 scenarios, 26,370 replayed samples, identical input per detector):** EWMA,
+CUSUM and 3-sigma all detect 12/18; a static threshold manages **8/18** and misses *every*
+latency fault. Catalogue's p95 goes from a 5.9ms baseline to 222ms under CPU throttle — a
+38x regression that a defensible 500ms global threshold sails straight past. No single fixed
+threshold works across services with different healthy baselines; that is what EWMA buys.
+
+The three non-detections are testbed limitations, not detector failures, and the harness
+distinguishes them — see [docs/phase9-detection.md](docs/phase9-detection.md):
+
+- `front-end` and `orders` serve no traffic (Sock Shop runs without a load generator), so
+  they emit only cpu/memory and a latency fault there is undetectable by construction.
+  Scored `unobservable`, but still counted against the headline rate.
+- `db_pool_saturation` genuinely exhausts catalogue-db's 151-connection pool, yet catalogue
+  is unaffected — it holds an established pool and never needs a new connection at 0.2
+  req/s. The fault starves something the victim does not use.
+
+### Not done yet
+- **Four of seven services have no traffic**, which caps what the evaluation can cover, and
+  means `error_rate` is never ingested for any service. Fixing it means adding a load
+  generator to the shared testbed — M1's call, flagged for the team.
+- Three fault classes, not the six in the plan — the injector cannot produce memory leak /
+  OOM, dependency timeout cascade or config error yet.
+- Seasonality suppression deliberately skipped (no diurnal cycle in synthetic traffic).
+- No CI.
+
+---
 
 ## Diagnosis evidence
 
