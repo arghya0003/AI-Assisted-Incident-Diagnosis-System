@@ -101,11 +101,17 @@ class AnomalyGrouper:
         cooldown_seconds: float = 120.0,
         max_members: int = 50,
         escalation_factor: float = 3.0,
+        id_namespace: str | None = None,
     ):
         self.group_delay = timedelta(seconds=group_delay_seconds)
         self.cooldown = timedelta(seconds=cooldown_seconds)
         self.max_members = max_members
         self.escalation_factor = escalation_factor
+        # The sequence counter restarts with the process, so the live
+        # detector passes a per-process token to keep ids unique across a
+        # restart (issue #4). Replay leaves it unset, so a given recording
+        # always reproduces the same ids.
+        self.id_namespace = id_namespace
 
         self._open: Group | None = None
         # service -> time the cooling period for that service expires
@@ -116,7 +122,10 @@ class AnomalyGrouper:
 
     def _next_anomaly_id(self, when: datetime) -> str:
         self._sequence += 1
-        return f"anom-{when.strftime('%Y%m%dT%H%M%S')}-{self._sequence:04d}"
+        stamp = when.strftime('%Y%m%dT%H%M%S')
+        if self.id_namespace:
+            return f"anom-{stamp}-{self.id_namespace}-{self._sequence:04d}"
+        return f"anom-{stamp}-{self._sequence:04d}"
 
     def _is_cooling(self, service: str, now: datetime) -> bool:
         expires = self._cooling.get(service)

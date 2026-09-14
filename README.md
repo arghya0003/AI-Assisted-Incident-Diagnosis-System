@@ -167,10 +167,10 @@ root-cause accuracy, MRR, evidence validity — are implemented and tested but r
 "not measured" rather than a zero that would read as a measured failure.
 
 ### Tests
-99 tests, no Docker needed:
+101 tests, no Docker needed:
 
 ```bash
-cd services/anomaly-detector   && python -m pytest tests -q   # 59
+cd services/anomaly-detector   && python -m pytest tests -q   # 61
 cd services/evaluation-runner  && python -m pytest tests -q   # 40
 ```
 

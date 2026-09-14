@@ -166,6 +166,36 @@ correlation. There is a test asserting the window can only ever raise the bar.
 traffic with no diurnal or weekly cycle, so a time-of-day baseline would be modelling noise
 and could not be validated. Building it would be untested ceremony. Recorded as a known gap.
 
+## Issues raised by M3 (#2, #3, #4)
+
+M3 filed three issues against the first-pass detector. Each was checked against every sample
+still recorded — 12.25 h of stack uptime (11.1 h fault-free), 203k samples, 26 injected
+faults — by replaying it all through each detector with `audit.py`:
+
+```
+docker compose run --rm --entrypoint python evaluation-runner audit.py
+```
+
+| Issue | First-pass detector | Now |
+| --- | --- | --- |
+| [#2](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/2) `memory_bytes` flood | 140 of 157 alerts on memory, ~78/hour, no fault running | **0** `memory_bytes` alerts outside faults, for every detector. The largest single-step memory move on any service was 13 MB, well under the 50 MB `MIN_DEVIATION`; the relative noise floor and two-breach corroboration do the rest |
+| [#3](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/3) zero-width `evidence_window` | `start == end == t_onset` in 157/157 | **0/31** zero-width; 24.6 s minimum, 30 s median for metric faults. The definition is now written into CONTRACTS.md |
+| [#4](https://github.com/arghya0003/AI-Assisted-Incident-Diagnosis-System/issues/4) no grouping, id collisions | One event per (service, metric); `anom-<epoch ms>` | 16/31 events span several metrics and 5 span several services, a median of 6 signals per event. Ids carry a random per-process token, so a restart cannot reuse one |
+
+**The false positives that remain.** EWMA raised 8 false alarms in the 11.1 fault-free hours —
+0.72/hour, inside the under-1/hour target — and all 8 fell in one 36-minute stretch (13 Sep,
+20:38–21:14 UTC), on `payment` and `user` latency. Through that stretch both services' p95
+rose together (averaging 13–21 ms against a usual 7–10, peaking at 36–72 ms), and it holds
+123 of the 168 p95 samples above 25 ms that those two services produced in the whole
+recording. Two unrelated services slowing in step with no fault running points at the host,
+not the services.
+
+It is also the no-traffic problem again (issue #6): with only Prometheus scrapes, p95 comes
+from about 12 requests a minute, so one slow scrape holds p95 up for the whole minute of the
+rate window and satisfies the two-breach corroboration by itself. Real traffic would dilute
+it. Left as is — it meets the target, and suppressing it would mean waiting out the 60 s rate
+window, pushing detection latency past its own target.
+
 ## A durable record: the `anomalies` table
 
 `anomalies.detected` is a 24h Kafka stream, so an anomaly cannot be looked up by ID
@@ -248,7 +278,7 @@ previous one, which would look like a detector miss rather than a harness artefa
 
 ## Tests
 
-99 tests, no Docker required: `python -m pytest tests` in either service directory.
+101 tests, no Docker required: `python -m pytest tests` in either service directory.
 
 `services/evaluation-runner/tests/test_replay.py` is the end-to-end one — it generates a
 synthetic metric stream with a known fault and runs the real detector, real grouper and

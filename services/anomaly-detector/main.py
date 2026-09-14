@@ -16,6 +16,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import psycopg2
@@ -130,6 +131,9 @@ def run():
         group_delay_seconds=GROUP_DELAY_SECONDS,
         cooldown_seconds=COOLDOWN_SECONDS,
         escalation_factor=ESCALATION_FACTOR,
+        # anomaly_id is a primary key downstream (the anomalies table, M3,
+        # M4's incidents), so a restart must never reuse one. See issue #4.
+        id_namespace=uuid.uuid4().hex[:6],
     )
     staleness = StalenessMonitor(stale_after_seconds=STALE_AFTER_SECONDS)
     detectors: dict[tuple[str, str], Detector] = {}

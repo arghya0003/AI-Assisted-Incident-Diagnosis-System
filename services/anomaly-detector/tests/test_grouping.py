@@ -194,6 +194,43 @@ def test_event_satisfies_the_frozen_contract_shape():
     assert event["anomaly_id"].startswith("anom-")
 
 
+def test_anomaly_ids_stay_unique_across_a_restart():
+    """Issue #4: the sequence restarts with the process, so ids must not repeat.
+
+    Two groupers stand in for the detector before and after a restart, fed the
+    identical incident. Without a per-process namespace both would call it
+    anom-20260913T120000-0001, and the second would collide on every primary
+    key downstream.
+    """
+    def first_id(grouper):
+        grouper.add(signal("catalogue", "latency_p95_ms", seconds=0))
+        return grouper.flush(at(20))[0]["anomaly_id"]
+
+    before = first_id(AnomalyGrouper(id_namespace="a1b2c3"))
+    after = first_id(AnomalyGrouper(id_namespace="d4e5f6"))
+
+    assert before != after
+    assert before == "anom-20260913T120000-a1b2c3-0001"
+
+
+def test_evidence_window_spans_onset_to_the_last_signal():
+    """Issue #3: a real range, not start == end == t_onset.
+
+    start is when the first contributing breach began, end is the latest
+    contributing signal, and t_detected always falls inside it.
+    """
+    grouper = AnomalyGrouper(group_delay_seconds=15)
+    grouper.add(signal("catalogue", "latency_p95_ms", seconds=5, onset=0))
+    grouper.add(signal("catalogue", "latency_p99_ms", seconds=10, onset=0))
+
+    event = grouper.flush(at(20))[0]
+    window = event["evidence_window"]
+
+    assert window["start"] == event["t_onset"] == format_ts(at(0))
+    assert window["end"] == format_ts(at(10))
+    assert parse_ts(window["start"]) <= parse_ts(event["t_detected"]) <= parse_ts(window["end"])
+
+
 def test_anomaly_ids_are_unique_across_events():
     grouper = AnomalyGrouper(group_delay_seconds=15, cooldown_seconds=10)
     ids = []

@@ -61,7 +61,7 @@ Producer: M2's EWMA detector, after dedup/grouping.
 
 ```json
 {
-  "anomaly_id": "anom-20260812T204503-0001",
+  "anomaly_id": "anom-20260812T204503-3f9a1c-0001",
   "services": ["catalogue", "front-end"],
   "metrics": ["latency_p99_ms", "error_rate"],
   "severity": "high",
@@ -109,6 +109,27 @@ services; M2 groups them and emits one event carrying the member list, rather
 than one alert per breach. `t_detected` is stamped from the *first* contributing
 signal, not from the moment the grouped event is published, so the grouping
 delay does not inflate detection-latency measurements.
+
+**What the time fields mean** (resolves issue #3). For every event,
+`evidence_window.start == t_onset <= t_detected <= evidence_window.end`:
+
+| Field | Meaning |
+| --- | --- |
+| `t_onset` | When the earliest contributing deviation *began* — the first breaching sample of its streak, which is earlier than the moment the detector was confident enough to fire. For a `liveness` event, when that service's data stopped. |
+| `t_detected` | When the first contributing signal fired. Detection latency is measured from this. |
+| `evidence_window.start` | Same as `t_onset`. |
+| `evidence_window.end` | The latest contributing signal folded into the event before it was published. |
+
+So the window is the span in which the anomalous behaviour was actually observed, typically
+25–45 s for a metric fault and the whole silence for a `liveness` event. It deliberately does
+not include healthy context before onset: how much baseline to chart or how far back to look
+for deploys is the consumer's choice (M3 uses `t_onset − 30 min` for deploys). The event is
+published once, so `end` is not updated if the anomaly carries on afterwards.
+
+**`anomaly_id` is unique** (resolves issue #4). Format
+`anom-<t_detected as YYYYMMDDTHHMMSS>-<process token>-<sequence>`. The 6-hex process token is
+random per detector start, so a restart cannot reuse an id even though the sequence restarts.
+Treat the id as opaque; the format is for humans reading logs.
 
 **`liveness` is a synthetic metric name.** A crashed service disappears from
 Prometheus and therefore emits no telemetry at all, so M2 also reports services
