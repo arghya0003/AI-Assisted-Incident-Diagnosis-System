@@ -13,7 +13,8 @@ See [CONTRACTS.md](CONTRACTS.md) for the Kafka/REST schemas this slice produces 
   it for this stage; Sock Shop ships pre-built images with no build step).
 - Service subset: full Sock Shop minus the load generator (14 services, real multi-hop
   dependency chain, verified against each image's actual source/config) — see decision
-  record in `docs/phase0-decisions.md`.
+  record in `docs/phase0-decisions.md`. Its `user-sim` was later replaced by a load
+  generator of our own, for the reason in issue #6 below.
 - Docker Desktop confirmed working locally.
 - Root `docker-compose.yml` skeleton in place — every other member's service plugs in here.
 - Interface contracts drafted in `CONTRACTS.md` — **needs team sign-off before Week 3.**
@@ -31,9 +32,10 @@ real traffic. See `docs/phase2-instrumentation.md` for the full writeup, includi
 `queue-master` JSON-format gap and deferred DB/queue-infra metrics.
 
 ### Phase 3 (Week 2-3) — Kafka ingestion pipeline ✅
-Kafka in KRaft mode, topics `metrics.raw` / `logs.raw` / `deploys.events` created (3
-partitions, 24h retention, keyed by `service`). Built `metrics-bridge` (Python) to bridge
-Phase 2's Prometheus metrics onto `metrics.raw` in the CONTRACTS.md shape — verified real
+Kafka in KRaft mode, topics `metrics.raw` / `logs.raw` / `deploys.events` /
+`anomalies.detected` created (3 partitions, 24h retention, keyed by `service`). Built
+`metrics-bridge` (Python) to bridge Phase 2's Prometheus metrics onto `metrics.raw` in the
+CONTRACTS.md shape — verified real
 records landing on the topic via direct console-consumer read. `logs.raw` and
 `deploys.events` exist (schemas frozen) but have no producer yet — see
 `docs/phase3-kafka-ingestion.md` for why that's deliberately deferred.
@@ -47,8 +49,8 @@ state, under the 5s target — see `docs/phase4-timescaledb.md`.
 ### Phase 5 (Week 4-5) — Deploy event emitter ✅
 Built `deploy-emitter` (Flask API, port 5000): `POST /deploys` to record a real deploy,
 `GET /deploys` to query history, plus a background loop fabricating an ordinary deploy
-every 2 minutes so the log isn't empty. Every deploy is written to the `deploys` table
-(same TimescaleDB instance, per the architecture diagram) and published to
+every `SIMULATE_INTERVAL_SECONDS` so the log isn't empty. Every deploy is written to the
+`deploys` table (same TimescaleDB instance, per the architecture diagram) and published to
 `deploys.events`. Verified both paths with real API calls — see
 `docs/phase5-deploy-emitter.md`.
 
@@ -94,4 +96,36 @@ services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into 
 timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
 services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
 services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
+services/load-generator/    Standing traffic through edge-router, so injected faults are observable
 ```
+
+## Ports
+
+| Port | What |
+| --- | --- |
+| 80 | `edge-router` — the testbed's entry point |
+| 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
+| 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
+| 5002 | `load-generator` — `/stats` (what load is actually being offered) |
+| 8081 | kafka-ui · 8082 adminer · 9090 Prometheus · 29092 Kafka (host-side) |
+
+## Fixes on top of the phase work
+
+Issues raised by M3 against this slice, now addressed:
+
+- **[#5] `anomalies.detected` wasn't created by `kafka-init`** — it was auto-created by
+  Kafka on M2's first publish with 1 partition and 7-day retention, so anomalies outlived
+  the 24h of metrics they refer to. Added to the topic list; `kafka-init` also converges
+  topics that already exist, so a running dev stack is repaired by `docker compose up`
+  rather than a volume wipe. See `docs/phase3-kafka-ingestion.md`.
+- **[#6] No standing traffic, so injected faults changed no metric** — the testbed sat at
+  ~0.2 req/s and 4 of 7 services emitted no latency data at all, which made the whole
+  detect/diagnose/evaluate chain unmeasurable. Added `services/load-generator/`: a
+  fixed, known, open-loop load over the whole call graph, with `GET /stats` so a run can
+  prove traffic was flowing. The fault injector now records the offered rate on every
+  scenario. See `docs/load-generator.md`.
+- **[#7] A simulated deploy every 2 minutes drowned the signal** — deploy correlation is
+  M3's strongest root-cause signal, and at that rate ~90% of services had a background
+  deploy inside the lookback window. Default raised to 900s, `0` disables it, and the rate
+  is reported by `GET /healthz` so an evaluation run records what it ran under. See
+  `docs/phase5-deploy-emitter.md`.

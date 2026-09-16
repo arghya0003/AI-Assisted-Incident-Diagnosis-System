@@ -19,3 +19,7 @@ testbed/
 # OS
 .DS_Store
 Thumbs.db
+
+# Python bytecode from the services in services/
+__pycache__/
+*.py[cod]

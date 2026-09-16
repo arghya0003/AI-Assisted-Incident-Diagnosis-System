@@ -32,7 +32,10 @@
 # or service discovery involved, unlike Train Ticket.
 #
 # Dropped from the official reference compose: `user-sim` (a load-test
-# traffic generator, not part of the causal dependency graph).
+# traffic generator, not part of the causal dependency graph). Replaced
+# by `load-generator` below - the graph doesn't need it, but the data
+# plane does: with an idle testbed an injected fault moves no metric and
+# there is nothing for M2/M3 to detect or diagnose (issue #6).
 #
 # Kafka / TimescaleDB / Postgres deploy log land here in Phases 3-5.
 
@@ -163,6 +166,42 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
+  # Standing traffic (issue #6)
+  # ---------------------------------------------------------------
+  # Drives a steady, known load through edge-router over the whole call
+  # graph - browse (front-end -> catalogue), login (-> user), cart
+  # (-> carts), and a fraction of journeys checking out (-> orders ->
+  # payment/shipping -> rabbitmq -> queue-master). Without it the testbed
+  # sits at ~0.2 req/s, only 3 of 7 services emit a latency histogram at
+  # all, and a fault injection changes no metric.
+  #
+  # TARGET_RPS is offered load, not achieved load: GET localhost:5002/stats
+  # reports what was actually sent, so an evaluation run can confirm
+  # traffic was flowing rather than assume it. See
+  # services/load-generator/ and docs/load-generator.md.
+  load-generator:
+    build: services/load-generator
+    restart: always
+    ports:
+      - "5002:5002"
+    depends_on:
+      - edge-router
+      - front-end
+      - catalogue
+      - carts
+      - orders
+      - user
+      - payment
+      - shipping
+    environment:
+      TARGET_URL: http://edge-router
+      WORKERS: "4"
+      TARGET_RPS: "5"
+      ORDER_PROBABILITY: "0.15"
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
   # Phase 2 - instrumentation
   # ---------------------------------------------------------------
   # Every app service above already ships a native Prometheus /metrics
@@ -208,9 +247,22 @@ services:
     networks:
       - diagnosis-net
 
-  # One-shot: creates metrics.raw / logs.raw / deploys.events with the
-  # partitioning + retention proposed in CONTRACTS.md (pending team
-  # sign-off), then exits.
+  # One-shot: creates every topic in the pipeline with the partitioning +
+  # retention proposed in CONTRACTS.md (pending team sign-off), then exits.
+  #
+  # anomalies.detected is M2's output topic, but it belongs in this list
+  # like the rest (issue #5): it was previously left to Kafka's
+  # auto-creation on the detector's first send(), which gave it 1 partition
+  # and the broker's 7-day retention - so anomalies outlived by six days the
+  # 24h of metrics they point at, and the detector's key=service bought no
+  # ordering or parallelism.
+  #
+  # --create --if-not-exists alone can't repair a topic that already exists
+  # with the wrong settings, so each topic is also converged explicitly:
+  # partitions can only be increased (a no-op alter errors, hence the
+  # `|| true`), and retention is re-applied every bring-up. That means an
+  # existing dev stack is fixed by `docker compose up` rather than needing
+  # its Kafka volume wiped.
   kafka-init:
     image: apache/kafka:3.9.0
     depends_on:
@@ -221,12 +273,16 @@ services:
         until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1; do
           echo "waiting for kafka..."; sleep 2
         done
-        for topic in metrics.raw logs.raw deploys.events; do
+        for topic in metrics.raw logs.raw deploys.events anomalies.detected; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
             --topic $$topic --partitions 3 --replication-factor 1 \
             --config retention.ms=86400000
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --alter \
+            --topic $$topic --partitions 3 || true
+          /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 --alter \
+            --entity-type topics --entity-name $$topic --add-config retention.ms=86400000
         done
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe
     networks:
       - diagnosis-net
 
@@ -328,9 +384,17 @@ services:
   # (timescaledb/init/002_deploys.sql) - not a separate Postgres
   # container, matching the architecture diagram's "Time-Series Store"
   # grouping. Publishes to deploys.events on every recorded deploy, and
-  # fabricates an ordinary deploy every couple minutes so the log isn't
-  # empty until M2's fault-injection harness starts calling POST /deploys
-  # for real. See services/deploy-emitter/.
+  # fabricates an ordinary deploy every SIMULATE_INTERVAL_SECONDS so the
+  # log isn't empty until M2's fault-injection harness starts calling
+  # POST /deploys for real. See services/deploy-emitter/.
+  #
+  # The interval was 120s, which put a background deploy inside M3's
+  # 30-minute lookback for ~90% of services at any moment and drowned the
+  # injected deploy that diagnosis is supposed to find (issue #7). 900s
+  # keeps the log realistically non-empty without making the strongest
+  # root-cause signal mostly noise; it is a per-run knob, so an evaluation
+  # can set 120 deliberately as a stress condition, or 0 to turn the
+  # background deploys off entirely and leave only injected ones.
   deploy-emitter:
     build: services/deploy-emitter
     restart: always
@@ -347,7 +411,7 @@ services:
       PG_DB: metrics
       PG_USER: postgres
       PG_PASSWORD: Abcd1234#
-      SIMULATE_INTERVAL_SECONDS: "120"
+      SIMULATE_INTERVAL_SECONDS: "900"
     networks:
       - diagnosis-net
 
@@ -372,12 +436,18 @@ services:
         condition: service_healthy
       deploy-emitter:
         condition: service_started
+      load-generator:
+        condition: service_started
     environment:
       PG_HOST: timescaledb
       PG_DB: metrics
       PG_USER: postgres
       PG_PASSWORD: Abcd1234#
       DEPLOY_EMITTER_URL: http://deploy-emitter:5000
+      # Read at injection time and stored on the scenario: a fault injected
+      # into an idle testbed changes no metric, and the evaluation numbers
+      # shouldn't have to guess whether that's what happened (issue #6).
+      LOAD_GENERATOR_URL: http://load-generator:5002
     networks:
       - diagnosis-net
 

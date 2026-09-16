@@ -50,10 +50,15 @@ PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 
 DEPLOY_EMITTER_URL = os.environ.get("DEPLOY_EMITTER_URL", "http://deploy-emitter:5000")
+LOAD_GENERATOR_URL = os.environ.get("LOAD_GENERATOR_URL", "http://load-generator:5002")
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "incident-diagnosis-system")
 
 MAX_DURATION_SECONDS = 300  # safety cap - a forgotten fault can't run forever
 MAX_CONNECTIONS = 100  # safety cap - stays well clear of catalogue-db's max_connections=151
+# Below this the testbed is effectively idle (Prometheus scraping is most of
+# it) and a fault won't show up in the metrics - warn rather than refuse, so
+# a deliberate idle-baseline run is still possible.
+MIN_USEFUL_RPS = 1.0
 
 FAULT_TYPES = {"bad_deploy_latency", "service_crash", "db_pool_saturation"}
 KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
@@ -121,6 +126,27 @@ def mark_failed(scenario_id: str, error: str) -> None:
 
 def new_scenario_id(fault_type: str) -> str:
     return f"scn-{fault_type.replace('_', '-')}-{int(time.time())}"
+
+
+def offered_rps() -> float | None:
+    """Load being driven through the testbed right now, or None if unknown.
+
+    A fault injected into an idle testbed moves no metric, so nothing can
+    detect or diagnose it (issue #6) - and from `fault_scenarios` alone that
+    looks identical to a detector that simply missed it. Recording the
+    offered rate with each scenario makes an idle run visible in the ground
+    truth instead of silently deflating the evaluation numbers.
+    """
+    try:
+        resp = requests.get(f"{LOAD_GENERATOR_URL}/stats", timeout=3)
+        resp.raise_for_status()
+        stats = resp.json()
+        # recent_rps, not the lifetime average: a generator that ran for an
+        # hour and then stalled still has a healthy-looking average.
+        return float(stats.get("recent_rps", stats["achieved_rps"]))
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        log.warning("could not read load-generator stats: %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------
@@ -228,9 +254,16 @@ def post_fault():
     duration_s = min(int(body.get("duration_s", 30)), MAX_DURATION_SECONDS)
     params = {"duration_s": duration_s}
     if fault_type == "bad_deploy_latency":
-        params["cpu_limit"] = float(body.get("cpu_limit", 0.05))
+        # 0.02, not 0.05: 2% is the throttle Phase 8 actually measured a
+        # ~200x p95 regression at, so it's the value with evidence behind it.
+        params["cpu_limit"] = float(body.get("cpu_limit", 0.02))
     if fault_type == "db_pool_saturation":
         params["connections"] = min(int(body.get("connections", 50)), MAX_CONNECTIONS)
+
+    # Ground truth for the evaluation runner: how much traffic the testbed
+    # was actually serving when this fault landed.
+    rps = offered_rps()
+    params["offered_rps_at_inject"] = rps
 
     scenario_id = new_scenario_id(fault_type)
     try:
@@ -240,11 +273,18 @@ def post_fault():
 
     threading.Thread(target=execute, args=(scenario_id, fault_type, service, params), daemon=True).start()
 
-    return jsonify({
+    response = {
         "scenario_id": scenario_id, "fault_type": fault_type,
         "ground_truth_service": service, "t_inject": now_iso(),
         "params": params, "status": "running",
-    }), 202
+    }
+    if rps is None:
+        response["warning"] = ("could not reach the load generator - if no traffic is running, "
+                               "this fault will change no metric and nothing can detect it")
+    elif rps < MIN_USEFUL_RPS:
+        response["warning"] = (f"testbed is nearly idle ({rps} req/s offered) - "
+                               "this fault may change no metric")
+    return jsonify(response), 202
 
 
 @app.get("/faults")

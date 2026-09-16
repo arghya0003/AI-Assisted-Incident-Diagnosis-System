@@ -59,6 +59,12 @@ Producer: M1's deploy event emitter (Phase 5).
 Direction: M2 → M4
 Producer: M2's EWMA detector, after dedup/grouping.
 
+Topic settings match the rest of the pipeline — 3 partitions, keyed by `service`,
+`retention.ms=86400000` (24h) — and are created by `kafka-init`, not left to Kafka's
+auto-creation. Retention deliberately matches `metrics.raw`: an anomaly that outlives the
+metric samples it points at can't be replayed or explained. Settings are M2's call to
+change; M1 owns applying them (issue #5).
+
 ```json
 {
   "anomaly_id": "anom-0001",
@@ -141,4 +147,7 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
       (3 partitions, keyed by `service`, `retention.ms=86400000`), pending team sign-off.
       Downsampling-after-24h not yet built.
 - [ ] Confirm `anomalies.detected` `severity` enum values with M2.
+- [ ] Confirm `anomalies.detected` partitioning/retention with M2 — **implemented** to
+      match the other topics (3 partitions, keyed by `service`, `retention.ms=86400000`).
+      M2 owns the values; say so if a longer retention is wanted for replay.
 - [ ] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4.

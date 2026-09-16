@@ -54,15 +54,63 @@ with `max_connections=151` on this image, 30 held connections doesn't fully exha
 pool - added a `MAX_CONNECTIONS=100` safety cap so nobody accidentally starves the whole
 container, but genuinely maxing it out would need `connections` closer to 150.
 
+## Prerequisite: traffic has to be running (issue #6)
+The measurements above were taken under a manual `curl` loop. Without traffic the same
+injection changes nothing at all - M3 reproduced this: a 60s throttle of `catalogue` left
+p95 flat at 4.8ms and produced no anomaly, because an idle service that is CPU-throttled
+is still idle. The stack now runs a `load-generator` service continuously
+(`docs/load-generator.md`), so this is the default state rather than something to remember.
+
+Two consequences for the harness:
+
+- **`cpu_limit` now defaults to `0.02`, not `0.05`.** 2% is the throttle the 7.47s p95
+  regression above was actually measured at; 0.05 was never demonstrated to produce a
+  visible effect. Defaulting to the value with evidence behind it.
+- **Every scenario records the load that was running when it was injected.** `POST /faults`
+  reads the generator's `/stats` and stores `params.offered_rps_at_inject` on the row. From
+  `fault_scenarios` alone, a fault injected into an idle testbed and a detector that simply
+  missed one look identical; this makes the difference visible after the fact. The response
+  also carries a `warning` if the testbed is under 1 req/s or the generator can't be
+  reached - a warning, not a refusal, so a deliberate idle-baseline run is still possible.
+
 ## API
 
 - `POST /faults` `{fault_type, service, duration_s?, cpu_limit?, connections?}` → starts a
-  scenario in the background, returns immediately with `scenario_id` and `status: running`.
+  scenario in the background, returns immediately with `scenario_id` and `status: running`
+  (plus `warning` if the testbed looks idle).
 - `GET /faults?limit=` → scenario history with outcomes.
 - `GET /fault-types` → the three supported types.
 
 Safety caps: `duration_s` clamped to 300s, `connections` clamped to 100 - a forgotten or
 malformed request can't run forever or starve a container outright.
+
+## Runbook: one fault, end to end
+
+```bash
+export MSYS_NO_PATHCONV=1   # Git Bash on Windows only
+
+# 1. Confirm traffic is actually flowing - not that the container is up.
+curl -s localhost:5002/stats      # achieved_rps should be near target_rps
+
+# 2. Record the background deploy rate this run ran under (issue #7).
+curl -s localhost:5000/healthz    # simulate_interval_seconds
+
+# 3. Inject.
+curl -XPOST localhost:5001/faults -H 'content-type: application/json' \
+  -d '{"fault_type":"bad_deploy_latency","service":"catalogue","duration_s":60}'
+
+# 4. Check the effect landed in the metrics.
+docker compose exec -T timescaledb psql -U postgres -d metrics -c "
+  select time_bucket('1 minute', time) as minute,
+         max(value) filter (where metric = 'latency_p95_ms')  as p95_ms,
+         avg(value) filter (where metric = 'request_rate')    as req_per_s
+  from metrics
+  where service = 'catalogue' and time > now() - interval '15 minutes'
+  group by 1 order by 1;"
+```
+
+Steps 1 and 2 are the point: an evaluation run that skips them can't say afterwards
+whether a missed detection was a detector problem or an idle testbed.
 
 ## What this unblocks
 M2's evaluation runner (Phase 8/9 per the original plan) can already query
