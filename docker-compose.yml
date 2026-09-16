@@ -320,6 +320,41 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
+  # Phase 9 - Anomaly detection (M2)
+  # ---------------------------------------------------------------
+  # Reads metrics.raw, runs a per-(service, metric) drift detector, groups
+  # correlated breaches into one incident, and emits anomalies.detected in
+  # the CONTRACTS.md shape. Also consumes deploys.events so a service that
+  # is mid-deploy has to clear a higher bar before it alerts.
+  #
+  # DETECTOR selects the algorithm (ewma, zscore, cusum, static). The
+  # comparison detectors exist so the evaluation runner can show EWMA
+  # earned its place - see docs/phase9-detection.md.
+  anomaly-detector:
+    build: services/anomaly-detector
+    restart: always
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      DETECTOR: ewma
+      REQUIRED_BREACHES: "2"
+      WARMUP_SAMPLES: "10"
+      GROUP_DELAY_SECONDS: "15"
+      COOLDOWN_SECONDS: "120"
+      ESCALATION_FACTOR: "3"
+      DEPLOY_WINDOW_SECONDS: "120"
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
   # Phase 4 - TimescaleDB metrics sink
   # ---------------------------------------------------------------
   # timescaledb/init/001_schema.sql runs automatically on first startup
@@ -448,6 +483,43 @@ services:
       # into an idle testbed changes no metric, and the evaluation numbers
       # shouldn't have to guess whether that's what happened (issue #6).
       LOAD_GENERATOR_URL: http://load-generator:5002
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
+  # Phase 9 - Evaluation runner (M2)
+  # ---------------------------------------------------------------
+  # One-shot tool, not a long-running service, so it sits behind a profile
+  # and never starts with `docker compose up`. Run it explicitly:
+  #
+  #   docker compose run --rm evaluation-runner live
+  #   docker compose run --rm evaluation-runner replay --since-minutes 120
+  #
+  # `live` injects the labelled fault suite and scores what the deployed
+  # detector actually published. `replay` re-runs several detectors over the
+  # same recorded window for the ablation table. Reports land in ./results.
+  evaluation-runner:
+    build:
+      context: .
+      dockerfile: services/evaluation-runner/Dockerfile
+    profiles:
+      - tools
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      fault-injector:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      FAULT_INJECTOR_URL: http://fault-injector:5001
+    volumes:
+      - ./results:/results
     networks:
       - diagnosis-net
 

@@ -54,7 +54,15 @@ LOAD_GENERATOR_URL = os.environ.get("LOAD_GENERATOR_URL", "http://load-generator
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "incident-diagnosis-system")
 
 MAX_DURATION_SECONDS = 300  # safety cap - a forgotten fault can't run forever
-MAX_CONNECTIONS = 100  # safety cap - stays well clear of catalogue-db's max_connections=151
+# catalogue-db runs with max_connections=151. The previous cap of 100 left 51
+# connections free, so the "saturation" fault never actually saturated
+# anything: an evaluation run measured catalogue's p95 at 5.7ms throughout,
+# i.e. the fault was a no-op and every detector "missed" an incident that
+# never happened. The cap now sits just above the pool so the fault can do
+# what it claims; connections are still released in a finally block and the
+# duration cap still bounds the blast radius.
+MAX_CONNECTIONS = 160
+
 # Below this the testbed is effectively idle (Prometheus scraping is most of
 # it) and a fault won't show up in the metrics - warn rather than refuse, so
 # a deliberate idle-baseline run is still possible.
@@ -84,6 +92,14 @@ conn = connect_postgres()
 app = Flask(__name__)
 
 
+def ensure_db_connection():
+    global conn
+    if conn is None or conn.closed:
+        log.warning("postgres connection closed; reconnecting")
+        conn = connect_postgres()
+    return conn
+
+
 def get_container(service: str):
     matches = docker_client.containers.list(
         filters={"label": f"com.docker.compose.service={service}"}
@@ -98,7 +114,8 @@ def now_iso() -> str:
 
 
 def record_scenario(scenario_id, fault_type, service, params) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             """INSERT INTO fault_scenarios
                (scenario_id, fault_type, ground_truth_service, t_inject, status, params)
@@ -108,7 +125,8 @@ def record_scenario(scenario_id, fault_type, service, params) -> None:
 
 
 def mark_recovered(scenario_id: str) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             "UPDATE fault_scenarios SET status = 'recovered', t_recovered = now() WHERE scenario_id = %s",
             (scenario_id,),
@@ -116,7 +134,8 @@ def mark_recovered(scenario_id: str) -> None:
 
 
 def mark_failed(scenario_id: str, error: str) -> None:
-    with conn.cursor() as cur:
+    db = ensure_db_connection()
+    with db.cursor() as cur:
         cur.execute(
             "UPDATE fault_scenarios SET status = 'failed', t_recovered = now(), "
             "params = params || %s::jsonb WHERE scenario_id = %s",
@@ -254,9 +273,12 @@ def post_fault():
     duration_s = min(int(body.get("duration_s", 30)), MAX_DURATION_SECONDS)
     params = {"duration_s": duration_s}
     if fault_type == "bad_deploy_latency":
-        # 0.02, not 0.05: 2% is the throttle Phase 8 actually measured a
-        # ~200x p95 regression at, so it's the value with evidence behind it.
-        params["cpu_limit"] = float(body.get("cpu_limit", 0.02))
+        # Both 0.02 and 0.05 are known to work: Phase 8 measured a ~200x p95
+        # regression at 0.02, and M2's ablation measured 38x (5.9ms -> 222ms
+        # peak) at 0.05. Staying at 0.05 keeps this default equal to what
+        # evaluation-runner's suite actually passes, so an ad-hoc injection
+        # and a scored one are the same fault.
+        params["cpu_limit"] = float(body.get("cpu_limit", 0.05))
     if fault_type == "db_pool_saturation":
         params["connections"] = min(int(body.get("connections", 50)), MAX_CONNECTIONS)
 
@@ -290,7 +312,8 @@ def post_fault():
 @app.get("/faults")
 def get_faults():
     limit = min(int(request.args.get("limit", 20)), 200)
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    db = ensure_db_connection()
+    with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM fault_scenarios ORDER BY t_inject DESC LIMIT %s", (limit,))
         rows = [dict(r) for r in cur.fetchall()]
     for r in rows:

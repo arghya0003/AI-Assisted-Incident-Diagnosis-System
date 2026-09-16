@@ -63,9 +63,13 @@ is still idle. The stack now runs a `load-generator` service continuously
 
 Two consequences for the harness:
 
-- **`cpu_limit` now defaults to `0.02`, not `0.05`.** 2% is the throttle the 7.47s p95
-  regression above was actually measured at; 0.05 was never demonstrated to produce a
-  visible effect. Defaulting to the value with evidence behind it.
+- **`cpu_limit` stays at `0.05`.** Issue #6 asked for a re-check, since the 7.47s
+  regression above was measured at 0.02. The answer came from M2's ablation, which
+  measured catalogue going from a 5.9ms baseline to a 222ms peak — 38x — at 0.05. Both
+  values work, and 0.05 is what `evaluation-runner`'s suite passes explicitly, so leaving
+  the default there keeps an ad-hoc injection and a scored one the same fault. (An earlier
+  pass of this fix changed the default to 0.02 on the belief that 0.05 had never been
+  shown to work; M2's data says otherwise.)
 - **Every scenario records the load that was running when it was injected.** `POST /faults`
   reads the generator's `/stats` and stores `params.offered_rps_at_inject` on the row. From
   `fault_scenarios` alone, a fault injected into an idle testbed and a detector that simply

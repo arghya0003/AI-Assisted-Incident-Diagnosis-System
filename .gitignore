@@ -11,6 +11,15 @@ testbed/
 # Java / Maven build artifacts inside testbed services
 **/target/
 
+# Python cache and test artifacts
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Evaluation output. Regenerable from a single command, and a committed run
+# would go stale immediately - quote numbers in the report, don't version them.
+results/
+
 # IDE
 .idea/
 *.iml
@@ -19,7 +28,3 @@ testbed/
 # OS
 .DS_Store
 Thumbs.db
-
-# Python bytecode from the services in services/
-__pycache__/
-*.py[cod]
