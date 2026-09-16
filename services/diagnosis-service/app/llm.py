@@ -78,6 +78,7 @@ def validate_reply(content: str, prompt: Prompt) -> tuple[Diagnosis | None, list
         return None, [_describe(error) for error in exc.errors()[:5]]
 
     options = {option.service: option for option in prompt.options}
+    supplied = set(prompt.citable_ids)
     errors = []
     if not reply.hypotheses:
         errors.append("return at least one hypothesis")
@@ -97,6 +98,23 @@ def validate_reply(content: str, prompt: Prompt) -> tuple[Diagnosis | None, list
                 f"hypothesis {hypothesis.rank}: the cause mentions a deploy or release, but {hypothesis.service} "
                 "has no recent deploy listed; state only facts listed under that candidate"
             )
+        else:
+            # Misattributed evidence: a real id that belongs to a DIFFERENT listed candidate. The
+            # response schema binds each candidate to its own ids while Ollama decodes, and the
+            # evidence guardrail drops ids that were never supplied at all - but the guardrail
+            # accepts the union of every candidate's ids, so a hypothesis about A citing B's real
+            # deploy id passes both. It is caught here, where the per-candidate lists still exist.
+            #
+            # Deliberately limited to ids that appear somewhere in the prompt. An id that was never
+            # supplied (a fabricated `ev-9999`) is left to the guardrail, which drops that single
+            # hypothesis and keeps the rest; failing validation instead would spend all three
+            # attempts and fall back, losing the clean hypotheses with it.
+            misattributed = [i for i in hypothesis.evidence_ids if i in supplied and i not in option.citable_ids]
+            if misattributed:
+                errors.append(
+                    f"hypothesis {hypothesis.rank}: {', '.join(misattributed)} is listed under another candidate, "
+                    f"not under {hypothesis.service}; cite only evidence listed under that candidate"
+                )
     if errors:
         return None, errors
     return _normalise(reply.hypotheses), []

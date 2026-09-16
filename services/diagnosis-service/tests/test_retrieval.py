@@ -257,6 +257,27 @@ def test_gives_up_after_three_attempts():
     assert len(calls) == 3 and sleeps == [1.0, 2.0]
 
 
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({"text": "<html>proxy says hello</html>"}, "unparseable JSON"),
+        ({"json": [1.0, 0.0]}, "returned list, expected a JSON object"),
+    ],
+    ids=["not json", "json but not an object"],
+)
+def test_an_unparseable_success_is_reported_as_unavailable(body, match):
+    """A 2xx body that is not a JSON object is a protocol failure, not a Python error. Callers
+    degrade on OllamaUnavailable only, so anything else would surface as a 500 from /analyze
+    instead of the documented fallback."""
+    client = OllamaClient(
+        "http://ollama.test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, **body)),
+        sleep=lambda seconds: None,
+    )
+    with pytest.raises(OllamaUnavailable, match=match):
+        client.embed(["hello"], "nomic-embed-text")
+
+
 def test_read_timeouts_are_not_retried():
     sleeps = []
     client, calls = make_client([httpx.ReadTimeout("timed out")], sleeps)

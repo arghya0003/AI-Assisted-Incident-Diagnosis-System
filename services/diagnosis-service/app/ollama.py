@@ -76,6 +76,19 @@ class OllamaClient:
             done_reason=body.get("done_reason"),
         )
 
+    @staticmethod
+    def _decode(path: str, response: httpx.Response) -> dict:
+        """A 2xx body that is not a JSON object is a protocol failure, not a Python error. Callers
+        degrade on OllamaUnavailable only, so an unparseable success would otherwise surface as a
+        500 from /analyze instead of the documented fallback."""
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise OllamaUnavailable(f"{path} returned unparseable JSON: {response.text[:200]}") from exc
+        if not isinstance(body, dict):
+            raise OllamaUnavailable(f"{path} returned {type(body).__name__}, expected a JSON object")
+        return body
+
     def _post(self, path: str, payload: dict, timeout_seconds: float | None = None) -> dict:
         timeout = httpx.USE_CLIENT_DEFAULT if timeout_seconds is None else timeout_seconds
         failure = ""
@@ -92,7 +105,7 @@ class OllamaClient:
                 if response.status_code < 500:
                     if response.is_error:
                         raise OllamaUnavailable(f"{path} returned HTTP {response.status_code}: {response.text[:200]}")
-                    return response.json()
+                    return self._decode(path, response)
                 failure = f"HTTP {response.status_code}: {response.text[:200]}"
             if attempt < self._attempts:
                 log.warning("ollama %s attempt %d/%d failed (%s); retrying", path, attempt, self._attempts, failure)

@@ -9,7 +9,10 @@ import dataclasses
 import hashlib
 import json
 import uuid
+from pathlib import Path
 
+from app.corpus import CORPUS_DIR
+from app.graph import DEFAULT_GRAPH_PATH
 from app.models import PipelineMode, StoredAnalysis, StoredHypothesis
 from app.pipeline import PipelineConfig, PipelineResult
 from app.prompts import PROMPTS_DIR
@@ -17,6 +20,15 @@ from app.scoring import ScoringConfig
 from app.settings import Settings
 
 NO_MODEL = "none"
+
+
+def _file_digest(*paths: Path) -> str:
+    """A stable digest of file contents, so an edited input changes the fingerprint."""
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes() if path.is_file() else b"")
+    return digest.hexdigest()[:16]
 
 
 def new_analysis_id() -> str:
@@ -41,6 +53,11 @@ def config_fingerprint(service_version: str, settings: Settings, scoring: Scorin
         "scoring": dataclasses.asdict(scoring),
         "pipeline": dataclasses.asdict(pipeline),
         "prompts": {path.name: path.read_text(encoding="utf-8") for path in sorted(PROMPTS_DIR.glob("*.txt"))},
+        # The graph decides candidates and their distances; the corpus decides what retrieval can
+        # return. Both change the answer, so both belong in the key or a stored run made before an
+        # edit would be served again after it.
+        "graph": _file_digest(DEFAULT_GRAPH_PATH),
+        "corpus": _file_digest(*sorted(CORPUS_DIR.glob("incident-*.md"))),
     }
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 

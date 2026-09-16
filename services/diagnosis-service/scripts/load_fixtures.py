@@ -34,8 +34,25 @@ def main() -> None:
     conn = connect(Settings.from_env())
     try:
         with conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM anomalies WHERE source = 'fixture'")
-            removed = cur.rowcount
+            # Removing only the anomalies would leave their stored /analyze runs behind. A
+            # reloaded fixture keeps its id, so the response cache could then serve an answer
+            # computed from the *previous* version of that fixture. Take the runs with it.
+            cur.execute("DELETE FROM anomalies WHERE source = 'fixture' RETURNING anomaly_id")
+            gone = [anomaly_id for (anomaly_id,) in cur.fetchall()]
+            removed = len(gone)
+            if gone:
+                cur.execute(
+                    "DELETE FROM hypotheses WHERE analysis_id IN "
+                    "(SELECT analysis_id FROM analyses WHERE anomaly_id = ANY(%s))",
+                    (gone,),
+                )
+                orphaned_hypotheses = cur.rowcount
+                cur.execute("DELETE FROM analyses WHERE anomaly_id = ANY(%s)", (gone,))
+                orphaned_analyses = cur.rowcount
+                cur.execute("DELETE FROM evidence WHERE incident_id = ANY(%s)", (gone,))
+                orphaned_evidence = cur.rowcount
+            else:
+                orphaned_hypotheses = orphaned_analyses = orphaned_evidence = 0
             for fixture in fixtures:
                 # Related anomalies go in too, so /candidates sees the co-anomalies. Context deploys
                 # do not: `deploys` is M1's table, so DB-backed scoring of a fixture has no deploy
@@ -55,7 +72,11 @@ def main() -> None:
     finally:
         conn.close()
 
-    print(f"removed {removed} fixture row(s), loaded {len(fixtures)}")
+    print(
+        f"removed {removed} fixture row(s) with {orphaned_analyses} stored analysis/analyses, "
+        f"{orphaned_hypotheses} hypothesis/hypotheses and {orphaned_evidence} evidence row(s); "
+        f"loaded {len(fixtures)}"
+    )
     for fixture in fixtures:
         truth = fixture.meta.ground_truth_service or "none"
         print(f"  {fixture.event.anomaly_id}  truth={truth:<10} {fixture.meta.description}")

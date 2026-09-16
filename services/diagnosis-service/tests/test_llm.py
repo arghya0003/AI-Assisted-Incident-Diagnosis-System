@@ -58,6 +58,26 @@ def reply(*hypotheses):
 # ------------------------------------------------------------------ validation
 
 
+def test_citing_another_candidates_evidence_is_rejected():
+    """user may cite anom-1 only. dep-1 is real, but it is listed under catalogue, so a hypothesis
+    about user citing it misattributes evidence. The response schema prevents this while decoding,
+    and the evidence guardrail cannot see it because dep-1 was supplied to the prompt."""
+    diagnosis, errors = validate_reply(reply(user_hypothesis(evidence_ids=["anom-1", "dep-1"])), PROMPT)
+    assert diagnosis is None
+    assert errors == [
+        "hypothesis 1: dep-1 is listed under another candidate, not under user; "
+        "cite only evidence listed under that candidate"
+    ]
+
+
+def test_an_id_that_was_never_supplied_is_left_to_the_guardrail():
+    """Validation deliberately lets a fabricated id through. The guardrail drops that one
+    hypothesis and keeps the rest; failing validation here would spend every attempt and fall
+    back, losing the clean hypotheses with it."""
+    diagnosis, errors = validate_reply(reply(user_hypothesis(evidence_ids=["ev-9999"])), PROMPT)
+    assert errors == [] and diagnosis is not None
+
+
 def test_a_valid_reply_becomes_the_contract_shape():
     diagnosis, errors = validate_reply(reply(hypothesis(), user_hypothesis(rank=2)), PROMPT)
     assert errors == [] and diagnosis.adjustments == []

@@ -45,10 +45,14 @@ def percentile(values: list[float], fraction: float) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("anomaly_ids", nargs="*", help="fixture ids (default: all)")
-    parser.add_argument("--runs", type=int, default=10, help="runs per fixture per mode")
+    parser.add_argument("--runs", type=int, default=10, help="runs per fixture per mode (at least 1)")
     parser.add_argument("--modes", default="full", help="comma-separated: full, llm_only, no_graph, deterministic")
     parser.add_argument("--persist", action="store_true", help="store every run in the analyses and hypotheses tables")
     args = parser.parse_args()
+    if args.runs < 1:
+        # The per-mode report takes a percentile and a most-common action; with no rows it would
+        # fail on an IndexError long after the run appeared to start.
+        parser.error(f"--runs must be at least 1, got {args.runs}")
     modes = [mode.strip() for mode in args.modes.split(",") if mode.strip()]
     unknown = set(modes) - set(get_args(PipelineMode))
     if unknown:
