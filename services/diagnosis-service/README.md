@@ -354,6 +354,9 @@ filter if the service moves to a provider without schema enforcement.
 
 ## Phase 8 ablation results — 2026-09-14
 
+> Superseded by "Ablation re-run" at the end of this file. Kept because it is what Phase 8 was
+> signed off against, and because the two runs used different fixtures and a different prompt.
+
 Reproduce, storing every run:
 
 ```
@@ -468,3 +471,46 @@ silently exercise the *old* code. Use `docker compose up -d --build diagnosis-se
 cap, phi4-mini 2.77 of 4 GiB VRAM, 1.84 GB Windows memory still available, 22.3 of 31.2 GB committed,
 page file 5.8% used. Docker and Ollama coexist with headroom once WSL is capped and the page file is
 fixed at 16 GB.
+
+## Ablation re-run — 2026-09-16
+
+The Phase 8 ablation repeated after the M2 detector upgrade, on 11 fixtures (`anom-fx-11` is new)
+with the prompt that now carries measured values. Nine fixtures have a known root cause.
+
+```
+EVAL_RUNS=1 EVAL_ARGS="--modes full,llm_only,no_graph,deterministic --persist" \
+  bash services/diagnosis-service/scripts/test_in_docker.sh --eval
+```
+
+| Mode | Rank-1 = true cause | Answered by | Needed a retry | Latency p50 / p95 | Rank-1 rollbacks |
+| --- | --- | --- | --- | --- | --- |
+| `deterministic` | **6/9** | scorer 11 | — | **50 ms** / 62 ms | 6 |
+| `no_graph` | **6/9** | LLM 10, fallback 1 | 4/11 | 10.3 s / 41.5 s | 6 |
+| `full` | 5/9 | LLM 10, fallback 1 | 6/11 | 13.0 s / 30.1 s | 5 |
+| `llm_only` | 4/9 | LLM 11 | 1/11 | 9.7 s / 14.3 s | **7** |
+
+**Reading:**
+
+- **The Phase 8 conclusion holds.** The LLM still does not rank better than the deterministic
+  scorer, now at about 260 times the latency. Nothing here argues for making the LLM the ranker.
+- **`llm_only` is still the worst and the most dangerous.** 7 of its 11 rank-1 actions were
+  `rollback_deploy`, including routine background deploys on the benign `anom-fx-09` and the
+  ambiguous `anom-fx-10`, where every scored mode said `no_action`.
+- **`no_graph` beating `full` (6/9 versus 5/9) is noise, not a result.** One run per mode, and the
+  gap is a single fixture (`anom-fx-05`). It is not evidence against the graph signal, and it should
+  not be quoted as one without a multi-run re-run.
+- **`anom-fx-11` was correct in all four modes**, `llm_only` included. The crash case that failed in
+  every mode before now succeeds in every mode, because M2's staleness detector names the silent
+  service. See "M2 detector upgrade".
+- **`full` fell back to the scorer on `anom-fx-11`** after three rejected attempts, and still ranked
+  payment first. That is the fallback doing its job.
+- **Fix A does most of the retry work.** Almost every rejection was "the cause mentions a deploy or
+  release, but *X* has no recent deploy listed" — 6 of 11 runs in `full`. The check earns its place,
+  and it shows phi4-mini reaches for a deploy explanation by default.
+- **The prompt token estimate is no longer conservative.** Actual/estimated ratios ran 0.76 to 1.32,
+  against the Phase 6 assumption that 3.0 characters per token overestimates by ~15%. Harmless at
+  current prompt sizes; recorded in `app/prompts.py` so nobody relies on the old margin.
+
+**Caveat, stated plainly:** one run per mode on 9 labelled fixtures. Differences of one fixture are
+within noise. A multi-run sweep (`--runs 3`) is the follow-up; this table is enough to say the
+conclusion did not change, and not enough to rank the LLM modes against each other.
