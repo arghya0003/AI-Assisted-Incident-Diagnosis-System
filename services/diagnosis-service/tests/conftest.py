@@ -4,9 +4,6 @@ import json
 import os
 from datetime import datetime, timezone
 
-# Unit tests must never start a real Kafka consumer.
-os.environ.setdefault("CONSUMER_ENABLED", "false")
-
 import pytest  # noqa: E402
 
 from app.db import DatabaseUnavailable  # noqa: E402

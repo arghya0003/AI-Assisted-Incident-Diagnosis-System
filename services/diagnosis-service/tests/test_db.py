@@ -1,12 +1,12 @@
-"""Phase 2 integration: app.db and the consumer's message handling against real TimescaleDB.
+"""Integration tests for app.db against a real TimescaleDB.
 
 Skipped unless TimescaleDB is reachable (localhost:5432 by default; set TEST_PG_HOST to
-override) with 005_diagnosis.sql applied. Each test runs in one transaction that is rolled
+override) with every migration applied (M2's 005_anomalies.sql, and M3's 005_diagnosis.sql
+and 006_diagnosis_analyses.sql). Each test runs in one transaction that is rolled
 back, so nothing is left in the shared dev database.
 """
 
 import dataclasses
-import json
 import math
 import os
 from datetime import datetime, timedelta, timezone
@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 import pytest
 
-from app.consumer import handle_message
 from app.corpus import IncidentRecord
 from app.db import (
     DatabaseUnavailable,
@@ -32,8 +31,7 @@ from app.db import (
     search_incidents,
     upsert_incident,
 )
-from app.models import Evidence, StoredAnalysis, StoredHypothesis
-from app.models import AnomalyEvent
+from app.models import AnomalyEvent, Evidence, StoredAnalysis, StoredHypothesis
 from app.settings import settings
 
 TEST_SETTINGS = dataclasses.replace(settings, pg_host=os.environ.get("TEST_PG_HOST", "localhost"))
@@ -59,25 +57,26 @@ def cur():
         with conn.cursor() as cursor:
             missing = missing_tables(cursor)
             if missing:
-                pytest.skip(f"005_diagnosis.sql not applied; missing tables {missing}")
+                pytest.skip(f"migrations not applied; missing tables {missing}")
             yield cursor
     finally:
         conn.rollback()
         conn.close()
 
 
-def _save(cur, raw):
-    return save_anomaly(cur, AnomalyEvent.model_validate(raw), raw)
+def _save(cur, raw, detector="ewma", source="kafka"):
+    return save_anomaly(cur, AnomalyEvent.model_validate(raw), raw, detector=detector, source=source)
 
 
 def test_save_then_get_round_trips(cur):
     assert _save(cur, EVENT) == "inserted"
     assert get_anomaly(cur, EVENT["anomaly_id"]) == AnomalyEvent.model_validate(EVENT)
     cur.execute(
-        "SELECT source, services, window_start = window_end FROM anomalies WHERE anomaly_id = %s",
+        "SELECT source, detector, services, evidence_window_start = evidence_window_end "
+        "FROM anomalies WHERE anomaly_id = %s",
         (EVENT["anomaly_id"],),
     )
-    assert cur.fetchone() == ("kafka", ["catalogue"], True)
+    assert cur.fetchone() == ("kafka", "ewma", ["catalogue"], True)
 
 
 def test_redelivery_is_a_duplicate(cur):
@@ -99,20 +98,6 @@ def test_raw_keeps_fields_m2_adds_later(cur):
 
 def test_unknown_anomaly_is_none(cur):
     assert get_anomaly(cur, "anom-test-phase2-does-not-exist") is None
-
-
-@pytest.mark.parametrize(
-    "value",
-    [None, b"not json", b"\xff\xfe", b"[1, 2]", json.dumps({**EVENT, "services": []}).encode()],
-    ids=["tombstone", "not-json", "not-utf8", "not-an-object", "fails-validation"],
-)
-def test_consumer_skips_malformed_messages(cur, value):
-    assert handle_message(cur, value) == "invalid"
-
-
-def test_consumer_stores_a_valid_message(cur):
-    assert handle_message(cur, json.dumps(EVENT).encode()) == "inserted"
-    assert handle_message(cur, json.dumps(EVENT).encode()) == "duplicate"
 
 
 def test_store_reports_ok_against_the_real_database(cur):
@@ -142,7 +127,7 @@ def test_scoring_inputs_apply_the_window_and_source(cur):
     fixture_source = _event_at("anom-test-p4-fixture", onset + timedelta(seconds=10))
     for raw in (main, near, far):
         _save(cur, raw)
-    save_anomaly(cur, AnomalyEvent.model_validate(fixture_source), fixture_source, source="fixture")
+    _save(cur, fixture_source, detector="fixture", source="fixture")
 
     deploys = [
         ("dep-test-p4-in", onset - timedelta(minutes=5)),

@@ -52,7 +52,7 @@ M2 ---> anomalies.detected -----------------+------> [THIS SERVICE]
 | Embedding model | **`nomic-embed-text`** (768-dim, ~300 MB VRAM) | Fits alongside `phi4-mini` in 4 GB without contention. |
 | Context window | **8192 tokens, hard cap** | Context competes with model weights for the same 4 GB. Prompt assembly must truncate deliberately, not hope. |
 | Vector search | **pgvector** in the existing `metrics` DB, `vector(768)` with the `<=>` cosine operator | Confirmed available in M1's TimescaleDB image in Phase 0, so no image change and no NumPy fallback are needed. |
-| Anomaly lookup | My own `anomalies` table, populated by my own Kafka consumer | `anomalies.detected` is pub/sub with no shared table (unlike `deploys`/`metrics`). `POST /analyze` only receives an `anomaly_id`, so I must have persisted it myself. **This is an architecture decision not yet in CONTRACTS.md — raise it with the team.** |
+| Anomaly lookup | The shared `anomalies` table, **written by M2's detector** | Open item 1, now resolved. M3 built this table first and consumed `anomalies.detected` to fill it; M2 then persisted every event themselves, and PR #10 merged the two designs (M3's `raw` and `source`, M2's `detector`). M3's consumer and its copy of the table were removed on 2026-09-16; this service only reads the table, and writes fixture rows. |
 | Action vocabulary | Fixed enum: `rollback_deploy`, `restart_service`, `scale_service`, `no_action` | CONTRACTS.md open question 3. Formatted in responses as `<action>:<target_id>`, e.g. `rollback_deploy:dep-2026-08-12-0007`. Confirm with M4. |
 | Executor | **None. Ever.** | Remediation is text for a human to approve. M4 owns the stubbed executor. |
 
@@ -81,7 +81,6 @@ services/diagnosis-service/
 |   |- settings.py            env-var config (mirrors PG_*/KAFKA_BOOTSTRAP conventions)
 |   |- models.py              Pydantic: AnomalyEvent, Candidate, Hypothesis, AnalyzeResponse
 |   |- db.py                  psycopg2 connection + retry (copy metrics-sink's pattern)
-|   |- consumer.py            anomalies.detected -> anomalies table
 |   |- graph.py               dependency graph load + traversal
 |   |- scoring.py             deterministic candidate scoring (NO LLM)
 |   |- retrieval.py           embedding + similarity search over the incident corpus

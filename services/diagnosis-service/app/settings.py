@@ -35,21 +35,8 @@ def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
     return value
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    value = raw.strip().lower()
-    if value in ("1", "true", "yes", "on"):
-        return True
-    if value in ("0", "false", "no", "off"):
-        return False
-    raise ValueError(f"{name} must be true or false, got {raw!r}")
-
-
 @dataclass(frozen=True)
 class Settings:
-    kafka_bootstrap: str
     pg_host: str
     pg_port: int
     pg_db: str
@@ -59,7 +46,6 @@ class Settings:
     llm_model: str
     embed_model: str
     llm_context_tokens: int
-    consumer_enabled: bool
     score_weight_deploy: float
     score_weight_graph: float
     score_weight_co_anomaly: float
@@ -82,7 +68,6 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
             pg_host=os.environ.get("PG_HOST", "timescaledb"),
             pg_port=_int_env("PG_PORT", 5432),
             pg_db=os.environ.get("PG_DB", "metrics"),
@@ -94,8 +79,6 @@ class Settings:
             embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
             # Phase 0: 8192 keeps prompt room with no measured latency cost over 4096.
             llm_context_tokens=_int_env("LLM_CONTEXT_TOKENS", 8192),
-            # The anomalies.detected consumer. Off in unit tests and when running without Kafka.
-            consumer_enabled=_bool_env("CONSUMER_ENABLED", True),
             # Candidate scoring (app/scoring.py). Weights must sum to 1; these are PLAN.md's
             # starting values, to be tuned against evaluation results in Week 8.
             score_weight_deploy=_float_env("SCORE_WEIGHT_DEPLOY", 0.40),

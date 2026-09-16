@@ -44,7 +44,7 @@ def main() -> None:
                     (other, other.model_dump(mode="json")) for other in fixture.meta.context.related_anomalies
                 ]
                 for event, raw in events:
-                    if save_anomaly(cur, event, raw, source="fixture") != "inserted":
+                    if save_anomaly(cur, event, raw, detector="fixture", source="fixture") != "inserted":
                         raise SystemExit(
                             f"{fixture.path.name}: {event.anomaly_id} already exists as a "
                             "non-fixture row; nothing was changed"

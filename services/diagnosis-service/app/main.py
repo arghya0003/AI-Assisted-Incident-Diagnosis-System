@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 
 from app.analyses import config_fingerprint, model_version_for, new_analysis_id, stored_analysis
-from app.consumer import AnomalyConsumer
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
 from app.graph import load_graph
 from app.guardrail import GuardrailStats
@@ -38,7 +37,6 @@ graph = load_graph()
 scoring_config = ScoringConfig.from_settings(settings)
 pipeline_config = PipelineConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
-consumer = AnomalyConsumer(settings)
 ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeout_seconds)
 guardrail_stats = GuardrailStats()
 CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_config, pipeline_config)
@@ -47,14 +45,13 @@ CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_confi
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     log.info(
-        "starting diagnosis-service %s mode=%s llm=%s embed=%s ollama=%s num_ctx=%d consumer=%s fingerprint=%s",
+        "starting diagnosis-service %s mode=%s llm=%s embed=%s ollama=%s num_ctx=%d fingerprint=%s",
         SERVICE_VERSION,
         settings.pipeline_mode,
         settings.llm_model,
         settings.embed_model,
         settings.ollama_url,
         settings.llm_context_tokens,
-        settings.consumer_enabled,
         CONFIG_FINGERPRINT,
     )
     log.info(
@@ -66,10 +63,7 @@ async def lifespan(_app: FastAPI):
         settings.retrieval_top_k,
         settings.llm_max_attempts,
     )
-    if settings.consumer_enabled:
-        consumer.start()
     yield
-    consumer.stop()
 
 
 app = FastAPI(
@@ -131,7 +125,6 @@ def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, str]:
         "pipeline_mode": settings.pipeline_mode,
         "config_fingerprint": CONFIG_FINGERPRINT,
         "database": anomalies.status(),
-        "consumer": consumer.state if settings.consumer_enabled else "disabled",
     }
 
 

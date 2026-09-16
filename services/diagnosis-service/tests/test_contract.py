@@ -136,7 +136,6 @@ def test_health():
     assert resp.json()["pipeline_mode"] == "full"
     assert len(resp.json()["config_fingerprint"]) == 12
     assert resp.json()["database"] == "ok"
-    assert resp.json()["consumer"] == "disabled"
 
 
 def test_analyze_returns_contract_shape():

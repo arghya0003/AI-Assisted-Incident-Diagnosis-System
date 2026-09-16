@@ -1,31 +1,15 @@
 -- Member 3 (diagnosis-service). Additive only: creates M3's own tables and the pgvector
 -- extension, and touches nothing created by 001-004.
 --
+-- The `anomalies` table is NOT here: M2 owns it (timescaledb/init/005_anomalies.sql), writes
+-- every published event to it, and agreed its shape with M3 in PR #10. This service only reads
+-- it, and writes fixture rows through scripts/load_fixtures.py.
+--
 -- Init scripts only run on a fresh volume. To apply this to an existing one:
 --   docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 \
 --     -f /docker-entrypoint-initdb.d/005_diagnosis.sql
 -- (In Git Bash, prefix with MSYS_NO_PATHCONV=1 so the container path isn't rewritten.)
 -- Every statement is IF NOT EXISTS, so re-running it is harmless.
-
--- Local copy of M2's anomalies.detected events. The topic is pub/sub with no shared table,
--- and POST /analyze only receives an anomaly_id, so this service stores what it consumes.
--- `raw` keeps the event exactly as received, including fields M2 adds later.
-CREATE TABLE IF NOT EXISTS anomalies (
-    anomaly_id      TEXT PRIMARY KEY,
-    services        TEXT[] NOT NULL,
-    metrics         TEXT[] NOT NULL,
-    severity        TEXT NOT NULL,
-    t_detected      TIMESTAMPTZ NOT NULL,
-    t_onset         TIMESTAMPTZ NOT NULL,
-    window_start    TIMESTAMPTZ NOT NULL,
-    window_end      TIMESTAMPTZ NOT NULL,
-    raw             JSONB NOT NULL,
-    -- 'fixture' rows are hand-written test scenarios; evaluation must exclude them.
-    source          TEXT NOT NULL DEFAULT 'kafka' CHECK (source IN ('kafka', 'fixture')),
-    received_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- Candidate scoring looks for other anomalies whose onset is near this one's.
-CREATE INDEX IF NOT EXISTS anomalies_onset_idx ON anomalies (t_onset DESC);
 
 -- Past-incident corpus for retrieval. pgvector is available in this image (verified Phase 0).
 CREATE EXTENSION IF NOT EXISTS vector;

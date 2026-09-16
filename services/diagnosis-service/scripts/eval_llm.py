@@ -24,7 +24,6 @@ from typing import get_args
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("PG_HOST", "localhost")
 os.environ.setdefault("OLLAMA_URL", "http://localhost:11434")
-os.environ.setdefault("CONSUMER_ENABLED", "false")
 
 from app.analyses import config_fingerprint, model_version_for, new_analysis_id, stored_analysis  # noqa: E402
 from app.db import PostgresAnomalyStore  # noqa: E402

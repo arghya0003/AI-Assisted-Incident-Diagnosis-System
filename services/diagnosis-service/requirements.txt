@@ -3,7 +3,6 @@ uvicorn==0.32.1
 pydantic==2.10.4
 # Same versions metrics-sink uses.
 psycopg2-binary==2.9.9
-kafka-python-ng==2.2.3
 pyyaml==6.0.2
 # Ollama client (embeddings now, generation in Phase 6).
 httpx==0.27.2

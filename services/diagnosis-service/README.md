@@ -8,8 +8,10 @@ and drops any hypothesis citing evidence that was not provided to it.
 
 Build spec and phase status: [PLAN.md](PLAN.md).
 
-**Status:** Phase 8 — all planned phases built. A background consumer stores every
-`anomalies.detected` event in the `anomalies` table. For a stored anomaly, the full pipeline:
+**Status:** Phase 8 — all planned phases built. M2's detector writes every
+`anomalies.detected` event to the shared `anomalies` table (`timescaledb/init/005_anomalies.sql`,
+shape agreed in PR #10); this service reads it and never writes real events. For a stored anomaly,
+the full pipeline:
 
 1. ranks possible root causes deterministically: the anomalous services plus everything they
    call, scored on recent deploys, graph distance, being the deepest anomalous service, and
@@ -50,7 +52,7 @@ mode, model and configuration returns the stored answer (`X-Cache: hit`).
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
-| `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","database","consumer"}` |
+| `GET` | `/health` | — | `{"status":"ok","service","version","pipeline_mode","config_fingerprint","database"}` |
 | `POST` | `/analyze` | `{"anomaly_id": "anom-0001"}` | `{"hypotheses":[{rank, cause, confidence, evidence_ids[], proposed_action}]}` — see CONTRACTS.md |
 | `GET` | `/hypotheses/{anomaly_id}` | — | Stored `/analyze` runs for an anomaly, newest first: `[{analysis_id, pipeline_mode, answered_by, model_version, config_fingerprint, llm_attempts, guardrail_rejected, latency_ms, fallback_reason, created_at, hypotheses[{rank, service, cause, confidence, evidence_ids, proposed_action}]}]`. Optional `?mode=` and `?limit=` (default 20). 404 for an unknown anomaly. |
 | `GET` | `/stats` | — | Evidence-guardrail counters since the service started, split into LLM and deterministic hypotheses: checked, rejected, and responses fully rejected. The counters reset on restart. |
@@ -63,7 +65,7 @@ Interactive docs: `http://localhost:8000/docs`.
 | 200 | anomaly found; hypotheses returned |
 | 404 | no anomaly with this id has been received |
 | 422 | malformed request body |
-| 503 | TimescaleDB unreachable, or `005_diagnosis.sql` not applied |
+| 503 | TimescaleDB unreachable, or a migration below not applied |
 
 A model failure never produces an error status. Two response headers say how the answer was made:
 
@@ -78,8 +80,8 @@ A model failure never produces an error status. Two response headers say how the
 | `X-Guardrail-Rejected` | Number of hypotheses the evidence guardrail dropped for this answer |
 
 `/health` returns 200 whenever the process is up. `database` is `ok`, `unreachable` or
-`schema_missing`, and `consumer` is `running`, `connecting` or `disabled`, so an outage is
-visible without the container being restarted for something a restart can't fix.
+`schema_missing`, so an outage is visible without the container being restarted for something a
+restart can't fix.
 
 `proposed_action` is one of `rollback_deploy:<deploy_id>`, `restart_service:<service>`,
 `scale_service:<service>`, or `no_action`. The vocabulary is still to be confirmed with M4.
@@ -90,11 +92,15 @@ outcome).
 
 ## Run
 
-**Database migrations.** `timescaledb/init/005_diagnosis.sql` and `006_diagnosis_analyses.sql`
-run automatically only on a fresh TimescaleDB volume. On an existing one, apply both once, in
-order (safe to re-run):
+**Database migrations.** The `anomalies` table belongs to M2 (`005_anomalies.sql`, plus
+`007_anomalies_upgrade.sql` for a volume created before PR #10). This service adds
+`005_diagnosis.sql` (incidents, hypotheses, pgvector) and `006_diagnosis_analyses.sql` (stored
+runs). Init scripts run automatically only on a fresh TimescaleDB volume; on an existing one,
+apply them once, in order (safe to re-run):
 
 ```
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/005_anomalies.sql
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/007_anomalies_upgrade.sql
 docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/005_diagnosis.sql
 docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/006_diagnosis_analyses.sql
 ```
@@ -114,7 +120,6 @@ curl localhost:8000/health
 python -m venv .venv
 .venv\Scripts\activate            # Windows; use: source .venv/bin/activate elsewhere
 pip install -r requirements-dev.txt
-set CONSUMER_ENABLED=false        # no Kafka outside Docker
 uvicorn app.main:app --port 8000
 ```
 
@@ -142,8 +147,8 @@ Shop incidents and 26 paraphrased public postmortems (sources and caveats in
 Both need Ollama on the host.
 
 **Configuration** — environment variables, defaults in `app/settings.py`:
-`KAFKA_BOOTSTRAP`, `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
-`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`, `CONSUMER_ENABLED` (default `true`).
+`PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
+`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`.
 Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO_ANOMALY` 0.20,
 `SCORE_WEIGHT_INCIDENT` 0.15 (must sum to 1, checked at startup), `DEPLOY_LOOKBACK_MINUTES` 30,
 `DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. Retrieval: `RETRIEVAL_MODE` `hybrid`

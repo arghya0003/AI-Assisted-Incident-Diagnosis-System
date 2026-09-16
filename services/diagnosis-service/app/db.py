@@ -1,9 +1,12 @@
-"""TimescaleDB access for M3's own tables (timescaledb/init/005_diagnosis.sql), plus read-only
-queries against M1's `deploys` table.
+"""TimescaleDB access for M3's own tables (timescaledb/init/005_diagnosis.sql and
+006_diagnosis_analyses.sql), plus read-only queries against M1's `deploys` table and M2's
+`anomalies` table.
 
-The API opens a short-lived connection per request. /analyze is called at human pace and
-will spend seconds in the LLM, so a pool would only add stale-connection handling. The Kafka
-consumer keeps its own long-lived connection.
+M2's detector writes every published anomaly to `anomalies` (005_anomalies.sql, shape agreed in
+PR #10), so this service only reads it; `save_anomaly` is for the hand-written fixtures.
+
+The API opens a short-lived connection per request. /analyze is called at human pace and will
+spend seconds in the LLM, so a pool would only add stale-connection handling.
 """
 
 from collections.abc import Callable, Iterator
@@ -21,7 +24,7 @@ from app.scoring import ScoringInputs
 from app.settings import Settings
 
 M3_TABLES = ("anomalies", "incidents", "hypotheses", "analyses")
-MIGRATION = "timescaledb/init/005_diagnosis.sql and 006_diagnosis_analyses.sql"
+MIGRATION = "timescaledb/init/005_anomalies.sql, 005_diagnosis.sql and 006_diagnosis_analyses.sql"
 
 SaveResult = Literal["inserted", "duplicate", "collision"]
 DbStatus = Literal["ok", "unreachable", "schema_missing"]
@@ -46,26 +49,27 @@ def connect(settings: Settings, connect_timeout: int = 5):
 # ------------------------------------------------------------------ anomalies
 
 _INSERT_ANOMALY = """
-    INSERT INTO anomalies (anomaly_id, services, metrics, severity, t_detected, t_onset,
-                           window_start, window_end, raw, source)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO anomalies (anomaly_id, detector, services, metrics, severity, t_detected, t_onset,
+                           evidence_window_start, evidence_window_end, raw, source)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (anomaly_id) DO NOTHING
     RETURNING anomaly_id
 """
 
 
-def save_anomaly(cur, event: AnomalyEvent, raw: dict, source: str = "kafka") -> SaveResult:
+def save_anomaly(cur, event: AnomalyEvent, raw: dict, detector: str, source: str) -> SaveResult:
     """Store an anomaly unless its id is already present. Never overwrites.
 
-    Kafka delivery is at-least-once, so a redelivered event is expected: "duplicate". The same
-    id with different content is a "collision" — M2 derives ids from a millisecond clock
-    (issue #4) — and the first event stored is kept rather than silently replaced.
+    Real events are written by M2's detector; this is how fixtures get into the same table, with
+    `source='fixture'` so evaluation can exclude them. The same id with different content is a
+    "collision", and the row already there is kept rather than silently replaced.
     """
     window = event.evidence_window
     cur.execute(
         _INSERT_ANOMALY,
         (
             event.anomaly_id,
+            detector,
             event.services,
             event.metrics,
             event.severity,
