@@ -1,0 +1,38 @@
+# Sock Shop service dependency graph, transcribed from CONTRACTS.md ("Service dependency
+# graph"), where M1 confirmed each edge from the images' own config (docs/phase0-decisions.md).
+# Do not add an edge that isn't in the contract; change the contract first.
+#
+# Edges are [caller, callee]. shipping -> rabbitmq <- queue-master is an async fan-out through
+# a message queue, separate from the REST chain; it is traversed like any other edge.
+
+nodes:
+  edge-router: gateway      # Traefik, single entrypoint
+  front-end: service        # Node.js BFF
+  catalogue: service
+  catalogue-db: datastore   # MySQL
+  carts: service
+  carts-db: datastore       # Mongo
+  orders: service
+  orders-db: datastore      # Mongo
+  payment: service
+  shipping: service
+  user: service
+  user-db: datastore        # Mongo
+  rabbitmq: broker
+  queue-master: service
+
+edges:
+  - [edge-router, front-end]
+  - [front-end, catalogue]
+  - [front-end, carts]
+  - [front-end, orders]
+  - [front-end, user]
+  - [catalogue, catalogue-db]
+  - [carts, carts-db]
+  - [orders, orders-db]
+  - [orders, payment]
+  - [orders, shipping]
+  - [orders, user]
+  - [user, user-db]
+  - [shipping, rabbitmq]
+  - [queue-master, rabbitmq]

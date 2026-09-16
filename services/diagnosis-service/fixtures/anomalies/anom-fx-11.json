@@ -1,0 +1,32 @@
+{
+  "_fixture": {
+    "description": "payment crashes; M2's staleness detector reports it stopped publishing metrics",
+    "shape": "m2_upgraded",
+    "fault_type": "service_crash",
+    "ground_truth_service": "payment",
+    "tags": ["crash", "staleness", "no-deploy"],
+    "notes": "Copied from a real event M2's detector produced on 2026-09-16 after a service_crash injection on payment (anom-20260916T061409-aba39b-0001), with ids and times renumbered to the fixture scheme. It is the only fixture carrying M2's post-upgrade fields: detector, contributors with value and baseline, in_deploy_window and a real evidence window. The liveness metric means the service published nothing at all, so no latency or error-rate signal exists; front-end starts failing a few seconds later because its calls to payment error out.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-11-bg1", "service": "shipping", "version": "1.0.31", "commit_sha": "4ab77c0", "config_diff": "adjust log level for shipping", "time": "2026-09-16T06:12:20.000Z" },
+        { "deploy_id": "dep-fx-11-bg2", "service": "carts", "version": "1.0.22", "commit_sha": "0d51e93", "config_diff": "roll out feature flag for carts", "time": "2026-09-16T06:09:20.000Z" }
+      ],
+      "related_anomalies": [
+        { "anomaly_id": "anom-fx-11-fe", "services": ["front-end"], "metrics": ["error_rate"], "severity": "high", "t_detected": "2026-09-16T06:14:22.000Z", "t_onset": "2026-09-16T06:13:52.000Z", "evidence_window": { "start": "2026-09-16T06:13:22.000Z", "end": "2026-09-16T06:14:22.000Z" }, "detector": "ewma", "in_deploy_window": false, "contributors": [ { "service": "front-end", "metric": "error_rate", "value": 0.41, "baseline": 0.004, "score": 8.7, "severity": "high", "observed_at": "2026-09-16T06:14:22.000Z" } ] }
+      ]
+    }
+  },
+  "anomaly_id": "anom-fx-11",
+  "services": ["payment"],
+  "metrics": ["liveness"],
+  "severity": "high",
+  "t_detected": "2026-09-16T06:14:09.965Z",
+  "t_onset": "2026-09-16T06:13:38.904Z",
+  "evidence_window": { "start": "2026-09-16T06:13:38.904Z", "end": "2026-09-16T06:14:09.965Z" },
+  "detector": "staleness",
+  "in_deploy_window": false,
+  "related_deploy_ids": [],
+  "contributors": [
+    { "service": "payment", "metric": "liveness", "value": 31.061505, "baseline": 30.0, "score": 1.0354, "severity": "high", "observed_at": "2026-09-16T06:14:09.965Z" }
+  ]
+}

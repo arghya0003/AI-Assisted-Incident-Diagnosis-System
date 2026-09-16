@@ -1,0 +1,26 @@
+{
+  "_fixture": {
+    "description": "Benign: memory_bytes alert on shipping with no fault injected",
+    "shape": "m2_current",
+    "fault_type": null,
+    "ground_truth_service": null,
+    "tags": ["benign", "issue-2"],
+    "notes": "Mirrors the memory_bytes false positives that make up most of M2's output today (issue #2), including an unrelated carts memory alert 45 seconds later. The correct result is low confidence and no_action; a confident rollback here is a false alarm.",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-09-bg1", "service": "carts", "version": "1.0.17", "commit_sha": "5c9e1a4", "config_diff": "adjust upstream timeout config for carts", "time": "2026-09-14T12:38:55.000Z" },
+        { "deploy_id": "dep-fx-09-bg2", "service": "orders", "version": "1.0.21", "commit_sha": "d08b7f2", "config_diff": "adjust log level for orders", "time": "2026-09-14T12:36:55.000Z" }
+      ],
+      "related_anomalies": [
+        { "anomaly_id": "anom-fx-09-noise", "services": ["carts"], "metrics": ["memory_bytes"], "severity": "medium", "t_detected": "2026-09-14T12:41:40.013Z", "t_onset": "2026-09-14T12:41:40.000Z", "evidence_window": { "start": "2026-09-14T12:41:40.000Z", "end": "2026-09-14T12:41:40.000Z" } }
+      ]
+    }
+  },
+  "anomaly_id": "anom-fx-09",
+  "services": ["shipping"],
+  "metrics": ["memory_bytes"],
+  "severity": "medium",
+  "t_detected": "2026-09-14T12:40:55.063Z",
+  "t_onset": "2026-09-14T12:40:55.049Z",
+  "evidence_window": { "start": "2026-09-14T12:40:55.049Z", "end": "2026-09-14T12:40:55.049Z" }
+}

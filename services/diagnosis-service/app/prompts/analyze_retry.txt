@@ -1,0 +1,4 @@
+Your previous response was rejected:
+$errors
+
+Return a corrected response that follows every rule, as JSON only.
