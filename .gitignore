@@ -16,6 +16,10 @@ testbed/
 *.py[cod]
 .pytest_cache/
 
+# Evaluation output. Regenerable from a single command, and a committed run
+# would go stale immediately - quote numbers in the report, don't version them.
+results/
+
 # IDE
 .idea/
 *.iml

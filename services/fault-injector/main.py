@@ -53,7 +53,15 @@ DEPLOY_EMITTER_URL = os.environ.get("DEPLOY_EMITTER_URL", "http://deploy-emitter
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "incident-diagnosis-system")
 
 MAX_DURATION_SECONDS = 300  # safety cap - a forgotten fault can't run forever
-MAX_CONNECTIONS = 100  # safety cap - stays well clear of catalogue-db's max_connections=151
+
+# catalogue-db runs with max_connections=151. The previous cap of 100 left 51
+# connections free, so the "saturation" fault never actually saturated
+# anything: an evaluation run measured catalogue's p95 at 5.7ms throughout,
+# i.e. the fault was a no-op and every detector "missed" an incident that
+# never happened. The cap now sits just above the pool so the fault can do
+# what it claims; connections are still released in a finally block and the
+# duration cap still bounds the blast radius.
+MAX_CONNECTIONS = 160
 
 FAULT_TYPES = {"bad_deploy_latency", "service_crash", "db_pool_saturation"}
 KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
