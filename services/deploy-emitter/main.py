@@ -12,6 +12,14 @@ Two ways events get created:
     realistic, growing deploy history from day one instead of an empty
     table until someone manually calls the API.
 
+The simulated rate is an evaluation-visible knob, not a detail: deploy
+correlation is the strongest signal M3's root-cause scoring has, so a
+background deploy every 120s (the original default) put one inside M3's
+30-minute lookback for roughly 90% of services at any moment and made a
+routine deploy outrank the injected one. It defaults to 900s now, and 0
+disables the loop entirely for runs that want only injected deploys in
+the log - see docs/phase5-deploy-emitter.md and issue #7.
+
 Every event is both persisted to the `deploys` table (source of truth,
 queryable by service/time) and published onto the deploys.events Kafka
 topic (CONTRACTS.md shape), so M3 can consume it either way.
@@ -43,7 +51,9 @@ PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 TOPIC = "deploys.events"
 
-SIMULATE_INTERVAL_SECONDS = float(os.environ.get("SIMULATE_INTERVAL_SECONDS", "120"))
+# 0 (or negative) disables the background loop: only deploys recorded
+# through POST /deploys land in the log.
+SIMULATE_INTERVAL_SECONDS = float(os.environ.get("SIMULATE_INTERVAL_SECONDS", "900"))
 KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
 
 CONFIG_DIFF_SAMPLES = [
@@ -154,7 +164,13 @@ def create_deploy(service: str, version: str | None, commit_sha: str | None,
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"status": "ok"})
+    # Reports the simulated-deploy rate too: an evaluation run needs to know
+    # how much background deploy noise was in the log it scored against.
+    return jsonify({
+        "status": "ok",
+        "simulate_interval_seconds": SIMULATE_INTERVAL_SECONDS,
+        "simulated_deploys_enabled": SIMULATE_INTERVAL_SECONDS > 0,
+    })
 
 
 @app.post("/deploys")
@@ -205,5 +221,9 @@ def simulate_loop():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=simulate_loop, daemon=True).start()
+    if SIMULATE_INTERVAL_SECONDS > 0:
+        threading.Thread(target=simulate_loop, daemon=True).start()
+    else:
+        log.info("simulated deploys disabled (SIMULATE_INTERVAL_SECONDS=%s); "
+                 "only POST /deploys will record events", SIMULATE_INTERVAL_SECONDS)
     app.run(host="0.0.0.0", port=5000)

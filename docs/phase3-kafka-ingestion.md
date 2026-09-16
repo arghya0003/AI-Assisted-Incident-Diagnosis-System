@@ -8,11 +8,49 @@ clean startup via broker logs (`Kafka Server started`, listening on both ports).
 
 ## Topics
 Created by the one-shot `kafka-init` service (`kafka-topics.sh --create`, runs once then
-exits): `metrics.raw`, `logs.raw`, `deploys.events` — 3 partitions each, `retention.ms=86400000`
+exits): `metrics.raw`, `logs.raw`, `deploys.events`, `anomalies.detected` (the last added
+later — see the issue #5 section below) — 3 partitions each, `retention.ms=86400000`
 (24h), matching the proposal already sitting as an open question in `CONTRACTS.md`.
 Verified via `kafka-topics.sh --describe`. Partition key is `service` (set as the Kafka
 message key by the producer below) — matches CONTRACTS.md's proposal so that all samples
 for a given service land on the same partition, preserving per-service ordering.
+
+### `anomalies.detected` was missing from that list (issue #5)
+M2's output topic wasn't in `kafka-init`, so it only came into existence when the anomaly
+detector first published — which means Kafka auto-created it with broker defaults:
+**1 partition and 7-day retention**, instead of the 3 partitions and 24h this file claims
+for every topic. The same class of bug Phase 6 fixed for the other three, just on a topic
+M1 doesn't produce to, so nothing here ever touched it.
+
+It mattered in three ways: the settings came from broker defaults rather than from the
+compose file (exactly the non-reproducibility the Phase 6 fix removed); anomalies outlived
+by six days the 24h of metrics they point at, so a replayed anomaly could reference
+samples that no longer exist; and the detector's `key=service` bought no ordering or
+parallelism on a single-partition topic.
+
+Fixed by adding it to the `kafka-init` loop. The loop also now **converges topics that
+already exist**, because `--create --if-not-exists` can't repair one:
+
+```sh
+kafka-topics.sh  ... --create --if-not-exists --topic $topic --partitions 3 --config retention.ms=86400000
+kafka-topics.sh  ... --alter --topic $topic --partitions 3 || true
+kafka-configs.sh ... --alter --entity-type topics --entity-name $topic --add-config retention.ms=86400000
+```
+
+`|| true` because altering a topic that already has 3 partitions is an error, not a no-op.
+Partitions can only ever be *increased* this way — Kafka won't shrink a topic — which is
+fine for the one direction this needs to go. The effect is that an existing dev stack with
+the bad 1-partition topic is repaired by an ordinary `docker compose up`, rather than
+needing its Kafka volume wiped. `kafka-init` now ends with `--describe` instead of
+`--list`, so the settings it actually applied are visible in the bring-up log.
+
+Verify:
+
+```bash
+export MSYS_NO_PATHCONV=1   # Git Bash on Windows only
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 --describe --topic anomalies.detected
+```
 
 ## Producer: metrics-bridge
 `services/metrics-bridge/` — a small Python service, not a Sock Shop component. Bridges
