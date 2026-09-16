@@ -1021,6 +1021,14 @@ signal, and they document what the service can and cannot do on its own.
 and are left as recorded. Re-running them fairly needs the testbed under real traffic (issue #6),
 which is the Week 8–9 evaluation, not this change.
 
+**Verified live on 2026-09-16, on a real fault with real traffic.** With M1's `load-generator`
+holding 5 rps, a `service_crash` injection on payment was detected by M2's staleness detector 31 s
+later as a `liveness` anomaly, and `/analyze` ranked payment first and was answered by the LLM, not
+the fallback. The cause text names what the detector measured rather than retelling a past incident.
+Full numbers in `README.md`, "Live end-to-end verification". This is the first time the path has run
+end to end outside fixtures, and it closes the Phase 4 and Phase 5 crash findings in practice as
+well as on paper. It is one run of one fault type, so it proves the path, not the accuracy.
+
 ---
 
 ## 4. Mapping to the 10-week plan

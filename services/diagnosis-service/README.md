@@ -427,3 +427,44 @@ without that signal, and stay wrong.
 
 The evaluation numbers above predate this and were measured on the older 10 fixtures; they are not
 re-run here, because a fair re-run needs the testbed under real traffic (issue #6).
+
+## Live end-to-end verification — 2026-09-16
+
+The first check of the whole path on a **real fault with real traffic**, rather than on fixtures.
+M1's `load-generator` (issue #6) makes this possible: the testbed used to idle at ~0.2 req/s, where
+an injected fault moved no metric.
+
+**Setup.** Full Compose stack, `load-generator` at 5.008 achieved rps with 0 failures, Ollama on the
+host with phi4-mini and nomic-embed-text.
+
+| Step | Result |
+| --- | --- |
+| Inject | `POST :5001/faults` `{service: payment, fault_type: service_crash, duration_s: 90}` → `scn-service-crash-1789542547`, `t_inject` 07:09:07Z |
+| Detect | M2's staleness detector, `anom-20260916T070941-d16f49-0002`, metric `liveness`, severity high, onset 07:09:10.5Z, detected 07:09:41.6Z (**31 s**), contributor value 31.086 against baseline 30.0 |
+| Rank | Deterministic: **payment first**, score 0.534 (graph 1.00, co-anomaly 1.00, incident similarity 0.56, deploy 0.00) |
+| Answer | `answered_by=llm`, 3 attempts, 21.5 s, 0 guardrail rejections, persisted. Rank 1 **payment** — the ground truth — with `no_action` |
+
+**The cause text improved because of the new prompt fields.** The same anomaly answered by the
+pre-upgrade image gave "Payment process killed; checkouts fail (similar to incident-0014)"; the
+current image gives "The payment service stopped reporting liveness metrics, indicating a possible
+crash or unreachability, similar to past incidents where the payment service itself crashed
+(incident-0014)". The first borrows a past incident's story, the second states what the detector
+measured. That is the `liveness` explanation line working.
+
+**The 3 attempts were fix A working, not a failure.** Attempts 1 and 2 were rejected because
+phi4-mini wrote causes claiming a deploy or release for payment, which has no deploy listed; it
+dropped them on attempt 3. Worth watching: three attempts is the cap, so this answer was one retry
+away from the deterministic fallback.
+
+**Caveats.** One run, one fault type, one service. It shows the path works end to end on a real
+event; it is not an accuracy measurement.
+
+**Gotcha worth knowing:** `scripts/test_in_docker.sh` builds the image but runs its tests in a
+throwaway container — it never recreates the running service. A live check straight after it will
+silently exercise the *old* code. Use `docker compose up -d --build diagnosis-service` first, and
+`?refresh=true` on `/analyze`, since a stored answer for the same anomaly and config is served again.
+
+**Host resources with both running** (16 GiB machine, 4 GiB GPU): Docker 2.91 GiB inside a 7 GB WSL
+cap, phi4-mini 2.77 of 4 GiB VRAM, 1.84 GB Windows memory still available, 22.3 of 31.2 GB committed,
+page file 5.8% used. Docker and Ollama coexist with headroom once WSL is capped and the page file is
+fixed at 16 GB.

@@ -14,6 +14,11 @@
 #   bash services/diagnosis-service/scripts/test_in_docker.sh --eval       # + LLM runs per fixture (EVAL_RUNS, default 10;
 #                                                                          #   EVAL_ARGS e.g. "--modes full,deterministic --persist")
 # --ingest, --compare and --eval need Ollama running on the host with OLLAMA_HOST=0.0.0.0.
+#
+# This builds the image but runs the tests in a throwaway container: the running diagnosis-service
+# keeps whatever image it started with. Before checking a change against the live API, recreate it:
+#   docker compose up -d --build diagnosis-service
+# and call /analyze?refresh=true, or a stored answer for the same anomaly and config is served again.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # Git Bash would otherwise rewrite /src into a Windows path
 
