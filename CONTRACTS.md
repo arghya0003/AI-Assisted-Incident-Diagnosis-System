@@ -141,10 +141,22 @@ M3 should read the gap in that service's samples as the evidence, and
 **Durable copy: the `anomalies` table.** Every event published here is also
 written to TimescaleDB's `anomalies` table (`timescaledb/init/005_anomalies.sql`)
 under the same `anomaly_id`, so M3 can resolve `POST /analyze {anomaly_id}` long
-after the event has left the 24h topic. The frozen fields have columns of their
-own; `contributors`, `in_deploy_window` and `related_deploy_ids` are kept whole
-in a `detail` JSONB column. Kafka remains the live contract: the table is written
-after the publish, and a failed write never holds an alert back.
+after the event has left the 24h topic. Kafka remains the live contract: the
+table is written after the publish, and a failed write never holds an alert back.
+
+Its shape is agreed with M3, who had built the same table independently:
+
+| Column | Notes |
+| --- | --- |
+| the seven frozen fields | Real columns, so ordinary queries need no JSON. The window is split into `evidence_window_start` / `evidence_window_end`. |
+| `raw` | The published event verbatim, so a consumer can rebuild it exactly and a field added later is stored without a schema change. |
+| `detector` | Which algorithm fired, so an ablation run's rows can be told apart. |
+| `source` | `kafka` for real events, `fixture` for hand-written ones. Evaluation must exclude fixtures. |
+| `received_at` | When the row was stored, so write lag behind `t_detected` is measurable. |
+
+M2's detector is the writer. Anyone else inserting (M3's fixtures, or a backstop
+consumer) should use `ON CONFLICT (anomaly_id) DO NOTHING`, since the same event
+may already be there.
 
 ## Evidence model
 

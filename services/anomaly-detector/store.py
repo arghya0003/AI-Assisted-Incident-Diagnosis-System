@@ -23,24 +23,22 @@ log = logging.getLogger("anomaly-detector")
 INSERT_SQL = """
 INSERT INTO anomalies (
     anomaly_id, detector, services, metrics, severity,
-    t_onset, t_detected, evidence_window_start, evidence_window_end, detail
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    t_onset, t_detected, evidence_window_start, evidence_window_end, raw, source
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (anomaly_id) DO NOTHING
 """
 
-# Event fields with a column of their own. Everything else — contributors,
-# in_deploy_window, related_deploy_ids — is kept whole in `detail`, so a new
-# additive field on the event is stored without a schema change.
-_COLUMN_FIELDS = {
-    "anomaly_id", "detector", "services", "metrics", "severity",
-    "t_onset", "t_detected", "evidence_window",
-}
 
+def to_row(event: dict, source: str = "kafka") -> tuple:
+    """Map an `anomalies.detected` payload onto the table's columns.
 
-def to_row(event: dict) -> tuple:
-    """Map an `anomalies.detected` payload onto the table's columns."""
+    The frozen contract fields get columns so ordinary queries need no JSON,
+    and `raw` keeps the event verbatim: a consumer can rebuild exactly what
+    was published, and a field added to the event later is stored without a
+    schema change. `source` marks hand-written fixtures, which evaluation
+    excludes; everything this writes came off the wire.
+    """
     window = event["evidence_window"]
-    detail = {key: value for key, value in event.items() if key not in _COLUMN_FIELDS}
     return (
         event["anomaly_id"],
         event.get("detector", "unknown"),
@@ -51,7 +49,8 @@ def to_row(event: dict) -> tuple:
         event["t_detected"],
         window["start"],
         window["end"],
-        json.dumps(detail),
+        json.dumps(event),
+        source,
     )
 
 
