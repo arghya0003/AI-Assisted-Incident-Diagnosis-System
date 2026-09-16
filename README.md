@@ -25,7 +25,8 @@ on it, so it front-loads hard in weeks 1-6, then tapers into supporting M2's fau
   it for this stage; Sock Shop ships pre-built images with no build step).
 - Service subset: full Sock Shop minus the load generator (14 services, real multi-hop
   dependency chain, verified against each image's actual source/config) — see decision
-  record in `docs/phase0-decisions.md`.
+  record in `docs/phase0-decisions.md`. Its `user-sim` was later replaced by a load
+  generator of our own, for the reason in issue #6 below.
 - Docker Desktop confirmed working locally.
 - Root `docker-compose.yml` skeleton in place — every other member's service plugs in here.
 - Interface contracts drafted in `CONTRACTS.md` — **needs team sign-off before Week 3.**
@@ -43,9 +44,10 @@ real traffic. See `docs/phase2-instrumentation.md` for the full writeup, includi
 `queue-master` JSON-format gap and deferred DB/queue-infra metrics.
 
 ### Phase 3 (Week 2-3) — Kafka ingestion pipeline ✅
-Kafka in KRaft mode, topics `metrics.raw` / `logs.raw` / `deploys.events` created (3
-partitions, 24h retention, keyed by `service`). Built `metrics-bridge` (Python) to bridge
-Phase 2's Prometheus metrics onto `metrics.raw` in the CONTRACTS.md shape — verified real
+Kafka in KRaft mode, topics `metrics.raw` / `logs.raw` / `deploys.events` /
+`anomalies.detected` created (3 partitions, 24h retention, keyed by `service`). Built
+`metrics-bridge` (Python) to bridge Phase 2's Prometheus metrics onto `metrics.raw` in the
+CONTRACTS.md shape — verified real
 records landing on the topic via direct console-consumer read. `logs.raw` and
 `deploys.events` exist (schemas frozen) but have no producer yet — see
 `docs/phase3-kafka-ingestion.md` for why that's deliberately deferred.
@@ -59,8 +61,8 @@ state, under the 5s target — see `docs/phase4-timescaledb.md`.
 ### Phase 5 (Week 4-5) — Deploy event emitter ✅
 Built `deploy-emitter` (Flask API, port 5000): `POST /deploys` to record a real deploy,
 `GET /deploys` to query history, plus a background loop fabricating an ordinary deploy
-every 2 minutes so the log isn't empty. Every deploy is written to the `deploys` table
-(same TimescaleDB instance, per the architecture diagram) and published to
+every `SIMULATE_INTERVAL_SECONDS` so the log isn't empty. Every deploy is written to the
+`deploys` table (same TimescaleDB instance, per the architecture diagram) and published to
 `deploys.events`. Verified both paths with real API calls — see
 `docs/phase5-deploy-emitter.md`.
 
@@ -108,10 +110,59 @@ services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into 
 timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
 services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
 services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
+services/load-generator/    Standing traffic through edge-router, so injected faults are observable
 services/anomaly-detector/  Phase 9 (M2) — swappable detectors, grouping, deploy-window policy
 services/evaluation-runner/ Phase 9 (M2) — fault injection + scoring; produces the report tables
 results/                    Evaluation output (gitignored — regenerate, don't commit)
 ```
+
+## Ports
+
+| Port | What |
+| --- | --- |
+| 80 | `edge-router` — the testbed's entry point |
+| 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
+| 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
+| 5002 | `load-generator` — `/stats` (what load is actually being offered) |
+| 8081 | kafka-ui · 8082 adminer · 9090 Prometheus · 29092 Kafka (host-side) |
+
+## Fixes on top of the phase work
+
+Issues raised by M3 against this slice, now addressed:
+
+- **[#5] `anomalies.detected` wasn't created by `kafka-init`** — it was auto-created by
+  Kafka on M2's first publish with 1 partition and 7-day retention, so anomalies outlived
+  the 24h of metrics they refer to. Added to the topic list; `kafka-init` also converges
+  topics that already exist, so a running dev stack is repaired by `docker compose up`
+  rather than a volume wipe. **Verified live:** `--describe` now reports 3 partitions and
+  `retention.ms=86400000`, converged on an existing topic without a volume wipe. See
+  `docs/phase3-kafka-ingestion.md`.
+- **[#6] No standing traffic, so injected faults changed no metric** — the testbed sat at
+  ~0.2 req/s and 4 of 7 services emitted no latency data at all, which made the whole
+  detect/diagnose/evaluate chain unmeasurable. Added `services/load-generator/`: a
+  fixed, known, open-loop load over the whole call graph, with `GET /stats` so a run can
+  prove traffic was flowing. The fault injector now records the offered rate on every
+  scenario. **Verified live:** all 7 scraped services now report `latency_p95_ms` (was 3),
+  load holds at 4.99 of a 5 req/s target with zero failures, and an injected throttle took
+  catalogue from 4.8 ms to 160 ms p95 — which M2's detector then fired on, grouped with
+  `front-end` and tagged to the companion deploy. See `docs/load-generator.md`.
+- **[#7] A simulated deploy every 2 minutes drowned the signal** — deploy correlation is
+  M3's strongest root-cause signal, and at that rate ~90% of services had a background
+  deploy inside the lookback window. Default raised to 900s, `0` disables it, and the rate
+  is reported by `GET /healthz` so an evaluation run records what it ran under. **Verified
+  live:** deploys now land 900 s apart. See `docs/phase5-deploy-emitter.md`.
+
+Also found while verifying, and **not** fixed here — each needs its owner's call:
+
+- `cpu_limit` defaults to `0.002` now, not `0.05`. A CPU quota only bites below what the
+  service actually uses, and catalogue idles at 0.17% of a core, so `0.05` was a no-op —
+  measured, p95 flat through a full 90 s throttle. `evaluation-runner`'s suite passes
+  `0.05`/`0.10` explicitly and needs its own look (M2).
+- `error_rate` is never ingested for any service: with no 5xx anywhere, the PromQL series
+  doesn't exist and the bridge skips the sample instead of publishing 0 (M1).
+- The `anomalies` table is missing on any stack whose TimescaleDB volume predates
+  `005_anomalies.sql`, because Postgres only runs `init/` on a fresh volume. Applied by
+  hand on this stack; the general fix is an idempotent migration step (M1).
 
 ---
 
@@ -200,8 +251,11 @@ distinguishes them — see [docs/phase9-detection.md](docs/phase9-detection.md):
 
 ### Not done yet
 - **Four of seven services have no traffic**, which caps what the evaluation can cover, and
-  means `error_rate` is never ingested for any service. Fixing it means adding a load
-  generator to the shared testbed — M1's call, flagged for the team.
+  means `error_rate` is never ingested for any service. ~~Fixing it means adding a load
+  generator to the shared testbed — M1's call, flagged for the team.~~ **M1 added one**
+  (`services/load-generator/`, issue #6). Every result in this section was measured before
+  it existed, so the detection rates, the `unobservable` scorings for `front-end`/`orders`
+  and the `db_pool_saturation` finding all need re-running under standing load.
 - Three fault classes, not the six in the plan — the injector cannot produce memory leak /
   OOM, dependency timeout cascade or config error yet.
 - Seasonality suppression deliberately skipped (no diurnal cycle in synthetic traffic).
