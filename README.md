@@ -134,18 +134,35 @@ Issues raised by M3 against this slice, now addressed:
   Kafka on M2's first publish with 1 partition and 7-day retention, so anomalies outlived
   the 24h of metrics they refer to. Added to the topic list; `kafka-init` also converges
   topics that already exist, so a running dev stack is repaired by `docker compose up`
-  rather than a volume wipe. See `docs/phase3-kafka-ingestion.md`.
+  rather than a volume wipe. **Verified live:** `--describe` now reports 3 partitions and
+  `retention.ms=86400000`, converged on an existing topic without a volume wipe. See
+  `docs/phase3-kafka-ingestion.md`.
 - **[#6] No standing traffic, so injected faults changed no metric** — the testbed sat at
   ~0.2 req/s and 4 of 7 services emitted no latency data at all, which made the whole
   detect/diagnose/evaluate chain unmeasurable. Added `services/load-generator/`: a
   fixed, known, open-loop load over the whole call graph, with `GET /stats` so a run can
   prove traffic was flowing. The fault injector now records the offered rate on every
-  scenario. See `docs/load-generator.md`.
+  scenario. **Verified live:** all 7 scraped services now report `latency_p95_ms` (was 3),
+  load holds at 4.99 of a 5 req/s target with zero failures, and an injected throttle took
+  catalogue from 4.8 ms to 160 ms p95 — which M2's detector then fired on, grouped with
+  `front-end` and tagged to the companion deploy. See `docs/load-generator.md`.
 - **[#7] A simulated deploy every 2 minutes drowned the signal** — deploy correlation is
   M3's strongest root-cause signal, and at that rate ~90% of services had a background
   deploy inside the lookback window. Default raised to 900s, `0` disables it, and the rate
-  is reported by `GET /healthz` so an evaluation run records what it ran under. See
-  `docs/phase5-deploy-emitter.md`.
+  is reported by `GET /healthz` so an evaluation run records what it ran under. **Verified
+  live:** deploys now land 900 s apart. See `docs/phase5-deploy-emitter.md`.
+
+Also found while verifying, and **not** fixed here — each needs its owner's call:
+
+- `cpu_limit` defaults to `0.002` now, not `0.05`. A CPU quota only bites below what the
+  service actually uses, and catalogue idles at 0.17% of a core, so `0.05` was a no-op —
+  measured, p95 flat through a full 90 s throttle. `evaluation-runner`'s suite passes
+  `0.05`/`0.10` explicitly and needs its own look (M2).
+- `error_rate` is never ingested for any service: with no 5xx anywhere, the PromQL series
+  doesn't exist and the bridge skips the sample instead of publishing 0 (M1).
+- The `anomalies` table is missing on any stack whose TimescaleDB volume predates
+  `005_anomalies.sql`, because Postgres only runs `init/` on a fresh volume. Applied by
+  hand on this stack; the general fix is an idempotent migration step (M1).
 
 ---
 

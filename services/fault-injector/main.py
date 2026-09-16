@@ -273,12 +273,15 @@ def post_fault():
     duration_s = min(int(body.get("duration_s", 30)), MAX_DURATION_SECONDS)
     params = {"duration_s": duration_s}
     if fault_type == "bad_deploy_latency":
-        # Both 0.02 and 0.05 are known to work: Phase 8 measured a ~200x p95
-        # regression at 0.02, and M2's ablation measured 38x (5.9ms -> 222ms
-        # peak) at 0.05. Staying at 0.05 keeps this default equal to what
-        # evaluation-runner's suite actually passes, so an ad-hoc injection
-        # and a scored one are the same fault.
-        params["cpu_limit"] = float(body.get("cpu_limit", 0.05))
+        # cpu_limit is a fraction of ONE core, and a quota only bites when it
+        # is below what the service actually uses. These are small Go/Node
+        # services: under 5 req/s of standing load, catalogue idles at ~0.17%
+        # of a core, so the old 0.05 (5%) left it ~30x more CPU than it
+        # needed and the "fault" changed nothing - measured, p95 flat at
+        # 4.8ms through a 90s throttle. 0.002 (0.2%) took the same service
+        # from 4.8ms to 160ms p95 within 30s at unchanged request rate.
+        # Raise it for a heavier service (front-end idles near 1.8%).
+        params["cpu_limit"] = float(body.get("cpu_limit", 0.002))
     if fault_type == "db_pool_saturation":
         params["connections"] = min(int(body.get("connections", 50)), MAX_CONNECTIONS)
 

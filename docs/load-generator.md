@@ -96,23 +96,47 @@ missed. `POST /faults` also returns a `warning` when the testbed is nearly idle
 (< 1 req/s) or the generator can't be reached — a warning, not a refusal, so a deliberate
 idle-baseline run is still possible.
 
-## Status
-Verified offline against a stub front-end (Docker Desktop was not running): 4 workers at a
-20 req/s target achieved 19.92 req/s over the run, every journey step reached its endpoint,
-checkout and the order counter worked, and the catalogue id list was fetched once at
-startup rather than per journey. The `/stats` body above is the real shape of the output,
-but the traffic numbers in it are illustrative.
+## Verified on the live stack
 
-Still to verify on a live stack:
+Full stack up (25 containers), generator running 15 minutes at the defaults:
 
-- every one of the 7 scraped services reports `latency_p95_ms` (the 4-of-7 gap closes);
-- `request_rate` sits near `TARGET_RPS` spread across the chain;
-- an injected `bad_deploy_latency` now moves p95 the way `docs/phase8-fault-injection.md`
-  measured under manual load;
-- whether the 4 workers × 5 req/s default is enough signal without saturating a laptop
-  running 25 containers;
-- that every journey path matches this `front-end` image's routes. A wrong path answers
-  4xx, which isn't counted as a failure (an empty cart legitimately answers 4xx) but is
-  counted in `client_errors_by_step` — so a step whose client-error count tracks its
-  request count is a wrong path. Worth one look at `curl -s localhost:5002/stats` after
-  the first bring-up.
+```
+achieved_rps 4.987 · recent_rps 4.983 · requests 4583 · failures 0 · journeys 499 · orders 52
+```
+
+**All 7 scraped services now report latency** — the 4-of-7 gap is closed. Ten minutes of
+samples, per service:
+
+| Service | `request_rate` | `latency_p95_ms` samples | p95 max |
+| --- | --- | --- | --- |
+| front-end | 5.00 | 119 | 86.4 ms |
+| catalogue | 2.39 | 119 | 4.9 ms |
+| carts | 2.27 | 119 | 33.3 ms |
+| user | 1.22 | 119 | 24.2 ms |
+| orders | 0.61 | 119 | 213.6 ms |
+| payment | 0.28 | 119 | 137.5 ms |
+| shipping | 0.06 | 119 | 72.5 ms |
+
+Previously `carts`, `orders`, `shipping` and `front-end` produced no `latency_p95_ms` at
+all. `payment` and `shipping` are fed only by checkout, which is why their rates are low —
+raise `ORDER_PROBABILITY` to exercise them harder.
+
+**A fault is now observable end to end.** A 90s `bad_deploy_latency` against catalogue took
+p95 from 4.8 ms to 160 ms at unchanged request rate, and M2's detector fired on it
+(`catalogue/latency_p95_ms value=94.5 baseline=4.83 score=309`, grouped with `front-end`,
+tagged to the companion deploy). That is the whole chain issue #6 said was impossible
+against an idle testbed. The throttle strength matters, though — see the `cpu_limit` table
+in `docs/phase8-fault-injection.md`.
+
+Offered load held flat while the fault ran, which is the open-loop design doing its job.
+4 workers × 5 req/s was comfortable on a laptop running the full stack.
+
+## Known, not yet fixed
+
+- **`error_rate` is never ingested** (M2 flagged this too). Nothing returns 5xx, so the
+  `request_duration_seconds_count{status_code=~"5.."}` series does not exist, the PromQL
+  returns empty rather than zero, and `metrics-bridge` skips the sample. It needs an
+  `or vector(0)` in the query — M1's fix, not done here.
+- **~27% of checkouts answer 4xx** (`client_errors_by_step: {"order": 19}` against 71
+  attempts). Orders still complete — 52 of them — so the path works; the failures are
+  most likely a cart/session race in the journey. Not load-affecting, but worth a look.

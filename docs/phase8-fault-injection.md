@@ -63,13 +63,25 @@ is still idle. The stack now runs a `load-generator` service continuously
 
 Two consequences for the harness:
 
-- **`cpu_limit` stays at `0.05`.** Issue #6 asked for a re-check, since the 7.47s
-  regression above was measured at 0.02. The answer came from M2's ablation, which
-  measured catalogue going from a 5.9ms baseline to a 222ms peak — 38x — at 0.05. Both
-  values work, and 0.05 is what `evaluation-runner`'s suite passes explicitly, so leaving
-  the default there keeps an ad-hoc injection and a scored one the same fault. (An earlier
-  pass of this fix changed the default to 0.02 on the belief that 0.05 had never been
-  shown to work; M2's data says otherwise.)
+- **`cpu_limit` now defaults to `0.002`, measured.** Issue #6 asked for a re-check once
+  traffic existed. The answer is more interesting than a tweak: **a CPU quota only bites
+  when it is below what the service actually uses**, and these are small Go/Node services.
+  Under 5 req/s of standing load, catalogue idles at **0.17% of one core**, so the old
+  `0.05` left it roughly 30x more CPU than it needed:
+
+  | `cpu_limit` | catalogue p95 during a 90s throttle | Verdict |
+  | --- | --- | --- |
+  | `0.05` (5%) | 4.8 ms → **4.8 ms** (request rate flat at 2.4/s) | no-op |
+  | `0.002` (0.2%) | 4.8 ms → **160 ms** within 30s, peak 270 ms | 33x, detected |
+
+  At `0.002` M2's detector fired on it end to end: `catalogue/latency_p95_ms value=94.5
+  baseline=4.83 score=309`, grouped with `front-end` and tagged to the companion deploy.
+  Raise the value for a heavier service — `front-end` idles near 1.8% of a core.
+
+  This is the same class of bug as the `db_pool_saturation` cap of 100 against a
+  151-connection pool: a fault that runs, records itself, and physically does nothing.
+  `evaluation-runner`'s suite passes `cpu_limit` explicitly (0.05 / 0.10), so it is not
+  affected by this default and needs its own look — raised with M2 separately.
 - **Every scenario records the load that was running when it was injected.** `POST /faults`
   reads the generator's `/stats` and stores `params.offered_rps_at_inject` on the row. From
   `fault_scenarios` alone, a fault injected into an idle testbed and a detector that simply
