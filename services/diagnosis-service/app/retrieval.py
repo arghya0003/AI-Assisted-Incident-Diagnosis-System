@@ -15,7 +15,7 @@ from typing import Literal, Protocol
 
 from app.corpus import IncidentRecord
 from app.graph import DEFAULT_MAX_HOPS, DependencyGraph
-from app.models import AnomalyEvent, SimilarIncident
+from app.models import LIVENESS_METRIC, AnomalyEvent, SimilarIncident
 from app.ollama import OllamaUnavailable
 
 log = logging.getLogger("diagnosis-service.retrieval")
@@ -37,6 +37,7 @@ METRIC_PHRASES = {
     "cpu_rate": "CPU usage",
     "memory_bytes": "memory usage",
     "request_rate": "request rate",
+    LIVENESS_METRIC: "a total stop in reported metrics",
 }
 
 _LATENCY_FAULTS = frozenset({"bad_deploy_latency", "db_pool_saturation", "db_contention", "capacity"})
@@ -53,11 +54,14 @@ SUSPECTED_FAULT_TYPES: dict[str, frozenset[str]] = {
     "cpu_rate": frozenset({"bad_deploy_latency", "capacity"}),
     "memory_bytes": frozenset({"capacity", "benign"}),
     "request_rate": frozenset({"capacity"}),
+    # A service that stops reporting at all has either died or lost what it depends on.
+    LIVENESS_METRIC: frozenset({"service_crash", "dependency_failure"}),
 }
 
 
 def query_text(anomaly: AnomalyEvent) -> str:
-    # M2's event carries no value or baseline, so the deviation size can't be included.
+    # Symptom wording only. M2's event now carries values and baselines, but the corpus documents
+    # are symptom text with no numbers, so adding them here would not match anything.
     metrics = ", ".join(METRIC_PHRASES.get(metric, metric) for metric in anomaly.metrics)
     return f"{QUERY_PREFIX}{anomaly.severity} severity anomaly: abnormal {metrics} on {', '.join(anomaly.services)}"
 

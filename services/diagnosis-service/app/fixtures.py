@@ -38,9 +38,12 @@ class FixtureMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str = Field(min_length=1)
-    # "m2_current": single service and metric, zero-width window, as the detector emits today.
+    # "m2_current": single service and metric, zero-width window, as the detector emitted when
+    #   these fixtures were written (issue #3).
+    # "m2_upgraded": single service and metric, with the real evidence window, detector name and
+    #   contributors M2 added afterwards.
     # "contract": grouped multi-service event, as CONTRACTS.md describes after M2's grouping.
-    shape: Literal["m2_current", "contract"]
+    shape: Literal["m2_current", "m2_upgraded", "contract"]
     fault_type: FaultType | None
     ground_truth_service: str | None
     tags: list[str] = []

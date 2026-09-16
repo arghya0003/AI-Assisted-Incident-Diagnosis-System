@@ -16,7 +16,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.hypotheses import MAX_HYPOTHESES, CandidateOptions, candidate_options
-from app.models import NO_ACTION, AnomalyEvent, Candidate, CandidateReport, Deploy, Evidence, SimilarIncident
+from app.models import (
+    LIVENESS_METRIC,
+    NO_ACTION,
+    AnomalyEvent,
+    Candidate,
+    CandidateReport,
+    Deploy,
+    Evidence,
+    SimilarIncident,
+)
+from app.scoring import observed_values
 
 log = logging.getLogger("diagnosis-service.prompts")
 
@@ -283,14 +293,34 @@ def _render_llm_only(
 
 
 def _anomaly_lines(anomaly: AnomalyEvent) -> list[str]:
-    return [
+    """What the detector actually measured. Everything after the onset line is optional: an event
+    recorded before M2 added these fields still renders, just with less detail."""
+    lines = [
         f"anomaly_id: {anomaly.anomaly_id}",
         f"services: {', '.join(anomaly.services)}",
         f"metrics: {', '.join(anomaly.metrics)}",
         f"severity: {anomaly.severity}",
         f"onset: {_iso(anomaly.t_onset)}",
-        "observed and baseline values: not provided by the anomaly detector",
+        f"evidence window: {_iso(anomaly.evidence_window.start)} to {_iso(anomaly.evidence_window.end)}",
     ]
+    if anomaly.detector:
+        lines.append(f"detector: {anomaly.detector}")
+    if LIVENESS_METRIC in anomaly.metrics:
+        lines.append(
+            f"note: a {LIVENESS_METRIC} anomaly means the service stopped reporting metrics altogether, "
+            "which is what a crashed or unreachable service looks like"
+        )
+    observed = observed_values(anomaly)
+    lines.append(
+        "observed and baseline values: " + "; ".join(observed)
+        if observed
+        else "observed and baseline values: not provided by the anomaly detector"
+    )
+    if anomaly.related_deploy_ids:
+        lines.append(f"deploys the detector linked to this anomaly: {', '.join(anomaly.related_deploy_ids)}")
+    elif anomaly.in_deploy_window:
+        lines.append("a service was mid-deploy when this anomaly started")
+    return lines
 
 
 def _anomaly_block(anomaly: AnomalyEvent, related: list[Evidence]) -> str:

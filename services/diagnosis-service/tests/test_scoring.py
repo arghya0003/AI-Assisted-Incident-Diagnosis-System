@@ -277,6 +277,21 @@ def test_evidence_is_complete_and_consistent(anomaly_id):
     assert all(item.incident_id == anomaly_id for item in report.evidence)
 
 
+def test_anomaly_evidence_reports_what_the_detector_measured():
+    report = score_fixture("anom-fx-11")
+    primary = next(i for i in report.evidence if i.source_id == "anom-fx-11")
+    assert "payment liveness 31.06 (baseline 30)" in primary.summary
+    assert primary.payload["detector"] == "staleness"
+    assert primary.payload["contributors"][0]["baseline"] == 30.0
+
+
+def test_anomaly_evidence_without_contributors_says_only_what_it_knows():
+    report = score_fixture("anom-fx-01")
+    primary = next(i for i in report.evidence if i.source_id == "anom-fx-01")
+    assert primary.summary == "latency_p95_ms anomalous on catalogue (high)"
+    assert primary.payload["contributors"] == []
+
+
 def test_scoring_makes_no_network_calls(monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("scoring attempted a network connection")
@@ -291,7 +306,9 @@ def test_scoring_makes_no_network_calls(monkeypatch):
 
 CRASH_REASON = (
     "known limitation: a crashed service stops reporting metrics, so it is never anomalous and "
-    "has no deploy; ranking it needs a missing-metrics signal (PLAN.md, Phase 4 outcome)"
+    "has no deploy; ranking it needs a missing-metrics signal (PLAN.md, Phase 4 outcome). "
+    "anom-fx-11 is the same fault seen through M2's staleness detector, which supplies exactly "
+    "that signal, and it ranks correctly."
 )
 
 
@@ -303,6 +320,7 @@ CRASH_REASON = (
         "anom-fx-03",
         "anom-fx-07",
         "anom-fx-08",
+        "anom-fx-11",
         pytest.param("anom-fx-04", marks=pytest.mark.xfail(strict=True, reason=CRASH_REASON)),
         pytest.param("anom-fx-05", marks=pytest.mark.xfail(strict=True, reason=CRASH_REASON)),
         pytest.param("anom-fx-06", marks=pytest.mark.xfail(strict=True, reason=CRASH_REASON)),

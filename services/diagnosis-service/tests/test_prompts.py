@@ -74,6 +74,16 @@ def test_prompt_carries_the_anomaly_candidates_and_deploy_diff():
         assert fact in text
 
 
+def test_prompt_carries_what_the_detector_measured():
+    """fx-11 is the one fixture with M2's post-upgrade fields, so it is the one that shows them."""
+    anomaly, report = report_for("anom-fx-11")
+    text = user_text(build_prompt(anomaly, report, **BIG))
+    assert "detector: staleness" in text
+    assert "observed and baseline values: payment liveness 31.06 (baseline 30)" in text
+    assert "stopped reporting metrics altogether" in text
+    assert "not provided by the anomaly detector" not in text
+
+
 def test_each_candidate_may_cite_only_its_own_evidence():
     anomaly, report = report_for("anom-fx-01")
     options = options_by_service(build_prompt(anomaly, report, **BIG))

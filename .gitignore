@@ -15,6 +15,11 @@ testbed/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
+# Local virtualenvs. The services install their own requirements in their images; a venv is
+# only ever a convenience for running a service's tests on the host.
+.venv/
+.venv-host/
+venv/
 
 # Evaluation output. Regenerable from a single command, and a committed run
 # would go stale immediately - quote numbers in the report, don't version them.

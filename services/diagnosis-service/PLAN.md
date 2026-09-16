@@ -555,6 +555,9 @@ Findings:
    never anomalous and never has a deploy, and scoring cannot rank it (`anom-fx-04/05/06`). A
    "candidate stopped reporting metrics near onset" signal from M1's `metrics` table would
    address this. It is not in this plan's weights, so it is proposed here rather than built.
+   **Resolved on 2026-09-16 by M2, not by M3:** their staleness detector now emits a `liveness`
+   anomaly naming the silent service, which makes it anomalous, so the existing weights rank it.
+   See "M2 detector upgrade" below.
 5. **Open item for the team: what do hypotheses cite?** The CONTRACTS.md example cites source ids
    (`anom-0001`, `dep-...`, `incident-0042`), while `docs/evidence-model.md` says `/analyze`
    should return `evidence_id` values. Phase 6 needs one answer.
@@ -988,6 +991,35 @@ Findings:
 4. **Latency under load:** while this evaluation ran, a live `deterministic` request took 2.6–11 s
    instead of about 50 ms. Its retrieval embedding call queued behind LLM generations on the same
    GPU. In production, deterministic requests would share Ollama with LLM requests.
+
+---
+
+### M2 detector upgrade (2026-09-16) — integration, not a plan phase
+
+M2 upgraded their detector after Phase 8 was measured. This was not planned work for M3; it is
+consumed here because the new fields are exactly what Phase 4 finding 4 and Phase 5 finding 2 said
+was missing.
+
+**Consumed:** `detector`, `contributors` (measured value, baseline and score per service and
+metric), a real `evidence_window`, `related_deploy_ids`, `in_deploy_window`, and the `liveness`
+metric the staleness detector emits when a service publishes nothing at all. Every field is
+optional in `app/models.py`, so events recorded before the upgrade still parse.
+
+**Where each is used:** `app/prompts.py` renders them in the anomaly block, including a plain
+sentence explaining what a `liveness` anomaly means; `app/scoring.py` puts the measured values in
+the anomaly evidence summary and the detector and contributors in its payload; `app/retrieval.py`
+maps `liveness` to the `service_crash` and `dependency_failure` fault types for the pre-filter.
+
+**Outcome — the Phase 4 crash limitation is resolved by M2's signal.** `anom-fx-11` is a real
+staleness event (a `service_crash` injection on payment) added as a fixture. Scoring ranks payment
+first with no change to the weights, because the detector makes the silent service anomalous and it
+is the deepest anomalous service. It is now a passing case in `test_fixture_root_cause_ranks_first`,
+alongside the three older crash fixtures that remain `xfail` — they are the same fault without the
+signal, and they document what the service can and cannot do on its own.
+
+**Not re-run:** the Phase 6 and Phase 8 evaluation numbers were measured on the older 10 fixtures
+and are left as recorded. Re-running them fairly needs the testbed under real traffic (issue #6),
+which is the Week 8–9 evaluation, not this change.
 
 ---
 

@@ -217,9 +217,25 @@ def _evidence_id(incident: AnomalyEvent, category: str, source_id: str) -> str:
     return f"ev:{incident.anomaly_id}:{category}:{source_id}"
 
 
+def observed_values(anomaly: AnomalyEvent, limit: int = 3) -> list[str]:
+    """The measured value and baseline behind the anomaly, worst signal first. Empty for an event
+    published before M2 added `contributors`."""
+    ranked = sorted(anomaly.contributors, key=lambda c: -(c.score if c.score is not None else 0.0))
+    lines = []
+    for contributor in ranked[:limit]:
+        if contributor.value is None:
+            continue
+        baseline = "" if contributor.baseline is None else f" (baseline {contributor.baseline:.4g})"
+        lines.append(f"{contributor.service} {contributor.metric} {contributor.value:.4g}{baseline}")
+    return lines
+
+
 def _anomaly_evidence(incident: AnomalyEvent, anomaly: AnomalyEvent) -> Evidence:
     offset = (anomaly.t_onset - incident.t_onset).total_seconds()
     what = f"{', '.join(anomaly.metrics)} anomalous on {', '.join(anomaly.services)} ({anomaly.severity})"
+    observed = observed_values(anomaly)
+    if observed:
+        what += ": " + "; ".join(observed)
     summary = what if anomaly is incident else f"{what}, onset {offset:+.1f}s from {incident.anomaly_id}"
     return Evidence(
         evidence_id=_evidence_id(incident, "anomaly", anomaly.anomaly_id),
@@ -236,6 +252,8 @@ def _anomaly_evidence(incident: AnomalyEvent, anomaly: AnomalyEvent) -> Evidence
             "severity": anomaly.severity,
             "t_onset": anomaly.t_onset.isoformat(),
             "onset_offset_seconds": offset,
+            "detector": anomaly.detector,
+            "contributors": [c.model_dump(mode="json") for c in anomaly.contributors],
         },
     )
 

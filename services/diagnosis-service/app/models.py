@@ -21,12 +21,31 @@ _ACTION_RE = re.compile(
 
 NonBlankId = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
+# M2's staleness detector reports this metric when a service stops publishing metrics at all,
+# which is what a crashed or unreachable service looks like from outside.
+LIVENESS_METRIC = "liveness"
+
 
 class EvidenceWindow(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     start: datetime
     end: datetime
+
+
+class Contributor(BaseModel):
+    """One (service, metric) signal behind a grouped anomaly (CONTRACTS.md). M2 owns the shape, and
+    every field but the first two is optional, so an older event still parses."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    service: str
+    metric: str
+    value: float | None = None
+    baseline: float | None = None
+    score: float | None = None
+    severity: str | None = None
+    observed_at: datetime | None = None
 
 
 class AnomalyEvent(BaseModel):
@@ -38,10 +57,16 @@ class AnomalyEvent(BaseModel):
     anomaly_id: NonBlankId
     services: list[str] = Field(min_length=1)
     metrics: list[str] = Field(min_length=1)
-    severity: str  # enum not yet agreed with M2; the detector currently emits high/medium
+    severity: str  # low | medium | high (CONTRACTS.md, resolved by M2)
     t_detected: datetime
     t_onset: datetime
     evidence_window: EvidenceWindow
+    # Additive fields M2 added after the contract froze. Events recorded before then lack them,
+    # so each has a default and nothing here may be assumed present.
+    detector: str | None = None  # ewma | zscore | cusum | static | staleness
+    in_deploy_window: bool | None = None
+    related_deploy_ids: list[str] = []
+    contributors: list[Contributor] = []
 
 
 class AnalyzeRequest(BaseModel):

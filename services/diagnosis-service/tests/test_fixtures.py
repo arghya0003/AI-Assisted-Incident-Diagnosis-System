@@ -10,10 +10,11 @@ from app.graph import load_graph
 
 FIXTURES = load_fixtures()
 GRAPH = load_graph()
-# Metrics metrics-bridge publishes (services/metrics-bridge/main.py, METRIC_QUERIES).
+# Metrics metrics-bridge publishes (services/metrics-bridge/main.py, METRIC_QUERIES), plus
+# "liveness", which M2's staleness detector reports when a service publishes nothing at all.
 METRIC_NAMES = {
     "request_rate", "error_rate", "latency_p50_ms", "latency_p95_ms", "latency_p99_ms",
-    "cpu_rate", "memory_bytes",
+    "cpu_rate", "memory_bytes", "liveness",
 }
 # Services fault-injector accepts (services/fault-injector/main.py, KNOWN_SERVICES).
 INJECTABLE_SERVICES = {"front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"}
@@ -23,8 +24,8 @@ def _ids(fixtures):
     return [f.event.anomaly_id for f in fixtures]
 
 
-def test_eight_to_ten_fixtures():
-    assert 8 <= len(FIXTURES) <= 10
+def test_eight_to_twelve_fixtures():
+    assert 8 <= len(FIXTURES) <= 12
 
 
 def test_ids_are_unique_prefixed_and_match_filenames():
@@ -64,6 +65,20 @@ def test_m2_current_shape_matches_the_detector_today(fixture):
     assert event.evidence_window.start == event.evidence_window.end == event.t_onset
 
 
+@pytest.mark.parametrize(
+    "fixture", [f for f in FIXTURES if f.meta.shape == "m2_upgraded"],
+    ids=_ids(f for f in FIXTURES if f.meta.shape == "m2_upgraded"),
+)
+def test_m2_upgraded_shape_carries_the_fields_m2_added(fixture):
+    event = fixture.event
+    assert event.detector and event.in_deploy_window is not None
+    assert event.evidence_window.start < event.evidence_window.end, "the window is no longer zero-width"
+    assert event.contributors, "the detector now reports what it measured"
+    for contributor in event.contributors:
+        assert contributor.service in event.services and contributor.metric in event.metrics
+        assert contributor.value is not None and contributor.baseline is not None
+
+
 def test_raw_event_has_no_fixture_metadata():
     for fixture in FIXTURES:
         assert "_fixture" not in fixture.raw
@@ -73,7 +88,8 @@ def test_covers_the_scenarios_later_phases_need():
     fault_types = {f.meta.fault_type for f in FIXTURES}
     assert {"bad_deploy_latency", "service_crash", "db_pool_saturation"} <= fault_types
     assert None in fault_types, "needs a benign or ambiguous case"
-    assert {"m2_current", "contract"} <= {f.meta.shape for f in FIXTURES}
+    assert {"m2_current", "m2_upgraded", "contract"} <= {f.meta.shape for f in FIXTURES}
+    assert any("liveness" in f.event.metrics for f in FIXTURES), "needs the staleness detector's crash signal"
     assert any(len(f.event.services) >= 3 for f in FIXTURES), "needs a multi-service cascade"
     assert any(
         f.meta.ground_truth_service is not None

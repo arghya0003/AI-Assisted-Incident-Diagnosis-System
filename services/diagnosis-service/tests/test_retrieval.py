@@ -125,6 +125,8 @@ def test_suspected_fault_types():
     assert "service_crash" in suspected_fault_types(["error_rate"])
     assert suspected_fault_types(["memory_bytes"]) == {"capacity", "benign"}
     assert suspected_fault_types(["queue_depth"]) == set()
+    # A service that stopped reporting metrics at all: crashed, or cut off from what it needs.
+    assert suspected_fault_types(["liveness"]) == {"service_crash", "dependency_failure"}
 
 
 def test_candidate_services_match_scoring():

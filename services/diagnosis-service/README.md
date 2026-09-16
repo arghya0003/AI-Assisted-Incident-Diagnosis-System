@@ -306,7 +306,7 @@ with its scenario context (deploys and related anomalies) plus live retrieval.
 - **Reliability is solved; accuracy and truthfulness are not.** The schema, validation and
   fallback make `/analyze` always valid.
 - **Ranking follows the scorer.** The crash fixtures (`anom-fx-04/05/06`) stay wrong, as Phase 4
-  predicted.
+  predicted. M2's staleness detector has since made this case solvable; see "M2 detector upgrade".
 - **Explanations can invent facts.** On live `/analyze` calls for fixtures, whose deploys are not
   stored, phi4-mini wrote causes such as "catalogue's recent deployment lowered its CPU limit"
   (`anom-fx-01`) and "carts release enabled debug logging" (`anom-fx-10`). Both were copied from
@@ -403,3 +403,27 @@ LEFT JOIN hypotheses h ON h.analysis_id = a.analysis_id AND h.rank = 1
 WHERE a.anomaly_id LIKE 'anom-fx-%'
 ORDER BY a.anomaly_id, a.pipeline_mode;
 ```
+
+## M2 detector upgrade — 2026-09-16
+
+M2's detector now publishes more than it did when Phases 2–8 were measured. Every new field is
+optional, so an event recorded earlier still parses and still works.
+
+| New field | What the service does with it |
+| --- | --- |
+| `detector` (`ewma`, `zscore`, `cusum`, `static`, `staleness`) | Shown in the prompt and stored on the anomaly evidence, so a reader can tell a threshold trip from a statistical one. |
+| `contributors` (per service and metric: `value`, `baseline`, `score`) | The prompt's "observed and baseline values" line, which used to read "not provided by the anomaly detector", and the anomaly evidence summary. |
+| `evidence_window` (a real window, no longer zero-width) | Printed in the prompt. |
+| `related_deploy_ids`, `in_deploy_window` | Printed in the prompt when set, so the model sees which deploys the detector itself implicated. |
+| `liveness` metric, from the staleness detector | Treated as a crash signal in retrieval: it pre-filters to `service_crash` and `dependency_failure` incidents, and the prompt explains that the service stopped reporting metrics altogether. |
+
+**This fixes the Phase 4 crash limitation, and M2 fixed it, not M3.** A crashed service used to be
+invisible: it stops reporting, so it was never in the anomaly and never scored. The staleness
+detector names it directly, which makes it anomalous and the deepest anomalous service, and the
+existing weights then rank it first. Fixture `anom-fx-11` — copied from a real event the detector
+produced after a `service_crash` injection on payment — ranks the crashed service first with no
+change to scoring. The three older crash fixtures (`anom-fx-04/05/06`) are the same fault seen
+without that signal, and stay wrong.
+
+The evaluation numbers above predate this and were measured on the older 10 fixtures; they are not
+re-run here, because a fair re-run needs the testbed under real traffic (issue #6).
