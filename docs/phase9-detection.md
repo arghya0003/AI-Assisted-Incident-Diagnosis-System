@@ -203,8 +203,19 @@ once it has scrolled past — yet M3's `POST /analyze {anomaly_id}` is exactly t
 lookup. `store.py` therefore writes every emitted event to TimescaleDB's `anomalies`
 table (`timescaledb/init/005_anomalies.sql`) under the same `anomaly_id`.
 
-The table came from a parallel M2 implementation (8 Sep) that was otherwise
-superseded by this one; its schema already fit these events, so it was kept as-is.
+The table came from a parallel M2 implementation (8 Sep) that was otherwise superseded
+by this one. M3 had independently built a table of the same name for the same purpose,
+and the two disagreed on four points; the merged shape takes the better half of each:
+
+| Point | Kept from | Why |
+| --- | --- | --- |
+| `raw` holds the event verbatim | M3 | Storing only the fields without columns meant rebuilding an event needed both the columns and the JSON, and would silently drop any field added later |
+| `detector` column | M2 | M3's design dropped it, and an ablation needs to know which algorithm produced a row |
+| `source` (`kafka` / `fixture`) | M3 | Evaluation has to exclude hand-written fixtures |
+| Indexed on both `t_detected` and `(source, t_onset)` | both | M2 queries by detection time; M3 looks for anomalies that began near one another, never mixing fixtures with real events |
+
+`007_anomalies_upgrade.sql` migrates an existing volume; it is idempotent and a no-op
+on a database created after this change.
 
 Two properties are deliberate:
 

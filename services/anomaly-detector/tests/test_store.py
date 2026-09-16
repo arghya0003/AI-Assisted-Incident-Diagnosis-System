@@ -67,14 +67,26 @@ def test_event_fields_map_onto_the_table_columns():
     assert (row[7], row[8]) == (event["evidence_window"]["start"], event["evidence_window"]["end"])
 
 
-def test_everything_without_a_column_is_kept_in_detail():
-    """M3 needs the per-metric contributors and the implicated deploys."""
-    detail = json.loads(to_row(a_real_event())[9])
+def test_the_whole_event_is_kept_verbatim_in_raw():
+    """A consumer must be able to rebuild exactly what was published.
 
-    assert detail["in_deploy_window"] is True
-    assert detail["related_deploy_ids"] == ["dep-2026-09-14-0365"]
-    assert detail["contributors"][0]["value"] == 362.5
-    assert "anomaly_id" not in detail
+    Storing only the fields without their own column would drop anything M2
+    adds to the event later, silently.
+    """
+    event = a_real_event()
+
+    raw = json.loads(to_row(event)[9])
+
+    assert raw == event
+    assert raw["in_deploy_window"] is True
+    assert raw["related_deploy_ids"] == ["dep-2026-09-14-0365"]
+    assert raw["contributors"][0]["value"] == 362.5
+
+
+def test_events_off_the_wire_are_marked_as_such():
+    """`source` keeps M3's hand-written fixtures out of evaluation."""
+    assert to_row(a_real_event())[10] == "kafka"
+    assert to_row(a_real_event(), source="fixture")[10] == "fixture"
 
 
 def test_save_writes_one_row():
