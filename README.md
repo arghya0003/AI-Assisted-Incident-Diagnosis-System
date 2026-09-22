@@ -124,7 +124,12 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
 | 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
 | 5002 | `load-generator` — `/stats` (what load is actually being offered) |
-| 8081 | kafka-ui · 8082 adminer · 9090 Prometheus · 29092 Kafka (host-side) |
+| 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
+| 9090 | Prometheus · 29092 Kafka (host-side) |
+
+`kafka-ui` and `adminer` are debugging UIs that nothing else depends on, so they sit
+behind a Compose profile and stay off by default (~300 MiB between them). Bring them up
+with `docker compose --profile debug up -d`.
 
 ## Fixes on top of the phase work
 
@@ -151,6 +156,16 @@ Issues raised by M3 against this slice, now addressed:
   deploy inside the lookback window. Default raised to 900s, `0` disables it, and the rate
   is reported by `GET /healthz` so an evaluation run records what it ran under. **Verified
   live:** deploys now land 900 s apart. See `docs/phase5-deploy-emitter.md`.
+- **[#12] `queue-master` ran unbounded and the debug UIs started by default** — the only
+  one of the four Spring Boot services without a `JAVA_OPTS` heap cap, it sized its heap
+  from the whole WSL VM and sat at ~600 MiB, about twice its siblings. Given the same cap
+  they use. `kafka-ui` and `adminer` are debugging tools nothing depends on, so they moved
+  behind the `debug` Compose profile (`docker compose --profile debug up -d`) rather than
+  costing ~300 MiB on every start — headroom that matters because the evaluation host also
+  runs Ollama. **Verified live:** `queue-master` went 635 → 282 MiB, in line with carts
+  (260) and shipping (284), and reattached to `shipping-task` with no backlog; the stack is
+  now 3.0 GiB across 23 containers. `kafka`'s heap is left alone deliberately — it is
+  load-bearing and wants measuring under load first.
 
 Also found while verifying, and **not** fixed here — each needs its owner's call:
 
