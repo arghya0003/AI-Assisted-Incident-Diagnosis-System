@@ -103,12 +103,9 @@ frontend never needs CORS handling. The incident detail view shows the anomaly e
 radius and cited evidence ids, and the Approve/Reject/Request-more-info panel; a terminal
 incident shows who decided it, when, and whether the stubbed executor logged intent.
 
-## Verification performed in this environment
+## Verification
 
-TimescaleDB/Kafka/Ollama are not running in the sandbox this slice was built in (no
-container runtime available here), so the full `docker compose up` -> live end-to-end
-demo described in PLAN.md's Definition of Done has not been exercised yet. What was
-verified directly:
+### Offline
 
 - **Backend:** 44 tests (`services/orchestrator/tests`, `pytest`) against an in-memory fake
   store and a fake diagnosis client covering the full state machine (idempotent anomaly
@@ -118,9 +115,29 @@ verified directly:
   pattern diagnosis-service's own test suite uses.
 - **Frontend:** `npm run build` (TypeScript project build + Vite production bundle) and
   `npm run lint` (oxlint) both clean.
-- **docker-compose.yml:** parses as valid YAML; service wiring (`depends_on`, network,
-  environment) follows the same conventions as diagnosis-service's entry.
 
-Running the real stack (`docker compose up -d --build`, then injecting a fault and walking an
-incident through the UI end to end) is the next verification step, on a machine with Docker
-and Ollama available.
+### Against the live stack
+
+`docker compose up -d --build`, 23 containers, then PLAN.md's Definition of Done scenario:
+
+| Step | Result |
+| --- | --- |
+| `bad_deploy_latency` injected against `catalogue` | M2 detected it ~10 s later (target: under 60 s) |
+| Orchestrator consumed `anomalies.detected` | Incident opened, `DETECTED -> ANALYZING` |
+| M3 `POST /analyze` | Rank-1 named the real deploy `dep-2026-09-22-0001` at 0.843 confidence, action `rollback_deploy:dep-2026-09-22-0001` — the injected fault's ground truth |
+| `AWAITING_APPROVAL` -> approve | `execution_logged=true`; `catalogue`'s container start time unchanged, so the stubbed executor never acted |
+| Second incident (`service_crash` on `user`) -> reject | Row written to `rejection_feedback` with its category |
+| WebSocket feed | `incident_awaiting_approval` pushed to a connected client in real time |
+| Direct SQL `UPDATE`/`DELETE` on `audit_log` | Both refused by the trigger; `GET /audit/verify` reported the chain intact |
+| `orchestrator-ui` via nginx | Served, and its `/api/*` proxy to the orchestrator worked |
+
+Ollama was not available on that machine, so `/analyze` answered
+`deterministic_fallback` — which means the LLM-unavailable path is now covered end to end,
+while the `answered_by=llm` path remains covered only by M3's own tests.
+
+**What the live run caught that the tests could not.** M4's table was originally named
+`incidents`, colliding with M3's RAG-corpus table of the same name: `CREATE TABLE IF NOT
+EXISTS` silently no-opped, the next index failed on a column M3's table lacks, `audit_log`
+and `rejection_feedback` were never created, and the orchestrator came up reporting
+`database: schema_missing`. Every unit test passed throughout, because they run against an
+in-memory fake store and never touch the real schema. Hence `orchestrator_incidents`.

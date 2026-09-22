@@ -8,7 +8,7 @@ every slice produces and consumes.
 | Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
 | Anomaly detection & evaluation | M2 | Detector and harness built and run against the live testbed |
 | Retrieval-augmented reasoning | M3 | Full pipeline built (`services/diagnosis-service/`) |
-| Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built; not yet run against the live stack |
+| Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
 
 ---
 
@@ -327,10 +327,32 @@ FastAPI routes end to end via `TestClient` with an in-memory fake store — the 
 The frontend (`services/orchestrator-ui/`) builds clean: `npm run build` (TypeScript +
 Vite) and `npm run lint` (oxlint) both pass.
 
+### Verified against the live stack
+`docker compose up -d --build` (23 containers), then one full scenario end to end:
+
+- `bad_deploy_latency` injected against `catalogue`; M2's EWMA detector fired ~10 s later
+  (target: under 60 s) and published to `anomalies.detected`.
+- The orchestrator opened an incident, called M3, and reached `AWAITING_APPROVAL`. The
+  rank-1 hypothesis named catalogue's real deploy `dep-2026-09-22-0001` at 0.843 confidence
+  with resolvable evidence ids, proposing `rollback_deploy:dep-2026-09-22-0001` — the actual
+  ground truth of the injected fault.
+- `answered_by=deterministic_fallback` (no Ollama on that machine), so the LLM-unavailable
+  path is covered, not just the happy path.
+- Approved via the API: `execution_logged=true`, and the `catalogue` container's start time
+  was unchanged afterwards — the stubbed executor never touched it.
+- A second incident (`service_crash` on `user`, caught by M2's staleness detector) was
+  rejected; the row landed in `rejection_feedback` with its category.
+- The WebSocket feed pushed `incident_awaiting_approval` to a connected client in real time.
+- Audit immutability holds at the database level, not just in the app: direct SQL `UPDATE`
+  and `DELETE` against `audit_log` were both refused by the trigger, and `GET /audit/verify`
+  reported the hash chain intact throughout.
+
+This run is also what surfaced the `incidents` table-name collision with M3
+(`orchestrator_incidents` now), which no amount of unit testing would have caught.
+
 ### Not done yet
-- Not yet run against the live stack (no container runtime in the environment this slice was
-  built in) — `docker compose up -d --build`, then walking an incident end to end through the
-  UI, is the next verification step on a machine with Docker and Ollama.
+- Ollama was not available on the verification machine, so the LLM path itself
+  (`answered_by=llm`) has only been exercised through M3's own test suite, not end to end.
 - Integration/CI workflow (GitHub Actions) not added yet — PLAN.md lists this under M4 too.
 - Executing an approved action is deliberately out of scope (PLAN.md's risk register: "the
   executor is architecturally stubbed by design ... listed as future work, not a stretch
