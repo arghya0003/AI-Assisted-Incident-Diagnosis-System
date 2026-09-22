@@ -10,7 +10,13 @@
 -- One row per anomaly the orchestrator opened an incident for. `anomaly` and `hypotheses`
 -- keep a full snapshot of what M2 and M3 said at the time, so an incident's record does not
 -- silently change meaning if either upstream table is later pruned or overwritten.
-CREATE TABLE IF NOT EXISTS incidents (
+--
+-- Named `orchestrator_incidents`, not `incidents`: M3's diagnosis-service already owns a
+-- table called `incidents` (005_diagnosis.sql) for its past-postmortem RAG corpus -- an
+-- unrelated concept that happened to get the obvious name first. `CREATE TABLE IF NOT
+-- EXISTS incidents` against that table would silently no-op and this file would then fail
+-- on the first index below, since M3's `incidents` has no `state` column.
+CREATE TABLE IF NOT EXISTS orchestrator_incidents (
     incident_id              TEXT PRIMARY KEY,
     anomaly_id               TEXT NOT NULL,
     state                    TEXT NOT NULL CHECK (state IN (
@@ -42,9 +48,9 @@ CREATE TABLE IF NOT EXISTS incidents (
     expires_at                TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS incidents_state_idx ON incidents (state, created_at DESC);
-CREATE INDEX IF NOT EXISTS incidents_anomaly_idx ON incidents (anomaly_id);
-CREATE INDEX IF NOT EXISTS incidents_expires_idx ON incidents (state, expires_at)
+CREATE INDEX IF NOT EXISTS orchestrator_incidents_state_idx ON orchestrator_incidents (state, created_at DESC);
+CREATE INDEX IF NOT EXISTS orchestrator_incidents_anomaly_idx ON orchestrator_incidents (anomaly_id);
+CREATE INDEX IF NOT EXISTS orchestrator_incidents_expires_idx ON orchestrator_incidents (state, expires_at)
     WHERE state = 'AWAITING_APPROVAL';
 
 -- ---------------------------------------------------------------------------------------
