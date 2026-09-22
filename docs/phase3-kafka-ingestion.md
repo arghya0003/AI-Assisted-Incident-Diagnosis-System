@@ -92,6 +92,14 @@ Real values, not placeholders — `metrics-bridge` logs confirm ~29 samples publ
 watching consumer groups — nicer than shelling into the broker for
 `kafka-console-consumer.sh` every time.
 
+It is in the `debug` Compose profile, so a plain `docker compose up -d` does not start it
+(it is a JVM app and costs ~300 MiB that the evaluation host would rather give to Ollama).
+Start it when you want it:
+
+```bash
+docker compose --profile debug up -d kafka-ui
+```
+
 ## Known gap: logs.raw has no producer yet
 The topic exists (schema frozen in `CONTRACTS.md`) but nothing publishes to it yet — no
 log-shipping strategy has been picked (options: tail each container's Docker log driver,
