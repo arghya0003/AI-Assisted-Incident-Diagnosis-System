@@ -1,5 +1,12 @@
 """TimescaleDB access for the orchestrator's own tables (timescaledb/init/008_incidents.sql):
-`incidents`, the immutable `audit_log`, and `rejection_feedback`.
+`orchestrator_incidents`, the immutable `audit_log`, and `rejection_feedback`.
+
+The table is named `orchestrator_incidents`, not `incidents`: M3's diagnosis-service already
+owns a table called `incidents` (005_diagnosis.sql) for its past-postmortem RAG corpus, an
+unrelated concept that happened to get the same obvious name first. `CREATE TABLE IF NOT
+EXISTS incidents` against that table would silently no-op and then fail on the first index
+referencing a column M3's table doesn't have -- found by actually running this against the
+live stack, not assumed away.
 
 Every state transition and every audit entry that describes it are written in the same
 transaction, so the audit trail can never show a decision the incidents table does not also
@@ -24,7 +31,7 @@ from app.settings import Settings
 
 log = logging.getLogger("orchestrator.db")
 
-M4_TABLES = ("incidents", "audit_log", "rejection_feedback")
+M4_TABLES = ("orchestrator_incidents", "audit_log", "rejection_feedback")
 MIGRATION = "timescaledb/init/008_incidents.sql"
 
 DbStatus = Literal["ok", "unreachable", "schema_missing"]
@@ -124,7 +131,7 @@ def verify_chain(cur) -> tuple[bool, int | None]:
 
 
 def get_incident(cur, incident_id: str) -> Incident | None:
-    cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM incidents WHERE incident_id = %s", (incident_id,))
+    cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM orchestrator_incidents WHERE incident_id = %s", (incident_id,))
     row = cur.fetchone()
     if row is None:
         return None
@@ -134,7 +141,7 @@ def get_incident(cur, incident_id: str) -> Incident | None:
 def get_incident_by_anomaly(cur, anomaly_id: str) -> Incident | None:
     """Idempotency guard: a re-delivered anomalies.detected message (consumer restart before
     a commit) must not open a second incident for the same anomaly_id."""
-    cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM incidents WHERE anomaly_id = %s", (anomaly_id,))
+    cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM orchestrator_incidents WHERE anomaly_id = %s", (anomaly_id,))
     row = cur.fetchone()
     if row is None:
         return None
@@ -144,11 +151,11 @@ def get_incident_by_anomaly(cur, anomaly_id: str) -> Incident | None:
 def list_incidents(cur, state: str | None, limit: int) -> list[Incident]:
     if state is not None:
         cur.execute(
-            f"SELECT {_INCIDENT_COLUMNS} FROM incidents WHERE state = %s ORDER BY created_at DESC LIMIT %s",
+            f"SELECT {_INCIDENT_COLUMNS} FROM orchestrator_incidents WHERE state = %s ORDER BY created_at DESC LIMIT %s",
             (state, limit),
         )
     else:
-        cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM incidents ORDER BY created_at DESC LIMIT %s", (limit,))
+        cur.execute(f"SELECT {_INCIDENT_COLUMNS} FROM orchestrator_incidents ORDER BY created_at DESC LIMIT %s", (limit,))
     columns = [c.name for c in cur.description]
     return [_row_to_incident(row, columns) for row in cur.fetchall()]
 
@@ -156,7 +163,7 @@ def list_incidents(cur, state: str | None, limit: int) -> list[Incident]:
 def create_detected(cur, incident_id: str, anomaly_id: str, services: list[str], severity: str, anomaly: dict) -> Incident:
     cur.execute(
         """
-        INSERT INTO incidents (incident_id, anomaly_id, state, services, severity, anomaly)
+        INSERT INTO orchestrator_incidents (incident_id, anomaly_id, state, services, severity, anomaly)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (incident_id) DO NOTHING
         """,
@@ -171,7 +178,7 @@ def create_detected(cur, incident_id: str, anomaly_id: str, services: list[str],
 
 def mark_analyzing(cur, incident_id: str) -> None:
     cur.execute(
-        "UPDATE incidents SET state = 'ANALYZING', analysis_attempts = analysis_attempts + 1, updated_at = now() "
+        "UPDATE orchestrator_incidents SET state = 'ANALYZING', analysis_attempts = analysis_attempts + 1, updated_at = now() "
         "WHERE incident_id = %s AND state IN ('DETECTED', 'ANALYSIS_FAILED')",
         (incident_id,),
     )
@@ -185,7 +192,7 @@ def save_analysis_result(
 ) -> None:
     cur.execute(
         """
-        UPDATE incidents
+        UPDATE orchestrator_incidents
         SET state = 'AWAITING_APPROVAL', analysis_id = %s, model_version = %s, answered_by = %s,
             hypotheses = %s, awaiting_since = now(), expires_at = now() + make_interval(secs => %s),
             fail_reason = NULL, updated_at = now()
@@ -202,7 +209,7 @@ def save_analysis_result(
 
 def mark_analysis_failed(cur, incident_id: str, reason: str) -> None:
     cur.execute(
-        "UPDATE incidents SET state = 'ANALYSIS_FAILED', fail_reason = %s, updated_at = now() "
+        "UPDATE orchestrator_incidents SET state = 'ANALYSIS_FAILED', fail_reason = %s, updated_at = now() "
         "WHERE incident_id = %s AND state = 'ANALYZING'",
         (reason, incident_id),
     )
@@ -217,7 +224,7 @@ def decide(
     (or no longer) awaiting approval -- the caller turns that into 404/409."""
     cur.execute(
         """
-        UPDATE incidents
+        UPDATE orchestrator_incidents
         SET state = %s, decision = %s, decided_hypothesis_rank = %s, decided_by = %s,
             decided_at = now(), decision_reason = %s, updated_at = now()
         WHERE incident_id = %s AND state = 'AWAITING_APPROVAL'
@@ -234,7 +241,7 @@ def decide(
 
 def log_request_info(cur, incident_id: str, actor: str, note: str, extend_seconds: float) -> Incident | None:
     cur.execute(
-        "UPDATE incidents SET expires_at = now() + make_interval(secs => %s), updated_at = now() "
+        "UPDATE orchestrator_incidents SET expires_at = now() + make_interval(secs => %s), updated_at = now() "
         "WHERE incident_id = %s AND state = 'AWAITING_APPROVAL'",
         (extend_seconds, incident_id),
     )
@@ -245,12 +252,12 @@ def log_request_info(cur, incident_id: str, actor: str, note: str, extend_second
 
 
 def mark_execution_logged(cur, incident_id: str) -> None:
-    cur.execute("UPDATE incidents SET execution_logged = true, updated_at = now() WHERE incident_id = %s", (incident_id,))
+    cur.execute("UPDATE orchestrator_incidents SET execution_logged = true, updated_at = now() WHERE incident_id = %s", (incident_id,))
 
 
 def expire_stale(cur) -> list[str]:
     cur.execute(
-        "UPDATE incidents SET state = 'EXPIRED', updated_at = now() "
+        "UPDATE orchestrator_incidents SET state = 'EXPIRED', updated_at = now() "
         "WHERE state = 'AWAITING_APPROVAL' AND expires_at IS NOT NULL AND expires_at < now() "
         "RETURNING incident_id"
     )
