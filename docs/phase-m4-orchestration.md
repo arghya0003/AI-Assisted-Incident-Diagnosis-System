@@ -103,14 +103,47 @@ frontend never needs CORS handling. The incident detail view shows the anomaly e
 radius and cited evidence ids, and the Approve/Reject/Request-more-info panel; a terminal
 incident shows who decided it, when, and whether the stubbed executor logged intent.
 
+## Inspectable evidence
+
+PLAN.md requires more than *showing* evidence ids: "an engineer should be able to click a
+hypothesis and see the deploy diff and the similar past incident that justified it". Every
+cited id in the UI is therefore a button, and `GET /evidence/{evidence_id}` resolves it to
+the record behind it — the deploy with its `config_diff`, the anomaly event, or M3's past
+postmortem — which the detail panel renders inline.
+
+M3 cites evidence in several shapes and all of them have to resolve:
+
+| Shape | Example | Resolves to |
+| --- | --- | --- |
+| bare anomaly id | `anom-20260922T121220-eda98b-0001` | the `anomalies` row |
+| bare deploy id (deterministic ranking) | `dep-2026-09-22-0035` | the `deploys` row, **including `config_diff`** |
+| bare corpus id | `incident-0001` | M3's `incidents` postmortem |
+| `ev:<anomaly>:deployment:<id>` | structured | as above, by category |
+| `ev:<anomaly>:metrics:<service>:<metric>:<ts>` | structured | described without a database read |
+| `ev:<anomaly>:dependency:a->b` | structured | the graph edge, no database read |
+
+Two details that are easy to get wrong, both covered by tests:
+
+- **The `metrics` source id contains colons of its own** (`catalogue:latency_p99_ms:` plus an
+  ISO timestamp, which has two more). Parsing bounds the split at 3, so everything after the
+  third colon stays with the source id instead of the timestamp being truncated.
+- **A cross-member table that is missing must not break approvals.** The resolver checks
+  `to_regclass` before reading `deploys`/`anomalies`/`incidents` and degrades to
+  `kind: "unknown"`. An approver losing one evidence card is much better than the approval
+  screen failing because a teammate's migration has not been applied.
+
+An id that resolves to nothing returns `kind: "unknown"` rather than 404 — M3's guardrail
+already guarantees every cited id existed when the analysis ran, so a miss means the record
+has aged out of retention, and the panel says so rather than showing an error.
+
 ## Verification
 
 ### Offline
 
-- **Backend:** 44 tests (`services/orchestrator/tests`, `pytest`) against an in-memory fake
+- **Backend:** 53 tests (`services/orchestrator/tests`, `pytest`) against an in-memory fake
   store and a fake diagnosis client covering the full state machine (idempotent anomaly
   intake, analysis success/failure/retry, approve/reject/request-info/expiry, the action
-  vocabulary, the hash-chain, and the executor's lack of outbound capability), plus the FastAPI
+  vocabulary, the hash-chain, evidence resolution, and the executor's lack of outbound capability), plus the FastAPI
   routes via `TestClient` with dependency overrides — no live Postgres/Kafka needed, same
   pattern diagnosis-service's own test suite uses.
 - **Frontend:** `npm run build` (TypeScript project build + Vite production bundle) and
