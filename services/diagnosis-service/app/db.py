@@ -180,6 +180,17 @@ def count_incidents(cur) -> int:
     return cur.fetchone()[0]
 
 
+def seed_incidents(cur, records: list[IncidentRecord], vectors: list[list[float]]) -> int:
+    """Load the corpus into an empty table, in one transaction. Deliberately does nothing when a
+    row already exists: ingestion (corpus/ingest.py) is the way to update a populated corpus, and
+    a seed that overwrote one could undo a deliberate re-ingest."""
+    if count_incidents(cur):
+        return 0
+    for record, vector in zip(records, vectors):
+        upsert_incident(cur, record, vector)
+    return len(records)
+
+
 # Hybrid keeps an incident if it names a candidate service OR its fault type fits the metrics.
 # A NULL services array or fault type simply fails its half of the filter.
 _SEARCH_INCIDENTS = """
@@ -406,6 +417,9 @@ class PostgresAnomalyStore:
 
     def incident_count(self) -> int:
         return self._query(count_incidents)
+
+    def seed_incidents(self, records: list[IncidentRecord], vectors: list[list[float]]) -> int:
+        return self._query(seed_incidents, records, vectors)
 
     def search_incidents(
         self, vector: list[float], services: list[str], fault_types: list[str], top_k: int, hybrid: bool

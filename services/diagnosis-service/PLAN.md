@@ -1038,10 +1038,17 @@ clears a symptom. `scale_service` stays unreachable and is documented as a delib
 rather than an oversight: no signal here measures load. `anom-fx-11` now proposes
 `restart_service:payment`.
 
-**An empty corpus is now visible (2026-09-22, issue #19, partial).** `GET /health` reports
-`corpus_incidents` and a `retrieval` status, because a fresh volume silently runs a
-retrieval-free system otherwise: ingestion still needs `--ingest` and Ollama, which is the
-remaining half of that issue.
+**The corpus loads itself (2026-09-22, issue #19).** A fresh TimescaleDB volume used to leave
+`incidents` empty until someone ran `--ingest` with Ollama, and nothing said so: retrieval returned
+nothing, incident similarity scored 0 for every candidate, and an evaluation could silently measure
+a system with the retrieval-augmented half switched off. The 61 embeddings are now committed
+(`corpus/embeddings.jsonl`, 485 KB) and the service seeds an empty table from them at startup with
+no embedding model called, so `docker compose up` satisfies the clean-checkout criterion. `GET
+/health` reports `corpus_incidents` and a `retrieval` status either way. Verified by truncating
+`incidents`, stopping Ollama, and restarting the service: 61 rows seeded, and with Ollama back the
+retrieved top 3 for `anom-fx-07` reproduced the Phase 5 similarities exactly (0.771, 0.752, 0.748),
+so rounding the stored vectors to six decimals costs nothing. Retrieval at request time still needs
+Ollama to embed the query - that is inherent, and now visible rather than silent.
 
 **Verified live on 2026-09-16, on a real fault with real traffic.** With M1's `load-generator`
 holding 5 rps, a `service_crash` injection on payment was detected by M2's staleness detector 31 s
