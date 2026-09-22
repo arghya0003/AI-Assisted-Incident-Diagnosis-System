@@ -1,0 +1,28 @@
+{
+  "_fixture": {
+    "description": "Bad deploy to catalogue raises its p95 latency",
+    "shape": "m2_current",
+    "fault_type": "bad_deploy_latency",
+    "ground_truth_service": "catalogue",
+    "tags": ["deploy-caused", "m2-duplicate"],
+    "notes": "The fault injector records a catalogue deploy immediately before throttling its CPU, so that deploy precedes onset by seconds. An older catalogue deploy is also in the window; the most recent one must be the one cited. M2 emits a second anomaly for the same slowdown on p99 (issue #4).",
+    "context": {
+      "deploys": [
+        { "deploy_id": "dep-fx-01-inj", "service": "catalogue", "version": "1.0.14", "commit_sha": "7c41e0a", "config_diff": "perf regression: inefficient loop introduced", "time": "2026-09-14T09:59:58.100Z" },
+        { "deploy_id": "dep-fx-01-bg1", "service": "orders", "version": "1.0.17", "commit_sha": "b82d4f1", "config_diff": "adjust upstream timeout config for orders", "time": "2026-09-14T09:57:24.160Z" },
+        { "deploy_id": "dep-fx-01-bg2", "service": "front-end", "version": "1.0.20", "commit_sha": "e19a3c7", "config_diff": "roll out feature flag for front-end", "time": "2026-09-14T09:55:24.161Z" },
+        { "deploy_id": "dep-fx-01-bg3", "service": "catalogue", "version": "1.0.13", "commit_sha": "9315a21", "config_diff": "adjust log level for catalogue", "time": "2026-09-14T09:41:24.162Z" }
+      ],
+      "related_anomalies": [
+        { "anomaly_id": "anom-fx-01-p99", "services": ["catalogue"], "metrics": ["latency_p99_ms"], "severity": "high", "t_detected": "2026-09-14T10:00:12.355Z", "t_onset": "2026-09-14T10:00:12.342Z", "evidence_window": { "start": "2026-09-14T10:00:12.342Z", "end": "2026-09-14T10:00:12.342Z" } }
+      ]
+    }
+  },
+  "anomaly_id": "anom-fx-01",
+  "services": ["catalogue"],
+  "metrics": ["latency_p95_ms"],
+  "severity": "high",
+  "t_detected": "2026-09-14T10:00:12.352Z",
+  "t_onset": "2026-09-14T10:00:12.340Z",
+  "evidence_window": { "start": "2026-09-14T10:00:12.340Z", "end": "2026-09-14T10:00:12.340Z" }
+}

@@ -6,9 +6,9 @@ every slice produces and consumes.
 | Slice | Owner | Status |
 | --- | --- | --- |
 | Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
-| Anomaly detection & evaluation | M2 | Detector and harness built; no testbed run yet |
-| Retrieval-augmented reasoning | M3 | Not started |
-| Orchestration, HITL UI & safety | M4 | Not started |
+| Anomaly detection & evaluation | M2 | Detector and harness built and run against the live testbed |
+| Retrieval-augmented reasoning | M3 | Phases 0-8 complete (`services/diagnosis-service/`); evaluated across four pipeline modes and verified live |
+| Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
 
 ---
 
@@ -124,6 +124,9 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
 | 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
 | 5002 | `load-generator` — `/stats` (what load is actually being offered) |
+| 8000 | `diagnosis-service` — `POST /analyze`, `/docs` |
+| 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
+| 3000 | `orchestrator-ui` — the HITL approval console |
 | 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
 | 9090 | Prometheus · 29092 Kafka (host-side) |
 
@@ -284,4 +287,218 @@ The shared diagnosis evidence model groups supporting facts into anomaly, metric
 deployment history, service dependencies, and similar past incidents. Its contract is
 documented in `CONTRACTS.md`, with the database schema in
 `timescaledb/init/004_evidence.sql`. See `docs/evidence-model.md` for the mapping to
-the current data sources and the planned M3 diagnosis service.
+the current data sources and `services/diagnosis-service/` (M3), which produces it.
+
+---
+
+# Member 3: Retrieval-Augmented Reasoning
+
+Turns one anomaly into ranked, evidence-cited root-cause hypotheses. Build plan and
+per-phase outcomes are in [services/diagnosis-service/PLAN.md](services/diagnosis-service/PLAN.md);
+full measurements in [services/diagnosis-service/README.md](services/diagnosis-service/README.md).
+
+One service, `services/diagnosis-service/` (Python/FastAPI, port 8000). `POST /analyze
+{anomaly_id}` reads M2's `anomalies` table, gathers context, ranks candidate services,
+asks phi4-mini to explain the ranking, validates the reply, and stores the run.
+`GET /candidates/{id}` shows the deterministic ranking behind any answer,
+`GET /hypotheses/{id}` lists stored runs, `GET /stats` the guardrail counters.
+
+Ollama runs on the **host**, not in a container, because it needs the GPU: `phi4-mini`
+for generation and `nomic-embed-text` for embeddings, reached through
+`host.docker.internal` (`OLLAMA_HOST=0.0.0.0` is required).
+
+## Phased plan
+
+### Phase 0 — Environment proof ✅
+Scripted checks of the stack, the database and the LLM before building on them. Found the
+first-load runner crash (HTTP 500, recovered on retry) that Phase 6's client handles.
+
+### Phase 1 — Skeleton service ✅
+Contract-validated `/analyze` stub. Every response is validated against the CONTRACTS.md
+models, so shape drift fails here rather than in M4's UI.
+
+### Phase 2 — Storage and fixtures ✅
+11 hand-written anomaly fixtures (`fixtures/anomalies/*.json`), each an M2-shaped event
+plus a `_fixture` block holding ground truth and the deploys and co-anomalies the scenario
+would have produced. They are the ground truth every later phase is tested against.
+
+### Phase 3 — Dependency graph ✅
+Sock Shop's call graph (14 nodes, 14 edges) from `config/dependency_graph.yaml`, with
+downstream/upstream traversal. No LLM.
+
+### Phase 4 — Candidate scoring ✅
+The deterministic ranker, and the baseline the LLM is measured against. Four signals,
+weighted: deploy proximity 0.40 (exponential decay from onset), graph proximity 0.25,
+co-anomaly 0.20 (is this the deepest anomalous service?), incident similarity 0.15.
+Every candidate carries the evidence ids behind its score.
+
+### Phase 5 — Retrieval (RAG) ✅
+61-incident corpus (`corpus/incidents/`), embedded with `nomic-embed-text` into pgvector.
+Hybrid by default: a structured pre-filter on candidate services and plausible fault types,
+then cosine similarity. Only the *symptoms* are embedded — embedding whole write-ups let a
+few generic ones match almost every query.
+
+### Phase 6 — LLM reasoning ✅
+phi4-mini with **JSON-schema constrained decoding**: each hypothesis is bound to one listed
+candidate, with only that candidate's citable evidence ids and permitted actions. Text
+instructions were not enough — with a flat action list the model proposed rolling back one
+service's deploy as the fix for another. Three validate-and-retry attempts, then the
+deterministic ranking as fallback, so `/analyze` never returns an invalid answer.
+
+### Phase 7 — Evidence guardrail ✅
+Pure set membership: any hypothesis citing an id that was not supplied to the model is
+dropped. Poisoned replies citing `ev-9999` or `dep-fake-001` never reach a response — a
+partly poisoned reply keeps only its clean hypothesis, a fully poisoned one returns the
+deterministic ranking.
+
+### Phase 8 — Persistence, modes and evaluation ✅
+Every run stored in `analyses`/`hypotheses` (`timescaledb/init/006_diagnosis_analyses.sql`),
+with a response cache keyed by anomaly, mode, model and a fingerprint of everything that
+shapes an answer. Four pipeline modes — `full`, `no_graph`, `llm_only`, `deterministic` —
+selectable per request, so the LLM's contribution can be measured rather than assumed.
+
+## Tests
+
+445 tests in Docker, 430 on the host without a database:
+
+```bash
+bash services/diagnosis-service/scripts/test_in_docker.sh   # + --ingest --fixtures --compare --eval
+```
+
+Covers scoring signal by signal, graph traversal, retrieval pre-filter and ranking, prompt
+construction and the context budget, reply validation and retry, the guardrail against
+poisoned replies, persistence and cache reuse, and every route via `TestClient`.
+
+## Results
+
+**The LLM does not rank better than the arithmetic.** 99 runs, 11 fixtures, 3 runs per mode
+(2026-09-16):
+
+| Mode | Rank-1 = true cause | Fell back to scorer | p50 latency |
+| --- | --- | --- | --- |
+| `deterministic` | **18/27** | — | **51 ms** |
+| `full` | **18/27** | 2/33 | 14.2 s |
+| `no_graph` | 17/27 | 9/33 | 16.6 s |
+
+Fixture by fixture, `full` and `deterministic` are right and wrong on the same cases: the
+LLM follows the scorer's ranking and writes the explanation. An earlier single-run pass
+suggested `no_graph` beat `full`; three runs showed that was noise. In a separate run,
+`llm_only` — the model given the same facts with no scoring, graph or retrieval — was worst
+(4/9) and proposed 7 rollbacks in 11 runs, including on benign and ambiguous cases where
+every scored mode chose `no_action`.
+
+**What the graph actually buys is reliability, not accuracy.** Removing it raised the
+fallback rate from 6% to 27% of runs: without graph positions the model invents deploys and
+fails validation.
+
+**Verified live end to end.** With M1's load generator holding 5 rps, a `service_crash`
+injected on payment was reported by M2's staleness detector 31 s later as a `liveness`
+anomaly; `/analyze` ranked payment first, answered by the LLM (3 attempts, 21.5 s, no
+guardrail rejections), with the cause "the payment service stopped reporting liveness
+metrics, indicating a possible crash or unreachability".
+
+**M2's `liveness` signal solved the crash case.** A crashed service used to be invisible to
+scoring — it stops reporting, so it was never anomalous and never ranked. The staleness
+detector names it directly, and the existing weights then rank it first, in all four modes.
+
+## Not done yet
+
+- **The corpus is empty on a fresh volume** (issue #19). Ingestion needs `--ingest` and
+  Ollama, so a clean `docker compose up` silently runs a retrieval-free system.
+- **Accuracy, MRR and evidence validity are not produced by the evaluation harness**
+  (issue #21) — measured here on fixtures, but the runner does not yet call `/analyze`.
+- **The ablation runs on fixtures, not real injected faults** (issue #22).
+- **`restart_service` and `scale_service` are never proposed** (issue #23): only
+  `no_action` and `rollback_deploy` are reachable today.
+- Causes are model-written text. They are constrained and checked for unsupported deploy
+  claims, but they are not a verified explanation of the fault.
+
+---
+
+# Member 4: Orchestration, HITL UI & Safety
+
+Owns the system being a system, and owns the safety story. Full design notes and the
+reasoning behind each decision are in
+[docs/phase-m4-orchestration.md](docs/phase-m4-orchestration.md).
+
+Two services:
+
+- **`services/orchestrator/`** (Python/FastAPI, port 8090) — consumes `anomalies.detected`
+  (M2), calls M3's `POST /analyze`, and persists each incident through
+  `DETECTED -> ANALYZING -> AWAITING_APPROVAL -> APPROVED/REJECTED/EXPIRED` (or
+  `ANALYSIS_FAILED`, with a `/reanalyze` retry, if M3 could not be reached after its own
+  retries). REST API plus a `GET /ws` live feed for the approval UI.
+- **`services/orchestrator-ui/`** (React + TypeScript + Tailwind, port 3000) — the approval
+  console: anomaly evidence, ranked hypotheses with their evidence chain and blast radius,
+  and explicit Approve / Reject / Request-more-info actions. Every cited evidence id is
+  clickable, resolving to the deploy diff, anomaly event or past postmortem behind it.
+
+### Safety architecture
+The headline contribution, built as code and enforced by tests, not asserted in prose:
+
+- **Constrained action space** — the same fixed grammar M3 already emits
+  (`rollback_deploy:<id>` | `restart_service:<service>` | `scale_service:<service>` |
+  `no_action`), never free text. Resolves CONTRACTS.md's open question on the action
+  vocabulary. `GET /actions` exposes it, with each verb's blast radius, for the UI.
+- **A hard execution gate** — `app/executor.py`'s `execute()` is a log line: no
+  Docker/Kubernetes/HTTP client, no subprocess, nothing reachable to call. A test parses the
+  module's own AST and fails the build if an outbound-capable import is ever added. The
+  orchestrator container also mounts no Docker socket and holds no infra credentials.
+- **An immutable audit log** — `audit_log` (`timescaledb/init/008_incidents.sql`) rejects
+  `UPDATE`/`DELETE` via a trigger, and every row hash-chains to the one before it
+  (`GET /audit/verify` walks the chain). Documented as tamper-*evidence*, not
+  tamper-*prevention* — its limitation is stated explicitly, not assumed away.
+- **Rejection feedback as labelled data** — every reject requires a coarse reason category
+  alongside the free-text reason, stored for a future retraining pass.
+
+### Tests
+53 tests, no Docker needed:
+
+```bash
+cd services/orchestrator && python -m pytest -q
+```
+
+Covers the full state machine (idempotent anomaly intake, analysis success/failure/retry,
+approve/reject/request-info/expiry), the action-vocabulary validator, the audit hash-chain
+(including a tamper-detection test), the executor's lack of outbound capability, and the
+FastAPI routes end to end via `TestClient` with an in-memory fake store — the same pattern
+`services/diagnosis-service`'s own test suite uses.
+
+The frontend (`services/orchestrator-ui/`) builds clean: `npm run build` (TypeScript +
+Vite) and `npm run lint` (oxlint) both pass.
+
+### Verified against the live stack
+`docker compose up -d --build` (23 containers), then one full scenario end to end:
+
+- `bad_deploy_latency` injected against `catalogue`; M2's EWMA detector fired ~10 s later
+  (target: under 60 s) and published to `anomalies.detected`.
+- The orchestrator opened an incident, called M3, and reached `AWAITING_APPROVAL`. The
+  rank-1 hypothesis named catalogue's real deploy `dep-2026-09-22-0001` at 0.843 confidence
+  with resolvable evidence ids, proposing `rollback_deploy:dep-2026-09-22-0001` — the actual
+  ground truth of the injected fault.
+- `answered_by=deterministic_fallback` (no Ollama on that machine), so the LLM-unavailable
+  path is covered, not just the happy path.
+- Approved via the API: `execution_logged=true`, and the `catalogue` container's start time
+  was unchanged afterwards — the stubbed executor never touched it.
+- A second incident (`service_crash` on `user`, caught by M2's staleness detector) was
+  rejected; the row landed in `rejection_feedback` with its category.
+- The WebSocket feed pushed `incident_awaiting_approval` to a connected client in real time.
+- Audit immutability holds at the database level, not just in the app: direct SQL `UPDATE`
+  and `DELETE` against `audit_log` were both refused by the trigger, and `GET /audit/verify`
+  reported the hash chain intact throughout.
+- Evidence resolution was checked against a real incident's own cited ids: the deploy id
+  returned its recorded `config_diff` (`"perf regression: inefficient loop introduced"`, the
+  diff the injector wrote for the bad deploy), the anomaly id returned its event, a corpus
+  postmortem returned its body, and the `metrics`/`dependency` forms resolved without a
+  database read — including through the UI's nginx `/api` proxy.
+
+This run is also what surfaced the `incidents` table-name collision with M3
+(`orchestrator_incidents` now), which no amount of unit testing would have caught.
+
+### Not done yet
+- Ollama was not available on the verification machine, so the LLM path itself
+  (`answered_by=llm`) has only been exercised through M3's own test suite, not end to end.
+- Integration/CI workflow (GitHub Actions) not added yet — PLAN.md lists this under M4 too.
+- Executing an approved action is deliberately out of scope (PLAN.md's risk register: "the
+  executor is architecturally stubbed by design ... listed as future work, not a stretch
+  goal")
