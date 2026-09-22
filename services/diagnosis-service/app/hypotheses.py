@@ -7,7 +7,7 @@ and the deterministic fallback (app/deterministic.py), so all three obey exactly
 import math
 from dataclasses import dataclass, field
 
-from app.models import NO_ACTION, AnalyzeResponse, Candidate, CandidateReport
+from app.models import LIVENESS_METRIC, NO_ACTION, AnalyzeResponse, Candidate, CandidateReport, Evidence
 
 MAX_HYPOTHESES = 3
 # A deploy scores >= 0.5 when it landed within about 7 minutes of onset. Older deploys can still be
@@ -16,6 +16,9 @@ ROLLBACK_MIN_DEPLOY_PROXIMITY = 0.5
 # Evidence categories whose source ids are records a hypothesis may cite
 # (CONTRACTS.md: every evidence id resolves to an anomaly, deploy or incident).
 CITABLE_CATEGORIES = ("anomaly", "deployment", "similar_incident")
+# M2's detector name for "this service stopped publishing metrics at all". A restart is offered
+# only on this evidence, so the offer follows the signal rather than the model's imagination.
+STALENESS_DETECTOR = "staleness"
 
 
 def rollback_window_minutes(deploy_decay_minutes: float) -> float:
@@ -35,10 +38,35 @@ class CandidateOptions:
     has_recent_deploy: bool = False
 
 
+def reported_silent(evidence: dict[str, Evidence], candidate: Candidate) -> bool:
+    """True when a staleness anomaly cited by this candidate says this service stopped reporting
+    metrics altogether - M2's evidence that it has failed, rather than an inference about it."""
+    for evidence_id in candidate.evidence_ids:
+        item = evidence.get(evidence_id)
+        if item is None or item.category != "anomaly":
+            continue
+        payload = item.payload
+        if (
+            payload.get("detector") == STALENESS_DETECTOR
+            and LIVENESS_METRIC in (payload.get("metrics") or [])
+            and candidate.service in (payload.get("services") or [])
+        ):
+            return True
+    return False
+
+
 def candidate_options(report: CandidateReport, candidate: Candidate) -> CandidateOptions:
-    """restart_service and scale_service are in the contract's vocabulary but never offered here:
-    nothing the scorer measures shows that a service has failed or is overloaded, and when they
-    were offered, phi4-mini proposed a restart for every fixture, benign ones included."""
+    """Which of the contract's four verbs this candidate may be proposed for.
+
+    `restart_service` is offered only to a service M2's staleness detector reports as silent
+    (issue #23). That signal did not exist when this module was written, and an ungated restart
+    option was actively harmful: phi4-mini proposed a restart for every fixture, benign ones
+    included. Gating it on the evidence keeps that impossible - the option is absent unless a
+    `liveness` anomaly names this service - while making the textbook `service_crash` case
+    actionable instead of `no_action` on a service that is down.
+
+    `scale_service` stays unreachable: nothing measured here shows a service is overloaded.
+    Offering it would be guessing, and it is left validated but unused until a signal exists."""
     evidence = {item.evidence_id: item for item in report.evidence}
     citable = list(
         dict.fromkeys(
@@ -50,6 +78,8 @@ def candidate_options(report: CandidateReport, candidate: Candidate) -> Candidat
     actions = [NO_ACTION]
     if candidate.deploy_id and candidate.signals.deploy_proximity >= ROLLBACK_MIN_DEPLOY_PROXIMITY:
         actions.append(f"rollback_deploy:{candidate.deploy_id}")
+    if reported_silent(evidence, candidate):
+        actions.append(f"restart_service:{candidate.service}")
     return CandidateOptions(
         service=candidate.service,
         citable_ids=citable,

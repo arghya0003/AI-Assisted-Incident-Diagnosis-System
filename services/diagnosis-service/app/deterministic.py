@@ -7,9 +7,20 @@ candidate's evidence, and proposes a rollback exactly when one is offered.
 """
 
 from app.hypotheses import MAX_HYPOTHESES, Diagnosis, candidate_options
-from app.models import AnalyzeResponse, CandidateReport, Hypothesis
+from app.models import NO_ACTION, AnalyzeResponse, CandidateReport, Hypothesis
 
 CAUSE_PREFIX = "Deterministic ranking (LLM not used): "
+
+
+def _action(actions: list[str]) -> str:
+    """The most specific action on offer. A rollback beats a restart: if a deploy landed shortly
+    before onset, undoing it addresses the cause, where a restart only clears the symptom. Both are
+    only ever present when their evidence is (app/hypotheses.py), so this never invents one."""
+    for prefix in ("rollback_deploy:", "restart_service:"):
+        for action in actions:
+            if action.startswith(prefix):
+                return action
+    return NO_ACTION
 
 
 def deterministic_diagnosis(report: CandidateReport, limit: int = MAX_HYPOTHESES) -> Diagnosis:
@@ -33,8 +44,7 @@ def deterministic_diagnosis(report: CandidateReport, limit: int = MAX_HYPOTHESES
                 cause=f"{CAUSE_PREFIX}{candidate.service} scored {candidate.score:.2f}: {detail}.",
                 confidence=round(candidate.score, 3),
                 evidence_ids=options.citable_ids,
-                # The rollback when one is offered (a deploy shortly before onset), otherwise no_action.
-                proposed_action=options.actions[-1],
+                proposed_action=_action(options.actions),
             )
         )
         services.append(candidate.service)

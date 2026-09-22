@@ -115,9 +115,19 @@ def _describe(response: Response, analysis: StoredAnalysis, cache: str, persiste
 
 
 @app.get("/health")
-def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, str]:
+def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, object]:
     # Always 200 while the process is up: a database outage is reported here, not turned
     # into container restarts that couldn't fix it.
+    #
+    # corpus_incidents is here because an empty corpus is otherwise invisible (issue #19):
+    # retrieval returns nothing, incident similarity contributes 0 to every score, and the
+    # service still answers, so a demo or evaluation on a fresh volume can silently measure a
+    # system with the "retrieval-augmented" half switched off. null means the database could
+    # not be reached to count them.
+    try:
+        corpus_incidents: int | None = anomalies.incident_count()
+    except DatabaseUnavailable:
+        corpus_incidents = None
     return {
         "status": "ok",
         "service": "diagnosis-service",
@@ -125,6 +135,8 @@ def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, str]:
         "pipeline_mode": settings.pipeline_mode,
         "config_fingerprint": CONFIG_FINGERPRINT,
         "database": anomalies.status(),
+        "corpus_incidents": corpus_incidents,
+        "retrieval": "ready" if corpus_incidents else "empty_corpus: run scripts/test_in_docker.sh --ingest",
     }
 
 

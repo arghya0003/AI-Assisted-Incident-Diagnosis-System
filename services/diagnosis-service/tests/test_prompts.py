@@ -104,11 +104,29 @@ def test_rollback_is_offered_only_for_a_deploy_shortly_before_onset():
     assert all(option.actions == ["no_action"] for option in options.values())
 
 
-def test_restart_and_scale_are_never_offered():
+def test_scale_is_never_offered_and_restart_only_on_the_staleness_signal():
+    """restart_service is gated on M2's liveness evidence (issue #23): anom-fx-11 is the only
+    fixture whose detector reports a service silent, so it is the only one that may propose one.
+    scale_service stays unreachable - nothing measured shows a service is overloaded."""
+    offered = {}
     for anomaly_id in FIXTURES:
         anomaly, report = report_for(anomaly_id)
         actions = build_prompt(anomaly, report, **BIG).allowed_actions
-        assert not [a for a in actions if a.startswith(("restart_service:", "scale_service:"))]
+        assert not [a for a in actions if a.startswith("scale_service:")]
+        offered[anomaly_id] = [a for a in actions if a.startswith("restart_service:")]
+    assert offered["anom-fx-11"] == ["restart_service:payment"]
+    assert all(not restarts for a, restarts in offered.items() if a != "anom-fx-11")
+
+
+def test_restart_is_offered_only_to_the_silent_service_itself():
+    """A crash shows up on the callers too. Only the service the staleness anomaly names may be
+    restarted; a caller that merely reports errors may not."""
+    anomaly, report = report_for("anom-fx-11")
+    options = options_by_service(build_prompt(anomaly, report, **BIG))
+    assert "restart_service:payment" in options["payment"].actions
+    for service, option in options.items():
+        if service != "payment":
+            assert all(not a.startswith("restart_service:") for a in option.actions)
 
 
 def test_prompt_shows_the_top_five_candidates_only():

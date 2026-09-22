@@ -138,6 +138,25 @@ def test_health():
     assert resp.json()["database"] == "ok"
 
 
+def test_health_reports_an_empty_corpus(fake_store):
+    """An empty corpus is otherwise invisible: retrieval silently contributes nothing and the
+    service still answers, so a fresh volume can measure a retrieval-free system (issue #19)."""
+    body = client.get("/health").json()
+    assert body["corpus_incidents"] == 0
+    assert body["retrieval"].startswith("empty_corpus")
+
+    fake_store.incidents = [object(), object()]
+    body = client.get("/health").json()
+    assert body["corpus_incidents"] == 2 and body["retrieval"] == "ready"
+
+
+def test_health_survives_a_database_outage(fake_store):
+    fake_store.fail_counts = True
+    body = client.get("/health").json()
+    assert body["status"] == "ok", "a database outage must not fail the health check"
+    assert body["corpus_incidents"] is None
+
+
 def test_analyze_returns_contract_shape():
     resp = client.post("/analyze", json={"anomaly_id": "anom-0001"})
     assert resp.status_code == 200
@@ -205,6 +224,9 @@ class UnavailableStore:
         raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
 
     def scoring_inputs(self, anomaly_id, window_seconds, lookback_minutes):
+        raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
+
+    def incident_count(self):
         raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
 
     def status(self):
