@@ -334,4 +334,4 @@ Vite) and `npm run lint` (oxlint) both pass.
 - Integration/CI workflow (GitHub Actions) not added yet — PLAN.md lists this under M4 too.
 - Executing an approved action is deliberately out of scope (PLAN.md's risk register: "the
   executor is architecturally stubbed by design ... listed as future work, not a stretch
-  goal").
+  goal")
