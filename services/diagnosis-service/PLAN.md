@@ -1021,8 +1021,8 @@ signal, and they document what the service can and cannot do on its own.
 and are left as recorded. Re-running them fairly needs the testbed under real traffic (issue #6),
 which is the Week 8–9 evaluation, not this change.
 
-**Ablation re-run on 2026-09-16** (11 fixtures, 4 modes, every run stored): the Phase 8 conclusion
-is unchanged. `deterministic` 6/9 at 50 ms, `no_graph` 6/9, `full` 5/9, `llm_only` 4/9 with 7 of 11
+**Ablation re-run on 2026-09-16** (11 fixtures, 4 modes, then 3 runs per mode across the three
+scored modes - 143 runs in total, every one stored): the Phase 8 conclusion is unchanged. `deterministic` 6/9 at 50 ms, `no_graph` 6/9, `full` 5/9, `llm_only` 4/9 with 7 of 11
 rank-1 actions proposing a rollback. `anom-fx-11` is correct in all four modes. The `no_graph`
 versus `full` gap is one fixture on one run per mode, so it is noise and is recorded as such. Full
 table and reading in `README.md`, "Ablation re-run".

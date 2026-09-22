@@ -7,7 +7,7 @@ every slice produces and consumes.
 | --- | --- | --- |
 | Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
 | Anomaly detection & evaluation | M2 | Detector and harness built and run against the live testbed |
-| Retrieval-augmented reasoning | M3 | Full pipeline built (`services/diagnosis-service/`) |
+| Retrieval-augmented reasoning | M3 | Phases 0-8 complete (`services/diagnosis-service/`); evaluated across four pipeline modes and verified live |
 | Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
 
 ---
@@ -273,6 +273,130 @@ deployment history, service dependencies, and similar past incidents. Its contra
 documented in `CONTRACTS.md`, with the database schema in
 `timescaledb/init/004_evidence.sql`. See `docs/evidence-model.md` for the mapping to
 the current data sources and `services/diagnosis-service/` (M3), which produces it.
+
+---
+
+# Member 3: Retrieval-Augmented Reasoning
+
+Turns one anomaly into ranked, evidence-cited root-cause hypotheses. Build plan and
+per-phase outcomes are in [services/diagnosis-service/PLAN.md](services/diagnosis-service/PLAN.md);
+full measurements in [services/diagnosis-service/README.md](services/diagnosis-service/README.md).
+
+One service, `services/diagnosis-service/` (Python/FastAPI, port 8000). `POST /analyze
+{anomaly_id}` reads M2's `anomalies` table, gathers context, ranks candidate services,
+asks phi4-mini to explain the ranking, validates the reply, and stores the run.
+`GET /candidates/{id}` shows the deterministic ranking behind any answer,
+`GET /hypotheses/{id}` lists stored runs, `GET /stats` the guardrail counters.
+
+Ollama runs on the **host**, not in a container, because it needs the GPU: `phi4-mini`
+for generation and `nomic-embed-text` for embeddings, reached through
+`host.docker.internal` (`OLLAMA_HOST=0.0.0.0` is required).
+
+## Phased plan
+
+### Phase 0 — Environment proof ✅
+Scripted checks of the stack, the database and the LLM before building on them. Found the
+first-load runner crash (HTTP 500, recovered on retry) that Phase 6's client handles.
+
+### Phase 1 — Skeleton service ✅
+Contract-validated `/analyze` stub. Every response is validated against the CONTRACTS.md
+models, so shape drift fails here rather than in M4's UI.
+
+### Phase 2 — Storage and fixtures ✅
+11 hand-written anomaly fixtures (`fixtures/anomalies/*.json`), each an M2-shaped event
+plus a `_fixture` block holding ground truth and the deploys and co-anomalies the scenario
+would have produced. They are the ground truth every later phase is tested against.
+
+### Phase 3 — Dependency graph ✅
+Sock Shop's call graph (14 nodes, 14 edges) from `config/dependency_graph.yaml`, with
+downstream/upstream traversal. No LLM.
+
+### Phase 4 — Candidate scoring ✅
+The deterministic ranker, and the baseline the LLM is measured against. Four signals,
+weighted: deploy proximity 0.40 (exponential decay from onset), graph proximity 0.25,
+co-anomaly 0.20 (is this the deepest anomalous service?), incident similarity 0.15.
+Every candidate carries the evidence ids behind its score.
+
+### Phase 5 — Retrieval (RAG) ✅
+61-incident corpus (`corpus/incidents/`), embedded with `nomic-embed-text` into pgvector.
+Hybrid by default: a structured pre-filter on candidate services and plausible fault types,
+then cosine similarity. Only the *symptoms* are embedded — embedding whole write-ups let a
+few generic ones match almost every query.
+
+### Phase 6 — LLM reasoning ✅
+phi4-mini with **JSON-schema constrained decoding**: each hypothesis is bound to one listed
+candidate, with only that candidate's citable evidence ids and permitted actions. Text
+instructions were not enough — with a flat action list the model proposed rolling back one
+service's deploy as the fix for another. Three validate-and-retry attempts, then the
+deterministic ranking as fallback, so `/analyze` never returns an invalid answer.
+
+### Phase 7 — Evidence guardrail ✅
+Pure set membership: any hypothesis citing an id that was not supplied to the model is
+dropped. Poisoned replies citing `ev-9999` or `dep-fake-001` never reach a response — a
+partly poisoned reply keeps only its clean hypothesis, a fully poisoned one returns the
+deterministic ranking.
+
+### Phase 8 — Persistence, modes and evaluation ✅
+Every run stored in `analyses`/`hypotheses` (`timescaledb/init/006_diagnosis_analyses.sql`),
+with a response cache keyed by anomaly, mode, model and a fingerprint of everything that
+shapes an answer. Four pipeline modes — `full`, `no_graph`, `llm_only`, `deterministic` —
+selectable per request, so the LLM's contribution can be measured rather than assumed.
+
+## Tests
+
+445 tests in Docker, 430 on the host without a database:
+
+```bash
+bash services/diagnosis-service/scripts/test_in_docker.sh   # + --ingest --fixtures --compare --eval
+```
+
+Covers scoring signal by signal, graph traversal, retrieval pre-filter and ranking, prompt
+construction and the context budget, reply validation and retry, the guardrail against
+poisoned replies, persistence and cache reuse, and every route via `TestClient`.
+
+## Results
+
+**The LLM does not rank better than the arithmetic.** 99 runs, 11 fixtures, 3 runs per mode
+(2026-09-16):
+
+| Mode | Rank-1 = true cause | Fell back to scorer | p50 latency |
+| --- | --- | --- | --- |
+| `deterministic` | **18/27** | — | **51 ms** |
+| `full` | **18/27** | 2/33 | 14.2 s |
+| `no_graph` | 17/27 | 9/33 | 16.6 s |
+
+Fixture by fixture, `full` and `deterministic` are right and wrong on the same cases: the
+LLM follows the scorer's ranking and writes the explanation. An earlier single-run pass
+suggested `no_graph` beat `full`; three runs showed that was noise. In a separate run,
+`llm_only` — the model given the same facts with no scoring, graph or retrieval — was worst
+(4/9) and proposed 7 rollbacks in 11 runs, including on benign and ambiguous cases where
+every scored mode chose `no_action`.
+
+**What the graph actually buys is reliability, not accuracy.** Removing it raised the
+fallback rate from 6% to 27% of runs: without graph positions the model invents deploys and
+fails validation.
+
+**Verified live end to end.** With M1's load generator holding 5 rps, a `service_crash`
+injected on payment was reported by M2's staleness detector 31 s later as a `liveness`
+anomaly; `/analyze` ranked payment first, answered by the LLM (3 attempts, 21.5 s, no
+guardrail rejections), with the cause "the payment service stopped reporting liveness
+metrics, indicating a possible crash or unreachability".
+
+**M2's `liveness` signal solved the crash case.** A crashed service used to be invisible to
+scoring — it stops reporting, so it was never anomalous and never ranked. The staleness
+detector names it directly, and the existing weights then rank it first, in all four modes.
+
+## Not done yet
+
+- **The corpus is empty on a fresh volume** (issue #19). Ingestion needs `--ingest` and
+  Ollama, so a clean `docker compose up` silently runs a retrieval-free system.
+- **Accuracy, MRR and evidence validity are not produced by the evaluation harness**
+  (issue #21) — measured here on fixtures, but the runner does not yet call `/analyze`.
+- **The ablation runs on fixtures, not real injected faults** (issue #22).
+- **`restart_service` and `scale_service` are never proposed** (issue #23): only
+  `no_action` and `rollback_deploy` are reachable today.
+- Causes are model-written text. They are constrained and checked for unsupported deploy
+  claims, but they are not a verified explanation of the fault.
 
 ---
 
