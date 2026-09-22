@@ -27,6 +27,7 @@ from app.models import (
     Incident,
     RejectRequest,
     RequestInfoRequest,
+    ResolvedEvidence,
 )
 from app.settings import settings
 from app.state_machine import Orchestrator
@@ -158,6 +159,24 @@ def global_audit(limit: int = Query(200, ge=1, le=1000), incidents: IncidentStor
     evidence, with which model version."""
     try:
         return incidents.audit_trail(None, limit)
+    except DatabaseUnavailable as exc:
+        raise _unavailable(exc) from exc
+
+
+@app.get("/evidence/{evidence_id:path}", response_model=ResolvedEvidence, responses={503: ERROR_RESPONSES[503]})
+def evidence(evidence_id: str, incidents: IncidentStore = Depends(get_store)) -> ResolvedEvidence:
+    """Resolve one of a hypothesis's `evidence_ids` to the record behind it, so an approver can
+    inspect the deploy diff or the past incident that justified a proposed action before
+    approving it (PLAN.md: "Evidence must be inspectable").
+
+    Uses `:path` because M3's structured ids contain slashes-free but colon-separated segments
+    and, for `metrics`, an ISO timestamp — keeping the raw id intact matters more than tidy
+    routing. An id that resolves to nothing returns `kind: "unknown"` rather than 404: the
+    guardrail already guarantees cited ids existed at analysis time, so a miss means the record
+    has since aged out, which the UI should say plainly rather than error on.
+    """
+    try:
+        return incidents.resolve_evidence(evidence_id)
     except DatabaseUnavailable as exc:
         raise _unavailable(exc) from exc
 

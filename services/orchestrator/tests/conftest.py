@@ -24,6 +24,7 @@ class FakeIncidentStore:
         self._incidents: dict[str, dict] = {}
         self._audit: list[AuditEntry] = []
         self.rejections: list[dict] = []
+        self.evidence: dict = {}  # source_id -> ResolvedEvidence, for resolve_evidence
         self.unavailable = False
 
     def _check(self):
@@ -171,6 +172,22 @@ class FakeIncidentStore:
                 return False, entry.audit_id
             expected_prev = entry.hash
         return True, None
+
+    def resolve_evidence(self, evidence_id):
+        self._check()
+        from app.models import ResolvedEvidence, parse_evidence_id
+
+        category, source_id = parse_evidence_id(evidence_id)
+        if category == "dependency" or "->" in source_id:
+            caller, _, callee = source_id.partition("->")
+            return ResolvedEvidence(
+                evidence_id=evidence_id, kind="dependency",
+                summary=f"{caller} calls {callee}", detail={"from": caller, "to": callee},
+            )
+        record = self.evidence.get(source_id)
+        if record is None:
+            return ResolvedEvidence(evidence_id=evidence_id, kind="unknown", summary="not found")
+        return record.model_copy(update={"evidence_id": evidence_id})
 
     def record_event(self, event_type, actor, detail, incident_id=None):
         self._check()
