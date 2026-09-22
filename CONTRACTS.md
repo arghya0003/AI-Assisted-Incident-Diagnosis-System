@@ -298,4 +298,9 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
 - [ ] Confirm `anomalies.detected` partitioning/retention with M2 — **implemented** to
       match the other topics (3 partitions, keyed by `service`, `retention.ms=86400000`).
       M2 owns the values; say so if a longer retention is wanted for replay.
-- [ ] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4.
+- [x] Confirm `proposed_action` vocabulary (fixed enum, not free text) with M3/M4 --
+      **resolved:** M4 adopted M3's existing grammar rather than defining a second one --
+      `rollback_deploy:<id>` | `restart_service:<service>` | `scale_service:<service>`, or the
+      bare `no_action`. `services/orchestrator/app/models.py`'s `Hypothesis` validator accepts
+      exactly this grammar; `GET /actions` on the orchestrator exposes it (with each verb's
+      blast radius) for the approval UI. See `docs/phase-m4-orchestration.md`.

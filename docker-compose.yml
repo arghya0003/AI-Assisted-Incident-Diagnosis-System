@@ -524,6 +524,59 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
+  # M4 - Orchestrator (incident lifecycle, HITL approval, safety gate)
+  # ---------------------------------------------------------------
+  # Consumes anomalies.detected (M2), calls M3's POST /analyze, and persists an incident
+  # through DETECTED -> ANALYZING -> AWAITING_APPROVAL -> APPROVED/REJECTED/EXPIRED. Every
+  # remediation requires an explicit human decision through this API; nothing here or
+  # downstream of it ever acts on the running system (see services/orchestrator/app/executor.py).
+  #
+  # Deliberately mounts no Docker socket and holds no infra credentials -- unlike
+  # fault-injector, which mounts /var/run/docker.sock specifically so it *can* act. That
+  # omission is itself part of the safety architecture, not an oversight: the stubbed
+  # executor has nothing here to call even if its own code were compromised.
+  orchestrator:
+    build: services/orchestrator
+    restart: always
+    ports:
+      - "8090:8090"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      timescaledb:
+        condition: service_healthy
+      diagnosis-service:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      DIAGNOSIS_SERVICE_URL: http://diagnosis-service:8000
+      APPROVAL_TIMEOUT_SECONDS: "1800"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - diagnosis-net
+
+  # Approval UI (React + TypeScript + Tailwind), built to static files and served by nginx.
+  # Talks to the orchestrator's REST API and its /ws live feed directly from the browser, so
+  # it needs no server-side proxy of its own -- see services/orchestrator-ui/nginx.conf.
+  orchestrator-ui:
+    build: services/orchestrator-ui
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - orchestrator
+    networks:
+      - diagnosis-net
+
+  # ---------------------------------------------------------------
   # Phase 9 - Evaluation runner (M2)
   # ---------------------------------------------------------------
   # One-shot tool, not a long-running service, so it sits behind a profile

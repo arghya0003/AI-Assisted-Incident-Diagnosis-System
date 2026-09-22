@@ -6,9 +6,9 @@ every slice produces and consumes.
 | Slice | Owner | Status |
 | --- | --- | --- |
 | Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
-| Anomaly detection & evaluation | M2 | Detector and harness built; no testbed run yet |
-| Retrieval-augmented reasoning | M3 | Not started |
-| Orchestration, HITL UI & safety | M4 | Not started |
+| Anomaly detection & evaluation | M2 | Detector and harness built and run against the live testbed |
+| Retrieval-augmented reasoning | M3 | Full pipeline built (`services/diagnosis-service/`) |
+| Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built; not yet run against the live stack |
 
 ---
 
@@ -124,6 +124,9 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
 | 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
 | 5002 | `load-generator` — `/stats` (what load is actually being offered) |
+| 8000 | `diagnosis-service` — `POST /analyze`, `/docs` |
+| 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
+| 3000 | `orchestrator-ui` — the HITL approval console |
 | 8081 | kafka-ui · 8082 adminer · 9090 Prometheus · 29092 Kafka (host-side) |
 
 ## Fixes on top of the phase work
@@ -269,4 +272,66 @@ The shared diagnosis evidence model groups supporting facts into anomaly, metric
 deployment history, service dependencies, and similar past incidents. Its contract is
 documented in `CONTRACTS.md`, with the database schema in
 `timescaledb/init/004_evidence.sql`. See `docs/evidence-model.md` for the mapping to
-the current data sources and the planned M3 diagnosis service.
+the current data sources and `services/diagnosis-service/` (M3), which produces it.
+
+---
+
+# Member 4: Orchestration, HITL UI & Safety
+
+Owns the system being a system, and owns the safety story. Full design notes and the
+reasoning behind each decision are in
+[docs/phase-m4-orchestration.md](docs/phase-m4-orchestration.md).
+
+Two services:
+
+- **`services/orchestrator/`** (Python/FastAPI, port 8090) — consumes `anomalies.detected`
+  (M2), calls M3's `POST /analyze`, and persists each incident through
+  `DETECTED -> ANALYZING -> AWAITING_APPROVAL -> APPROVED/REJECTED/EXPIRED` (or
+  `ANALYSIS_FAILED`, with a `/reanalyze` retry, if M3 could not be reached after its own
+  retries). REST API plus a `GET /ws` live feed for the approval UI.
+- **`services/orchestrator-ui/`** (React + TypeScript + Tailwind, port 3000) — the approval
+  console: anomaly evidence, ranked hypotheses with their evidence chain and blast radius,
+  and explicit Approve / Reject / Request-more-info actions.
+
+### Safety architecture
+The headline contribution, built as code and enforced by tests, not asserted in prose:
+
+- **Constrained action space** — the same fixed grammar M3 already emits
+  (`rollback_deploy:<id>` | `restart_service:<service>` | `scale_service:<service>` |
+  `no_action`), never free text. Resolves CONTRACTS.md's open question on the action
+  vocabulary. `GET /actions` exposes it, with each verb's blast radius, for the UI.
+- **A hard execution gate** — `app/executor.py`'s `execute()` is a log line: no
+  Docker/Kubernetes/HTTP client, no subprocess, nothing reachable to call. A test parses the
+  module's own AST and fails the build if an outbound-capable import is ever added. The
+  orchestrator container also mounts no Docker socket and holds no infra credentials.
+- **An immutable audit log** — `audit_log` (`timescaledb/init/008_incidents.sql`) rejects
+  `UPDATE`/`DELETE` via a trigger, and every row hash-chains to the one before it
+  (`GET /audit/verify` walks the chain). Documented as tamper-*evidence*, not
+  tamper-*prevention* — its limitation is stated explicitly, not assumed away.
+- **Rejection feedback as labelled data** — every reject requires a coarse reason category
+  alongside the free-text reason, stored for a future retraining pass.
+
+### Tests
+44 tests, no Docker needed:
+
+```bash
+cd services/orchestrator && python -m pytest -q
+```
+
+Covers the full state machine (idempotent anomaly intake, analysis success/failure/retry,
+approve/reject/request-info/expiry), the action-vocabulary validator, the audit hash-chain
+(including a tamper-detection test), the executor's lack of outbound capability, and the
+FastAPI routes end to end via `TestClient` with an in-memory fake store — the same pattern
+`services/diagnosis-service`'s own test suite uses.
+
+The frontend (`services/orchestrator-ui/`) builds clean: `npm run build` (TypeScript +
+Vite) and `npm run lint` (oxlint) both pass.
+
+### Not done yet
+- Not yet run against the live stack (no container runtime in the environment this slice was
+  built in) — `docker compose up -d --build`, then walking an incident end to end through the
+  UI, is the next verification step on a machine with Docker and Ollama.
+- Integration/CI workflow (GitHub Actions) not added yet — PLAN.md lists this under M4 too.
+- Executing an approved action is deliberately out of scope (PLAN.md's risk register: "the
+  executor is architecturally stubbed by design ... listed as future work, not a stretch
+  goal").
