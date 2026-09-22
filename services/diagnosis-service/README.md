@@ -84,11 +84,21 @@ A model failure never produces an error status. Two response headers say how the
 restart can't fix.
 
 `proposed_action` is one of `rollback_deploy:<deploy_id>`, `restart_service:<service>`,
-`scale_service:<service>`, or `no_action`. The vocabulary is still to be confirmed with M4.
-Currently only `no_action` and `rollback_deploy` are ever proposed. A rollback is offered only
-for a candidate's own deploy within about 7 minutes before onset. Restart and scale are never
-offered, because no signal yet shows a service has failed or is overloaded (PLAN.md, Phase 6
-outcome).
+`scale_service:<service>`, or `no_action`. M4 confirmed the vocabulary and implements all four.
+
+Each verb is offered only where its evidence exists, so the model chooses between real options
+rather than inventing one:
+
+| Action | Offered when |
+| --- | --- |
+| `rollback_deploy:<id>` | The candidate's own deploy landed within about 7 minutes before onset |
+| `restart_service:<name>` | M2's staleness detector reports **this** service silent - a `liveness` anomaly naming it (issue #23) |
+| `no_action` | Always available |
+| `scale_service:<name>` | **Never.** Nothing measured here shows a service is overloaded; offering it would be a guess |
+
+A restart is deliberately offered only to the silent service itself, not to the callers that
+merely report errors because of it. Gating matters: when restart was offered to every candidate
+during Phase 6, phi4-mini proposed one for every fixture, benign cases included.
 
 ## Run
 

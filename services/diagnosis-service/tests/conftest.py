@@ -32,6 +32,7 @@ class FakeAnomalyStore:
         self.incidents: list = []  # what search_incidents returns; empty means no corpus
         self.saved: list = []  # (StoredAnalysis, evidence) pairs, oldest first
         self.fail_saves = False
+        self.fail_counts = False  # make incident_count raise, as an unreachable database would
 
     def get(self, anomaly_id: str) -> AnomalyEvent | None:
         return self.events.get(anomaly_id)
@@ -41,6 +42,8 @@ class FakeAnomalyStore:
         return None if event is None else ScoringInputs(anomaly=event, related=[], deploys=[])
 
     def incident_count(self) -> int:
+        if self.fail_counts:
+            raise DatabaseUnavailable("cannot reach TimescaleDB at timescaledb:5432")
         return len(self.incidents)
 
     def search_incidents(self, vector, services, fault_types, top_k, hybrid):

@@ -1027,6 +1027,22 @@ rank-1 actions proposing a rollback. `anom-fx-11` is correct in all four modes. 
 versus `full` gap is one fixture on one run per mode, so it is noise and is recorded as such. Full
 table and reading in `README.md`, "Ablation re-run".
 
+**`restart_service` wired to M2's liveness signal (2026-09-22, issue #23).** M4 implements all
+four verbs of the action vocabulary, but only two were reachable here, and `service_crash` - the
+textbook restart case - proposed `no_action` on a service that was down. The signal that was
+missing when Phase 6 recorded "nothing shows a service has failed" now exists: M2's staleness
+detector emits a `liveness` anomaly naming the silent service. `restart_service:<name>` is offered
+to exactly that service, in every mode, and the deterministic fallback prefers a rollback over a
+restart where both are available, because undoing a deploy addresses a cause where a restart only
+clears a symptom. `scale_service` stays unreachable and is documented as a deliberate choice
+rather than an oversight: no signal here measures load. `anom-fx-11` now proposes
+`restart_service:payment`.
+
+**An empty corpus is now visible (2026-09-22, issue #19, partial).** `GET /health` reports
+`corpus_incidents` and a `retrieval` status, because a fresh volume silently runs a
+retrieval-free system otherwise: ingestion still needs `--ingest` and Ollama, which is the
+remaining half of that issue.
+
 **Verified live on 2026-09-16, on a real fault with real traffic.** With M1's `load-generator`
 holding 5 rps, a `service_crash` injection on payment was detected by M2's staleness detector 31 s
 later as a `liveness` anomaly, and `/analyze` ranked payment first and was answered by the LLM, not

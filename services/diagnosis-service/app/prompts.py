@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.hypotheses import MAX_HYPOTHESES, CandidateOptions, candidate_options
+from app.hypotheses import MAX_HYPOTHESES, STALENESS_DETECTOR, CandidateOptions, candidate_options
 from app.models import (
     LIVENESS_METRIC,
     NO_ACTION,
@@ -245,6 +245,15 @@ def _render_llm_only(
         key=lambda pair: (pair[0], pair[1].deploy_id),
     )
 
+    # The same staleness rule the scored modes apply (app/hypotheses.py), so the ablation compares
+    # modes rather than action vocabularies.
+    silent = {
+        service
+        for event in [anomaly, *nearby]
+        if event.detector == STALENESS_DETECTOR and LIVENESS_METRIC in event.metrics
+        for service in event.services
+    }
+
     options = []
     for service in services:
         own = [(minutes, deploy) for minutes, deploy in recent if deploy.service == service]
@@ -252,6 +261,8 @@ def _render_llm_only(
         citable += [other.anomaly_id for other in nearby if service in other.services]
         citable += [deploy.deploy_id for _, deploy in own]
         actions = [NO_ACTION] + [f"rollback_deploy:{d.deploy_id}" for minutes, d in own if minutes <= rollback_max_minutes]
+        if service in silent:
+            actions.append(f"restart_service:{service}")
         options.append(
             CandidateOptions(
                 service=service,
