@@ -291,7 +291,8 @@ Two services:
   retries). REST API plus a `GET /ws` live feed for the approval UI.
 - **`services/orchestrator-ui/`** (React + TypeScript + Tailwind, port 3000) — the approval
   console: anomaly evidence, ranked hypotheses with their evidence chain and blast radius,
-  and explicit Approve / Reject / Request-more-info actions.
+  and explicit Approve / Reject / Request-more-info actions. Every cited evidence id is
+  clickable, resolving to the deploy diff, anomaly event or past postmortem behind it.
 
 ### Safety architecture
 The headline contribution, built as code and enforced by tests, not asserted in prose:
@@ -312,7 +313,7 @@ The headline contribution, built as code and enforced by tests, not asserted in 
   alongside the free-text reason, stored for a future retraining pass.
 
 ### Tests
-44 tests, no Docker needed:
+53 tests, no Docker needed:
 
 ```bash
 cd services/orchestrator && python -m pytest -q
@@ -346,6 +347,11 @@ Vite) and `npm run lint` (oxlint) both pass.
 - Audit immutability holds at the database level, not just in the app: direct SQL `UPDATE`
   and `DELETE` against `audit_log` were both refused by the trigger, and `GET /audit/verify`
   reported the hash chain intact throughout.
+- Evidence resolution was checked against a real incident's own cited ids: the deploy id
+  returned its recorded `config_diff` (`"perf regression: inefficient loop introduced"`, the
+  diff the injector wrote for the bad deploy), the anomaly id returned its event, a corpus
+  postmortem returned its body, and the `metrics`/`dependency` forms resolved without a
+  database read — including through the UI's nginx `/api` proxy.
 
 This run is also what surfaced the `incidents` table-name collision with M3
 (`orchestrator_incidents` now), which no amount of unit testing would have caught.

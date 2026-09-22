@@ -169,6 +169,71 @@ class RequestInfoRequest(BaseModel):
     note: str = Field(min_length=1)
 
 
+class DeployRecord(BaseModel):
+    """A row of M1's `deploys` table. `config_diff` is the deploy diff PLAN.md asks an
+    approver to be able to see behind a `rollback_deploy` proposal."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    deploy_id: str
+    service: str
+    version: str
+    commit_sha: str
+    config_diff: str | None = None
+    time: datetime
+
+
+class PastIncidentRecord(BaseModel):
+    """A row of M3's `incidents` corpus table — the postmortem whose similarity to this
+    anomaly contributed to the ranking."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    incident_id: str
+    title: str
+    body: str
+    services: list[str] = []
+    fault_type: str | None = None
+    source: str | None = None
+
+
+class ResolvedEvidence(BaseModel):
+    """What one of a hypothesis's `evidence_ids` actually refers to.
+
+    M3 cites evidence in several shapes: the bare anomaly id, structured
+    `ev:<anomaly_id>:<category>:<source_id>` ids, and (when the deterministic ranking answers)
+    the bare source id of a deploy, past incident or dependency edge. The approval UI has to
+    turn any of them back into something a human can read before they approve an action.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    # deploy | anomaly | past_incident | dependency | metric | unknown
+    kind: str
+    summary: str
+    deploy: DeployRecord | None = None
+    anomaly: dict[str, Any] | None = None
+    past_incident: PastIncidentRecord | None = None
+    detail: dict[str, Any] = {}
+
+
+def parse_evidence_id(evidence_id: str) -> tuple[str | None, str]:
+    """Split M3's structured `ev:<anomaly_id>:<category>:<source_id>` into (category, source_id).
+
+    Returns (None, evidence_id) for a bare id. Split is bounded to 3 because a `metrics`
+    source_id is itself colon-separated (`catalogue:latency_p99_ms:<timestamp>`), so anything
+    after the third colon belongs to the source id.
+    """
+    if not evidence_id.startswith("ev:"):
+        return None, evidence_id
+    parts = evidence_id.split(":", 3)
+    if len(parts) < 4:
+        return None, evidence_id
+    _, _anomaly_id, category, source_id = parts
+    return category, source_id
+
+
 class AuditEntry(BaseModel):
     """One row of the immutable `audit_log` table. `hash` chains to `prev_hash`
     (`app/audit.py`), so the sequence is tamper-evident even though nothing in the schema

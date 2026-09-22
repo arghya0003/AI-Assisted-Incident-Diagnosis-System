@@ -56,6 +56,34 @@ export interface AuditEntry {
   created_at: string
 }
 
+export interface DeployRecord {
+  deploy_id: string
+  service: string
+  version: string
+  commit_sha: string
+  config_diff: string | null
+  time: string
+}
+
+export interface PastIncidentRecord {
+  incident_id: string
+  title: string
+  body: string
+  services: string[]
+  fault_type: string | null
+  source: string | null
+}
+
+export interface ResolvedEvidence {
+  evidence_id: string
+  kind: 'deploy' | 'anomaly' | 'past_incident' | 'dependency' | 'metric' | 'unknown'
+  summary: string
+  deploy: DeployRecord | null
+  anomaly: Record<string, unknown> | null
+  past_incident: PastIncidentRecord | null
+  detail: Record<string, unknown>
+}
+
 export interface ActionVocabulary {
   actions_with_target: string[]
   no_action: string

@@ -26,7 +26,15 @@ import psycopg2.errors
 from psycopg2.extras import Json
 
 from app.audit import GENESIS_HASH, hash_entry
-from app.models import AuditEntry, Hypothesis, Incident
+from app.models import (
+    AuditEntry,
+    DeployRecord,
+    Hypothesis,
+    Incident,
+    PastIncidentRecord,
+    ResolvedEvidence,
+    parse_evidence_id,
+)
 from app.settings import Settings
 
 log = logging.getLogger("orchestrator.db")
@@ -279,6 +287,90 @@ def save_rejection_feedback(
     )
 
 
+# ------------------------------------------------------------------ evidence resolution
+#
+# Read-only lookups into other members' tables: M1's `deploys`, M2's `anomalies`, and M3's
+# `incidents` corpus. Each is wrapped so a missing table degrades to "unresolved" instead of
+# failing the request -- an approver losing one evidence card is far better than the approval
+# screen 503-ing because a teammate's migration has not been applied.
+
+
+def _existing(cur, *tables: str) -> set[str]:
+    cur.execute("SELECT t FROM unnest(%s::text[]) AS t WHERE to_regclass(t) IS NOT NULL", (list(tables),))
+    return {table for (table,) in cur.fetchall()}
+
+
+def resolve_evidence(cur, evidence_id: str) -> ResolvedEvidence:
+    category, source_id = parse_evidence_id(evidence_id)
+
+    # Two categories describe a relationship rather than a stored row, so they resolve without
+    # touching the database at all.
+    if category == "dependency" or "->" in source_id:
+        caller, _, callee = source_id.partition("->")
+        return ResolvedEvidence(
+            evidence_id=evidence_id, kind="dependency",
+            summary=f"{caller} calls {callee}; {callee} is on the anomalous request path.",
+            detail={"from": caller, "to": callee},
+        )
+
+    if category == "metrics":
+        service, _, rest = source_id.partition(":")
+        metric, _, observed_at = rest.partition(":")
+        return ResolvedEvidence(
+            evidence_id=evidence_id, kind="metric",
+            summary=f"{service} {metric} sampled at {observed_at}.",
+            detail={"service": service, "metric": metric, "observed_at": observed_at},
+        )
+
+    present = _existing(cur, "deploys", "anomalies", "incidents")
+
+    if "deploys" in present:
+        cur.execute(
+            "SELECT deploy_id, service, version, commit_sha, config_diff, time FROM deploys WHERE deploy_id = %s",
+            (source_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            deploy = DeployRecord(**dict(zip(("deploy_id", "service", "version", "commit_sha", "config_diff", "time"), row)))
+            return ResolvedEvidence(
+                evidence_id=evidence_id, kind="deploy", deploy=deploy,
+                summary=f"{deploy.service} {deploy.version} deployed {deploy.time:%Y-%m-%d %H:%M:%S} ({deploy.commit_sha}).",
+            )
+
+    if "anomalies" in present:
+        cur.execute("SELECT raw FROM anomalies WHERE anomaly_id = %s", (source_id,))
+        row = cur.fetchone()
+        if row is not None:
+            raw = row[0]
+            return ResolvedEvidence(
+                evidence_id=evidence_id, kind="anomaly", anomaly=raw,
+                summary=f"Anomaly on {', '.join(raw.get('services', []))} "
+                        f"({', '.join(raw.get('metrics', []))}), severity {raw.get('severity')}.",
+            )
+
+    # M3's corpus of past postmortems. Note this is `incidents`, M3's table -- not
+    # `orchestrator_incidents`, which is this service's own lifecycle table.
+    if "incidents" in present:
+        cur.execute(
+            "SELECT incident_id, title, body, services, fault_type, source FROM incidents WHERE incident_id = %s",
+            (source_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            fields = dict(zip(("incident_id", "title", "body", "services", "fault_type", "source"), row))
+            fields["services"] = fields["services"] or []
+            past = PastIncidentRecord(**fields)
+            return ResolvedEvidence(
+                evidence_id=evidence_id, kind="past_incident", past_incident=past,
+                summary=f"Past incident: {past.title}",
+            )
+
+    return ResolvedEvidence(
+        evidence_id=evidence_id, kind="unknown",
+        summary="This evidence id does not resolve to a deploy, anomaly or past incident on record.",
+    )
+
+
 def missing_tables(cur) -> list[str]:
     cur.execute("SELECT t FROM unnest(%s::text[]) AS t WHERE to_regclass(t) IS NULL", (list(M4_TABLES),))
     return [table for (table,) in cur.fetchall()]
@@ -298,6 +390,7 @@ class IncidentStore(Protocol):
     def sweep_expired(self) -> list[str]: ...
     def save_rejection_feedback(self, incident_id: str, anomaly_id: str, hypothesis_rank: int | None, reason_category: str, reason: str, approver: str) -> None: ...
     def audit_trail(self, incident_id: str | None, limit: int) -> list[AuditEntry]: ...
+    def resolve_evidence(self, evidence_id: str) -> ResolvedEvidence: ...
     def verify_audit_chain(self) -> tuple[bool, int | None]: ...
     def record_event(self, event_type: str, actor: str, detail: dict, incident_id: str | None = None) -> AuditEntry: ...
     def status(self) -> DbStatus: ...
@@ -374,6 +467,9 @@ class PostgresIncidentStore:
 
     def audit_trail(self, incident_id: str | None, limit: int) -> list[AuditEntry]:
         return self._tx(list_audit, incident_id, limit)
+
+    def resolve_evidence(self, evidence_id: str) -> ResolvedEvidence:
+        return self._tx(resolve_evidence, evidence_id)
 
     def verify_audit_chain(self) -> tuple[bool, int | None]:
         return self._tx(verify_chain)

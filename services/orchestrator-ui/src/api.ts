@@ -2,7 +2,7 @@
 // dev server proxy (`npm run dev`) both map onto the orchestrator container/process directly
 // -- same-origin from the browser's point of view either way, so no CORS handling is needed
 // here.
-import type { ActionVocabulary, AuditEntry, Incident } from './types'
+import type { ActionVocabulary, AuditEntry, Incident, ResolvedEvidence } from './types'
 
 const BASE = '/api'
 
@@ -35,6 +35,9 @@ export const api = {
   globalAudit: (limit = 200) => request<AuditEntry[]>(`/audit?limit=${limit}`),
   verifyAudit: () => request<{ intact: boolean; first_broken_audit_id: number | null }>('/audit/verify'),
   actions: () => request<ActionVocabulary>('/actions'),
+  // Evidence ids contain colons (and, for metrics, an ISO timestamp), so they must be encoded
+  // rather than interpolated raw.
+  resolveEvidence: (evidenceId: string) => request<ResolvedEvidence>(`/evidence/${encodeURIComponent(evidenceId)}`),
   approve: (id: string, hypothesis_rank: number, approver: string, note?: string) =>
     request<Incident>(`/incidents/${id}/approve`, {
       method: 'POST',

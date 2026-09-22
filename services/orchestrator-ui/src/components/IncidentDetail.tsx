@@ -3,6 +3,7 @@ import { api, ApiError } from '../api'
 import type { ActionVocabulary, AuditEntry, Incident } from '../types'
 import { AuditTrail } from './AuditTrail'
 import { DecisionPanel } from './DecisionPanel'
+import { EvidenceDetail } from './EvidenceDetail'
 import { EvidencePanel } from './EvidencePanel'
 import { HypothesisCard } from './HypothesisCard'
 import { StateBadge } from './StatusBadge'
@@ -17,6 +18,7 @@ export function IncidentDetail({
   onChanged: (incident: Incident) => void
 }) {
   const [selectedRank, setSelectedRank] = useState<number | null>(null)
+  const [inspectedEvidenceId, setInspectedEvidenceId] = useState<string | null>(null)
   const [audit, setAudit] = useState<AuditEntry[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -106,9 +108,20 @@ export function IncidentDetail({
                 selected={selectedRank === h.rank}
                 onSelect={() => setSelectedRank(h.rank)}
                 decidedRank={incident.decided_hypothesis_rank}
+                onInspectEvidence={(id) => setInspectedEvidenceId((current) => (current === id ? null : id))}
+                inspectedEvidenceId={inspectedEvidenceId}
               />
             ))}
           </div>
+          {inspectedEvidenceId && (
+            <div className="mt-2">
+              <EvidenceDetail
+                key={inspectedEvidenceId}
+                evidenceId={inspectedEvidenceId}
+                onClose={() => setInspectedEvidenceId(null)}
+              />
+            </div>
+          )}
         </div>
       )}
 
