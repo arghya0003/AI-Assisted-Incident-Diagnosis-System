@@ -514,3 +514,44 @@ EVAL_RUNS=1 EVAL_ARGS="--modes full,llm_only,no_graph,deterministic --persist" \
 **Caveat, stated plainly:** one run per mode on 9 labelled fixtures. Differences of one fixture are
 within noise. A multi-run sweep (`--runs 3`) is the follow-up; this table is enough to say the
 conclusion did not change, and not enough to rank the LLM modes against each other.
+
+## Three runs per mode — 2026-09-16
+
+The single-run ablation above left one question open: `no_graph` scored 6/9 against `full`'s
+5/9, on one run per mode. This repeats the three scored modes with three runs each — 99 runs,
+every one stored.
+
+```
+EVAL_RUNS=3 EVAL_ARGS="--modes full,no_graph,deterministic --persist" \
+  bash services/diagnosis-service/scripts/test_in_docker.sh --eval
+```
+
+| Mode | Rank-1 = true cause | Answered by LLM | Fell back to scorer | Needed a retry | p50 / p95 latency |
+| --- | --- | --- | --- | --- | --- |
+| `deterministic` | **18/27** | — | — | 0/33 | **51 ms** / 60 ms |
+| `full` | **18/27** | 31/33 | 2/33 (6%) | 17/33 | 14.2 s / 31.3 s |
+| `no_graph` | 17/27 | 24/33 | 9/33 (**27%**) | 20/33 | 16.6 s / 44.0 s |
+
+**Reading:**
+
+- **The single-run gap was noise.** `no_graph` beating `full` did not survive three runs, and
+  the earlier table's caveat was right to refuse to quote it.
+- **`full` matches `deterministic` fixture by fixture**, not merely in total: the two are
+  correct and incorrect on exactly the same cases. The LLM follows the scorer's ranking and
+  supplies the explanation. It neither improves the ranking nor damages it.
+- **The graph's real contribution is reliability.** Removing it raised the fallback rate from
+  6% to 27% of runs, and the rejections say why: without graph positions phi4-mini claims
+  deploys that do not exist (`catalogue-db` alone accounted for 12 rejections). Some of
+  `no_graph`'s 17/27 is therefore the scorer answering, not the model.
+- **Safety held.** On the benign `anom-fx-09` and ambiguous `anom-fx-10`, every mode chose
+  `no_action` on every run. The wrong rollbacks (`anom-fx-05`, `anom-fx-06`) also occur in
+  `deterministic`, so they come from the scorer's deploy weighting (issue #7), not the LLM.
+- **Retries are dominated by fix A**: 17/33 runs in `full` needed one, almost always because
+  the cause claimed a deploy for a service that had none.
+- **Token estimate:** ratios reached 1.40, worse than the 1.32 recorded above. `app/prompts.py`
+  carries the corrected note.
+
+**Caveat, stated plainly:** at temperature 0.1 most fixtures returned the same answer on all
+three runs, so this is closer to nine fixtures checked for consistency than to 27 independent
+samples. It settles run-to-run noise. It does not establish that nine fixtures are enough, and
+it is still fixtures rather than real injected faults (issue #22).

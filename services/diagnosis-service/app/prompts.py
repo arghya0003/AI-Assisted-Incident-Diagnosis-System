@@ -41,8 +41,8 @@ LLM_ONLY_USER_TEMPLATE = string.Template((PROMPTS_DIR / "analyze_llm_only_user.t
 # Measured on phi4-mini in Phase 6: 1,983 characters of prompt became 575 prompt tokens (3.45 per
 # token, chat template included), so 3.0 overestimated by about 15% and the budget erred safe.
 # That margin is gone. Since the anomaly block started carrying measured values, the 2026-09-16
-# ablation saw actual/estimated ratios from 0.76 to 1.32: numbers and punctuation tokenize worse
-# than prose, so the estimate can now UNDER-count by about a third. Harmless today - prompts run
+# ablations saw actual/estimated ratios from 0.76 to 1.40: numbers and punctuation tokenize worse
+# than prose, so the estimate can now UNDER-count by about 40%. Harmless today - prompts run
 # near 700 tokens against an 8192 budget - but do not treat this as a safety margin, and re-measure
 # before raising the budget or shrinking num_ctx.
 CHARS_PER_TOKEN = 3.0
