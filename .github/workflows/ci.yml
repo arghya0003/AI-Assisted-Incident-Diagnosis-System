@@ -1,0 +1,66 @@
+name: CI
+
+# M4 owns "Integration testing and CI — does the whole pipeline run end to end" (PLAN.md).
+# This runs every service's own test suite -- each already designed to need no live
+# TimescaleDB/Kafka/Ollama (in-memory fakes, matching the pattern in
+# services/diagnosis-service/tests/conftest.py and services/orchestrator/tests/conftest.py)
+# -- plus a config-only validation of docker-compose.yml, so a broken service or a broken
+# compose file fails a PR instead of being found by a teammate at integration time.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-service-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - anomaly-detector
+          - evaluation-runner
+          - diagnosis-service
+          - orchestrator
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: services/${{ matrix.service }}/requirements*.txt
+      - name: Install dependencies
+        run: |
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install -r requirements.txt pytest
+          fi
+      - run: python -m pytest -q
+
+  orchestrator-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/orchestrator-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: services/orchestrator-ui/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
