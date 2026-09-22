@@ -389,12 +389,15 @@ detector names it directly, and the existing weights then rank it first, in all 
 ## Not done yet
 
 - **The corpus is empty on a fresh volume** (issue #19). Ingestion needs `--ingest` and
-  Ollama, so a clean `docker compose up` silently runs a retrieval-free system.
+  Ollama, so a clean `docker compose up` still runs a retrieval-free system — but it is no
+  longer silent: `GET /health` reports `corpus_incidents` and a `retrieval` status.
 - **Accuracy, MRR and evidence validity are not produced by the evaluation harness**
   (issue #21) — measured here on fixtures, but the runner does not yet call `/analyze`.
 - **The ablation runs on fixtures, not real injected faults** (issue #22).
-- **`restart_service` and `scale_service` are never proposed** (issue #23): only
-  `no_action` and `rollback_deploy` are reachable today.
+- **`scale_service` is never proposed.** A deliberate choice, not an oversight: nothing
+  measured here shows a service is overloaded, so offering it would be guessing.
+  `restart_service` *is* proposed, but only to a service M2's staleness detector reports
+  silent (issue #23, resolved).
 - Causes are model-written text. They are constrained and checked for unsupported deploy
   claims, but they are not a verified explanation of the fault.
 
