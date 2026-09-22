@@ -23,6 +23,7 @@ from app.ollama import OllamaClient
 from app.pipeline import DiagnosisPipeline, PipelineConfig, ollama_chat, ollama_embed
 from app.retrieval import Embed
 from app.scoring import ScoringConfig
+from app.seed import seed_corpus_if_empty
 from app.settings import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -54,6 +55,7 @@ async def lifespan(_app: FastAPI):
         settings.llm_context_tokens,
         CONFIG_FINGERPRINT,
     )
+    seed_corpus_if_empty(store, settings.embed_model)
     log.info(
         "dependency graph: %d nodes, %d edges; score weights %s; retrieval %s top_k=%d; llm attempts=%d",
         len(graph.nodes),

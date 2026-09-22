@@ -151,10 +151,30 @@ a `_fixture` block recording the injected fault and true root cause. Load them w
 which evaluation must exclude, and re-loading replaces them.
 
 **Incident corpus.** `corpus/incidents/*.md` holds 61 past-incident write-ups: 35 synthetic Sock
-Shop incidents and 26 paraphrased public postmortems (sources and caveats in
-`corpus/README.md`). Embed and load them, re-runnable and updating in place, with
-`test_in_docker.sh --ingest`; `--compare` prints vector-versus-hybrid retrieval for every fixture.
-Both need Ollama on the host.
+Shop incidents and 26 paraphrased public postmortems (sources and caveats in `corpus/README.md`).
+
+**No ingestion step is needed** (issue #19). Their embeddings are committed alongside them in
+`corpus/embeddings.jsonl`, and the service loads them into an empty `incidents` table at startup,
+without calling any embedding model. A clean `docker compose up` therefore has a working corpus,
+and `GET /health` reports `corpus_incidents` and a `retrieval` status so an empty one is never
+silent. Embedding is deterministic for a fixed model and text, so a committed vector is exactly
+what ingestion would have produced; each line stores the sha256 of the text it was made from, and
+a vector whose text has since changed is refused rather than used.
+
+After editing a write-up, regenerate them (needs Ollama):
+
+```bash
+python corpus/ingest.py --write-embeddings   # re-embed, rewrite the file, and load
+python corpus/ingest.py --offline            # load the committed vectors, no Ollama
+```
+
+`test_in_docker.sh --ingest` still re-embeds and loads in place; `--compare` prints
+vector-versus-hybrid retrieval for every fixture. Both need Ollama on the host.
+
+**Retrieval at request time still needs Ollama**, because the anomaly query must be embedded too.
+A seeded corpus removes the manual step and the silent-empty-corpus trap; it does not make
+retrieval work on a machine with no embedding model, where `retrieval_status` is
+`embedding_unavailable` and incident similarity scores 0 for every candidate.
 
 **Configuration** — environment variables, defaults in `app/settings.py`:
 `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
