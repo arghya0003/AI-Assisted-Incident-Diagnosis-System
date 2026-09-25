@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.hypotheses import MAX_HYPOTHESES, Diagnosis
 from app.models import AnalyzeResponse, Hypothesis, NonBlankId
-from app.ollama import ChatReply, OllamaUnavailable
+from app.providers import ChatReply, ProviderUnavailable
 from app.prompts import Prompt, retry_message
 
 log = logging.getLogger("diagnosis-service.llm")
@@ -69,6 +69,7 @@ class LLMOutcome:
     errors: list[str] = field(default_factory=list)  # one entry per rejected or failed attempt
     latency_ms: int = 0
     prompt_tokens: int | None = None
+    model: str | None = None  # the model that answered, which a fallback chain may change
 
 
 def validate_reply(content: str, prompt: Prompt) -> tuple[Diagnosis | None, list[str]]:
@@ -159,15 +160,18 @@ class LLMDiagnoser:
         messages = list(prompt.messages)
         errors: list[str] = []
         prompt_tokens = None
+        model = None
         for attempt in range(1, self._max_attempts + 1):
             try:
                 reply = self._chat(messages, prompt.schema)
-            except OllamaUnavailable as exc:
-                # The client has already retried transport and 5xx errors; don't multiply them.
-                errors.append(f"attempt {attempt}: ollama unavailable: {exc}")
-                log.warning("llm attempt %d: ollama unavailable: %s", attempt, exc)
-                return LLMOutcome(None, attempt, errors, _elapsed_ms(started), prompt_tokens)
+            except ProviderUnavailable as exc:
+                # The client has already retried transport and 5xx errors, and tried every fallback
+                # model; don't multiply them here.
+                errors.append(f"attempt {attempt}: llm provider unavailable: {exc}")
+                log.warning("llm attempt %d: provider unavailable: %s", attempt, exc)
+                return LLMOutcome(None, attempt, errors, _elapsed_ms(started), prompt_tokens, model)
             prompt_tokens = reply.prompt_tokens
+            model = reply.model
             diagnosis, problems = validate_reply(reply.content, prompt)
             if diagnosis is None and reply.done_reason == "length":
                 problems = [
@@ -180,7 +184,7 @@ class LLMDiagnoser:
                     log.info("llm reply accepted on attempt %d", attempt)
                 if diagnosis.adjustments:
                     log.info("llm reply adjusted: %s", "; ".join(diagnosis.adjustments))
-                return LLMOutcome(diagnosis, attempt, errors, _elapsed_ms(started), prompt_tokens)
+                return LLMOutcome(diagnosis, attempt, errors, _elapsed_ms(started), prompt_tokens, model)
             errors.append(f"attempt {attempt}: " + "; ".join(problems))
             log.warning("llm attempt %d/%d rejected: %s", attempt, self._max_attempts, "; ".join(problems))
             messages = [
@@ -188,7 +192,7 @@ class LLMDiagnoser:
                 {"role": "assistant", "content": reply.content},
                 {"role": "user", "content": retry_message(problems)},
             ]
-        return LLMOutcome(None, self._max_attempts, errors, _elapsed_ms(started), prompt_tokens)
+        return LLMOutcome(None, self._max_attempts, errors, _elapsed_ms(started), prompt_tokens, model)
 
 
 def _describe(error: dict) -> str:

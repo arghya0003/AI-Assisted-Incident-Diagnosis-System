@@ -520,8 +520,19 @@ services:
       PG_DB: metrics
       PG_USER: postgres
       PG_PASSWORD: Abcd1234#
+      # Generation goes to OpenRouter by default: the deployed system is online anyway, and no
+      # other machine on the team has Ollama, so integration runs used to answer with the
+      # deterministic fallback every time. Set LLM_PROVIDER=ollama to use a local model instead.
+      LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
+      # From the gitignored .env at the repo root. Without it the service still starts and answers,
+      # but always from the deterministic ranking.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}
+      # Tried in order when a model is unreachable; free endpoints rate-limit often.
+      LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-qwen/qwen3.8-27b:free}
+      # Embeddings stay local: the incidents table is vector(768) from nomic-embed-text, and the
+      # committed corpus vectors were produced with it.
       OLLAMA_URL: http://host.docker.internal:11434
-      LLM_MODEL: phi4-mini
       EMBED_MODEL: nomic-embed-text
       LLM_CONTEXT_TOKENS: "8192"
     healthcheck:
