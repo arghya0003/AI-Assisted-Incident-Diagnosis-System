@@ -20,7 +20,8 @@ from app.guardrail import GuardrailStats
 from app.llm import Chat
 from app.models import AnalyzeRequest, AnalyzeResponse, CandidateReport, PipelineMode, StoredAnalysis
 from app.ollama import OllamaClient
-from app.pipeline import DiagnosisPipeline, PipelineConfig, ollama_chat, ollama_embed
+from app.openrouter import OpenRouterClient
+from app.pipeline import DiagnosisPipeline, PipelineConfig, build_chat, ollama_embed
 from app.retrieval import Embed
 from app.scoring import ScoringConfig
 from app.seed import seed_corpus_if_empty
@@ -39,6 +40,9 @@ scoring_config = ScoringConfig.from_settings(settings)
 pipeline_config = PipelineConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
 ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeout_seconds)
+openrouter = OpenRouterClient(
+    settings.openrouter_api_key, settings.openrouter_url, timeout_seconds=settings.llm_timeout_seconds
+)
 guardrail_stats = GuardrailStats()
 CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_config, pipeline_config)
 
@@ -46,15 +50,24 @@ CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_confi
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     log.info(
-        "starting diagnosis-service %s mode=%s llm=%s embed=%s ollama=%s num_ctx=%d fingerprint=%s",
+        "starting diagnosis-service %s mode=%s provider=%s llm=%s fallbacks=%s embed=%s via %s "
+        "num_ctx=%d max_out=%d fingerprint=%s",
         SERVICE_VERSION,
         settings.pipeline_mode,
+        settings.llm_provider,
         settings.llm_model,
+        ",".join(settings.llm_fallback_models) or "none",
         settings.embed_model,
         settings.ollama_url,
         settings.llm_context_tokens,
+        settings.llm_max_output_tokens,
         CONFIG_FINGERPRINT,
     )
+    if settings.llm_provider == "openrouter" and not settings.openrouter_api_key:
+        log.warning(
+            "OPENROUTER_API_KEY is not set: every /analyze will fall back to the deterministic "
+            "ranking. Put the key in the gitignored .env at the repo root."
+        )
     seed_corpus_if_empty(store, settings.embed_model)
     log.info(
         "dependency graph: %d nodes, %d edges; score weights %s; retrieval %s top_k=%d; llm attempts=%d",
@@ -90,7 +103,7 @@ def get_embedder() -> Embed:
 
 
 def get_chat() -> Chat:
-    return ollama_chat(ollama, settings)
+    return build_chat(settings, ollama, openrouter)
 
 
 def _pipeline(anomalies: AnomalyStore, embed: Embed, chat: Chat) -> DiagnosisPipeline:

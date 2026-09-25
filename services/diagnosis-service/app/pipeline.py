@@ -25,6 +25,8 @@ from app.hypotheses import Diagnosis, rollback_window_minutes
 from app.llm import Chat, LLMDiagnoser, LLMOutcome
 from app.models import AnalyzeResponse, AnsweredBy, CandidateReport, PipelineMode
 from app.ollama import OllamaClient
+from app.openrouter import OpenRouterClient
+from app.providers import ChatReply, ProviderUnavailable
 from app.prompts import Prompt, PromptTooLarge, build_llm_only_prompt, build_prompt
 from app.retrieval import Embed, Retriever
 from app.scoring import ScoringConfig, ScoringInputs, score_candidates
@@ -84,6 +86,53 @@ def ollama_chat(client: OllamaClient, settings: Settings) -> Chat:
     return lambda messages, schema: client.chat(
         messages, settings.llm_model, schema, options, timeout_seconds=settings.llm_timeout_seconds
     )
+
+
+def openrouter_chat(client: OpenRouterClient, settings: Settings) -> Chat:
+    """The default generation path, with the fallback models tried in order.
+
+    Only availability failures move to the next model: a rate limit, an outage, a timeout. A reply
+    that parses but breaks the contract is the model's own behaviour and is retried against the
+    same model by app/llm.py, so every stored answer stays attributable to one model. The model
+    that answered is recorded on the reply, which is what `model_version` stores.
+    """
+    models = [settings.llm_model, *(m for m in settings.llm_fallback_models if m != settings.llm_model)]
+
+    def chat(messages: list[dict[str, str]], schema: dict) -> ChatReply:
+        failures = []
+        for position, model in enumerate(models, start=1):
+            try:
+                reply = client.chat(
+                    messages,
+                    model,
+                    schema,
+                    temperature=settings.llm_temperature,
+                    max_output_tokens=settings.llm_max_output_tokens,
+                    reasoning_effort=settings.llm_reasoning_effort or None,
+                    timeout_seconds=settings.llm_timeout_seconds,
+                )
+            except ProviderUnavailable as exc:
+                failures.append(f"{model}: {exc}")
+                if position < len(models):
+                    log.warning("%s unavailable (%s); trying %s", model, exc, models[position])
+                continue
+            if position > 1:
+                log.info("answered by fallback model %s after %d unavailable", model, position - 1)
+            return reply
+        raise ProviderUnavailable("; ".join(failures))
+
+    return chat
+
+
+def build_chat(settings: Settings, ollama: OllamaClient, openrouter: OpenRouterClient | None = None) -> Chat:
+    """The configured generation provider. Ollama stays selectable so the recorded phi4-mini
+    results can be reproduced, and so the system can be demonstrated without an API key."""
+    if settings.llm_provider == "ollama":
+        return ollama_chat(ollama, settings)
+    client = openrouter or OpenRouterClient(
+        settings.openrouter_api_key, settings.openrouter_url, timeout_seconds=settings.llm_timeout_seconds
+    )
+    return openrouter_chat(client, settings)
 
 
 class DiagnosisPipeline:

@@ -16,10 +16,10 @@ the full pipeline:
 1. ranks possible root causes deterministically: the anomalous services plus everything they
    call, scored on recent deploys, graph distance, being the deepest anomalous service, and
    similarity to retrieved past incidents (`GET /candidates/{anomaly_id}` shows this ranking);
-2. gives the top candidates to `phi4-mini`, which writes and ranks up to 3 hypotheses under a JSON
+2. gives the top candidates to the LLM, which writes and ranks up to 3 hypotheses under a JSON
    schema that ties each hypothesis to one candidate and that candidate's own evidence and actions;
-3. validates the reply and retries with the rejection reasons; after 3 invalid attempts, or if
-   Ollama is unreachable, it returns the deterministic ranking with templated causes instead;
+3. validates the reply and retries with the rejection reasons; after 3 invalid attempts, or if no
+   model could be reached, it returns the deterministic ranking with templated causes instead;
 4. passes every hypothesis through the **evidence guardrail**. A hypothesis citing any id the
    service did not supply (the anomaly, the evidence it produced, and the deploy and incident ids
    put in the prompt) is dropped entirely. If every LLM hypothesis is dropped, the deterministic
@@ -176,15 +176,32 @@ A seeded corpus removes the manual step and the silent-empty-corpus trap; it doe
 retrieval work on a machine with no embedding model, where `retrieval_status` is
 `embedding_unavailable` and incident similarity scores 0 for every candidate.
 
+**Generation provider.** `LLM_PROVIDER` is `openrouter` by default, with
+`nvidia/nemotron-3-super-120b-a12b:free` as `LLM_MODEL` and `qwen/qwen3.8-27b:free` as
+`LLM_FALLBACK_MODELS`. The key comes from the gitignored `.env` at the repo root as
+`OPENROUTER_API_KEY`, passed through `docker-compose.yml`; without it the service still starts and
+answers, always from the deterministic ranking, and says so at startup.
+
+The fallback chain is for **availability only** — a rate limit, an outage, a timeout. A reply that
+arrives and breaks the contract is the model's own behaviour and is retried against the *same*
+model, so a stored answer is always attributable to the model that wrote it. `model_version` on
+each stored analysis records which model that was, not which was configured.
+
+Set `LLM_PROVIDER=ollama` to generate locally with `phi4-mini` instead. That path is kept so the
+phi4-mini results recorded below can be reproduced, and so the system can be demonstrated without
+an API key. **Embeddings are always local**: the `incidents` table is `vector(768)` from
+`nomic-embed-text` and the committed corpus vectors were produced with it.
+
 **Configuration** — environment variables, defaults in `app/settings.py`:
 `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`, `OLLAMA_URL`,
-`LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`.
+`LLM_PROVIDER`, `OPENROUTER_API_KEY`, `OPENROUTER_URL`, `LLM_FALLBACK_MODELS`,
+`LLM_REASONING_EFFORT` `low`, `LLM_MODEL`, `EMBED_MODEL`, `LLM_CONTEXT_TOKENS`.
 Scoring: `SCORE_WEIGHT_DEPLOY` 0.40, `SCORE_WEIGHT_GRAPH` 0.25, `SCORE_WEIGHT_CO_ANOMALY` 0.20,
 `SCORE_WEIGHT_INCIDENT` 0.15 (must sum to 1, checked at startup), `DEPLOY_LOOKBACK_MINUTES` 30,
 `DEPLOY_DECAY_MINUTES` 10, `CO_ANOMALY_WINDOW_SECONDS` 120. Retrieval: `RETRIEVAL_MODE` `hybrid`
 (or `vector`), `RETRIEVAL_TOP_K` 3, `OLLAMA_TIMEOUT_SECONDS` 60. LLM: `LLM_TEMPERATURE` 0.1,
-`LLM_TIMEOUT_SECONDS` 120, `LLM_MAX_ATTEMPTS` 3, `LLM_MAX_OUTPUT_TOKENS` 768,
-`LLM_RESPONSE_RESERVE_TOKENS` 1024, `PROMPT_MAX_CANDIDATES` 5, `PROMPT_MIN_CANDIDATES` 3.
+`LLM_TIMEOUT_SECONDS` 120, `LLM_MAX_ATTEMPTS` 3, `LLM_MAX_OUTPUT_TOKENS` 3072,
+`LLM_RESPONSE_RESERVE_TOKENS` 3072, `PROMPT_MAX_CANDIDATES` 5, `PROMPT_MIN_CANDIDATES` 3.
 `PIPELINE_MODE` `full` (or `no_graph`, `llm_only`, `deterministic`). The prompt text is in
 `app/prompts/*.txt`. The
 container reaches Ollama on the host via `host.docker.internal`, which requires Ollama to listen
@@ -585,3 +602,50 @@ EVAL_RUNS=3 EVAL_ARGS="--modes full,no_graph,deterministic --persist" \
 three runs, so this is closer to nine fixtures checked for consistency than to 27 independent
 samples. It settles run-to-run noise. It does not establish that nine fixtures are enough, and
 it is still fixtures rather than real injected faults (issue #22).
+
+## Moving generation to OpenRouter — 2026-09-25
+
+phi4-mini ran only on a machine with the model pulled and a GPU to spare, which no other machine on
+the team had. Every integration run from M4's side answered `deterministic_fallback` (issue #20).
+Since the deployed system diagnoses a running website, it is online by definition, so an API is the
+honest dependency. Generation moved to OpenRouter; embeddings stayed local.
+
+**Verified before any code was written.** The concern was that the safety design would not port:
+the response schema uses a per-candidate `anyOf` that binds each hypothesis to one service's
+evidence ids and actions, plus `minItems`/`maxItems`/`maxLength` bounds that exist because
+constrained decoding once looped until the output limit. One probe with the real `anom-fx-01`
+prompt settled it — `nvidia/nemotron-3-super-120b-a12b:free` accepted the schema with
+`strict: true` and validated first try:
+
+```
+HTTP 200 in 9.9s | cost 0 | VALIDATES: True | errors: []
+rank 1 catalogue | rollback_deploy:dep-fx-01-inj | cites anom-fx-01, dep-fx-01-inj, anom-fx-01-p99
+"High latency on catalogue coincides with a recent deploy (dep-fx-01-inj) occurring 0.2 minutes
+ before onset and a config diff that introduced an inefficient loop."
+```
+
+**Then end to end through the API** on the stored `anom-fx-11`: `X-Diagnosis-Mode: llm`,
+**1 attempt**, 0 guardrail rejections, 14.5 s, `model_version` stored as the answering model. The
+cause named what the detector measured: "observed value 31.06 vs baseline 30, indicating the
+service stopped reporting metrics".
+
+**Two findings worth carrying into the evaluation:**
+
+- **Reasoning tokens dominate the output budget.** nemotron spent **569 of 719** completion tokens
+  reasoning, for a single hypothesis. The old 768-token cap would have truncated three hypotheses
+  mid-JSON, failing validation and burning retries against a 50-request daily limit. Hence
+  `LLM_MAX_OUTPUT_TOKENS` 3072 and `LLM_REASONING_EFFORT` `low`.
+- **Free endpoints rate-limit often.** `qwen/qwen3.8-27b:free` returned HTTP 429 ("temporarily
+  rate-limited upstream") on the first probe. A 429 is therefore **not** retried on the same model:
+  it clears on someone else's schedule, and switching model is instant and free where waiting is
+  neither.
+
+**Free-tier limits that shape how the evaluation can run:** 20 requests/minute and **50/day** until
+at least $10 of credits is purchased, after which 1,000/day. A model comparison over the 11 fixtures
+is 11 requests and fits comfortably; the 99-run three-mode sweep does not, without credits.
+
+**Not done here:** embeddings still need Ollama at request time, because the anomaly query must be
+embedded too. On a machine with no embedding model, `retrieval_status` is `embedding_unavailable`
+and incident similarity scores 0 — visible in `GET /health`, not silent. Removing that dependency
+means an embedding model whose dimensions match `vector(768)`, or a schema migration and
+re-running the Phase 5 retrieval comparison.

@@ -7,6 +7,11 @@ service is configured the same way as metrics-sink and deploy-emitter.
 import os
 from dataclasses import dataclass
 
+OPENROUTER_DEFAULT_URL = "https://openrouter.ai/api/v1"
+# Free, 262k context, supports strict json_schema and a seed for reproducible runs. Verified
+# against the real prompt before being made the default.
+OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+
 
 def _int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
@@ -28,6 +33,19 @@ def _float_env(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _list_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _default_model() -> str:
+    """The default model depends on the provider, so LLM_MODEL rarely needs setting by hand."""
+    provider = os.environ.get("LLM_PROVIDER") or "openrouter"
+    return OPENROUTER_DEFAULT_MODEL if provider == "openrouter" else "phi4-mini"
+
+
 def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
     value = os.environ.get(name) or default
     if value not in choices:
@@ -43,6 +61,11 @@ class Settings:
     pg_user: str
     pg_password: str
     ollama_url: str
+    llm_provider: str
+    openrouter_url: str
+    openrouter_api_key: str
+    llm_fallback_models: tuple[str, ...]
+    llm_reasoning_effort: str
     llm_model: str
     embed_model: str
     llm_context_tokens: int
@@ -73,9 +96,23 @@ class Settings:
             pg_db=os.environ.get("PG_DB", "metrics"),
             pg_user=os.environ.get("PG_USER", "postgres"),
             pg_password=os.environ.get("PG_PASSWORD", "Abcd1234#"),
-            # Ollama runs on the host (it needs the GPU), not in a container.
+            # Ollama runs on the host (it needs the GPU), not in a container. Still used for
+            # embeddings, and selectable for generation so the phi4-mini results stay reproducible.
             ollama_url=os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434"),
-            llm_model=os.environ.get("LLM_MODEL", "phi4-mini"),
+            # OpenRouter is the default: the deployed system is online anyway, and no other machine
+            # on the team has Ollama, so every integration run used to answer deterministic_fallback.
+            llm_provider=_choice_env("LLM_PROVIDER", "openrouter", ("openrouter", "ollama")),
+            openrouter_url=os.environ.get("OPENROUTER_URL", OPENROUTER_DEFAULT_URL),
+            # From the gitignored .env at the repo root, passed through docker-compose.yml.
+            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            # Tried in order when a model is unreachable (free endpoints rate-limit often). Never
+            # used to paper over a model writing an invalid answer - that is retried on the same
+            # model, so every result stays attributable.
+            llm_fallback_models=_list_env("LLM_FALLBACK_MODELS", ("qwen/qwen3.8-27b:free",)),
+            # nemotron spent 569 of 719 output tokens reasoning on a single hypothesis; "low" keeps
+            # the budget for the answer. Empty disables the parameter for models without reasoning.
+            llm_reasoning_effort=_choice_env("LLM_REASONING_EFFORT", "low", ("", "low", "medium", "high")),
+            llm_model=os.environ.get("LLM_MODEL", _default_model()),
             embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
             # Phase 0: 8192 keeps prompt room with no measured latency cost over 4096.
             llm_context_tokens=_int_env("LLM_CONTEXT_TOKENS", 8192),
@@ -103,11 +140,13 @@ class Settings:
             # Validate-and-retry attempts before falling back to the deterministic ranking.
             llm_max_attempts=_int_env("LLM_MAX_ATTEMPTS", 3),
             # Kept free in the context window for the response (and retry turns).
-            llm_response_reserve_tokens=_int_env("LLM_RESPONSE_RESERVE_TOKENS", 1024),
-            # Hard cap on generated tokens (Ollama num_predict). Three hypotheses need ~400. Without a
-            # cap, schema-constrained decoding was seen to run for over 5 minutes on a prompt that
-            # pushed disallowed ids; with it, a runaway reply ends and is rejected as invalid.
-            llm_max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 768),
+            llm_response_reserve_tokens=_int_env("LLM_RESPONSE_RESERVE_TOKENS", 3072),
+            # Hard cap on generated tokens (Ollama num_predict, OpenRouter max_tokens). Three
+            # hypotheses need ~400. Without a cap, schema-constrained decoding was seen to run for
+            # over 5 minutes on a prompt that pushed disallowed ids; with it, a runaway reply ends
+            # and is rejected as invalid. Reasoning models spend most of this budget thinking -
+            # nemotron used 569 of 719 tokens on reasoning - so the default is far above the answer.
+            llm_max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", 3072),
             # Candidates shown to the LLM, trimmed to the minimum when the prompt is over budget.
             prompt_max_candidates=_int_env("PROMPT_MAX_CANDIDATES", 5),
             prompt_min_candidates=_int_env("PROMPT_MIN_CANDIDATES", 3),
