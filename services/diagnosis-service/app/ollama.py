@@ -9,23 +9,19 @@ the first and would only repeat the wait for the second.
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import httpx
+
+from app.providers import ChatReply, ProviderUnavailable
+
+__all__ = ["ChatReply", "OllamaClient", "OllamaUnavailable", "ProviderUnavailable"]
 
 log = logging.getLogger("diagnosis-service.ollama")
 
 
-class OllamaUnavailable(RuntimeError):
-    """Ollama could not produce a usable response."""
-
-
-@dataclass(frozen=True)
-class ChatReply:
-    content: str
-    prompt_tokens: int | None = None  # Ollama's own count, used to check the prompt budget estimate
-    output_tokens: int | None = None
-    done_reason: str | None = None  # "length" means generation stopped at num_predict
+class OllamaUnavailable(ProviderUnavailable):
+    """Ollama could not produce a usable response. A ProviderUnavailable, so the pipeline handles
+    an absent Ollama and an absent API the same way."""
 
 
 class OllamaClient:

@@ -70,7 +70,11 @@ def stored_analysis(
         anomaly_id=anomaly_id,
         pipeline_mode=result.pipeline_mode,
         answered_by=result.mode,
-        model_version=model_version,
+        # What actually answered, which the fallback chain can change. Storing the requested model
+        # instead would attribute a fallback model's answer to the primary one, and the cache would
+        # then replay it for a request that asked for the primary. A miss and a fresh attempt is
+        # the right outcome there.
+        model_version=(result.llm.model if result.llm and result.llm.model else model_version),
         config_fingerprint=fingerprint,
         llm_attempts=result.llm.attempts if result.llm else 0,
         guardrail_rejected=len(result.guardrail_rejections),
