@@ -125,6 +125,14 @@ def _describe(response: Response, analysis: StoredAnalysis, cache: str, persiste
     response.headers["X-LLM-Attempts"] = str(analysis.llm_attempts)
     response.headers["X-Guardrail-Rejected"] = str(analysis.guardrail_rejected)
     response.headers["X-Analysis-Id"] = analysis.analysis_id
+    # Which model produced this answer, which the fallback chain can change per request. M4's
+    # orchestrator needed a second GET /hypotheses call to find it out, and stored "unknown" when
+    # that call failed; one header removes the round trip and the failure mode.
+    #
+    # On a deterministic_fallback this names the model that was attempted rather than one that
+    # answered, because "we tried nemotron and it was overloaded" is what the audit trail wants;
+    # X-Diagnosis-Mode is what distinguishes the two cases.
+    response.headers["X-Model-Version"] = analysis.model_version
     response.headers["X-Cache"] = cache
     response.headers["X-Persisted"] = "true" if persisted else "false"
 

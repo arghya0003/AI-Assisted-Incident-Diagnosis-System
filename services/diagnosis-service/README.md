@@ -74,6 +74,7 @@ A model failure never produces an error status. Two response headers say how the
 | `X-Diagnosis-Mode` | `llm` (phi4-mini's hypotheses); `deterministic` (the scorer's ranking, by design in `deterministic` mode); `deterministic_fallback` (the scorer's ranking because the LLM failed, with causes prefixed `Deterministic ranking (LLM not used):`); or `llm_failed` (no answer, `llm_only` mode only) |
 | `X-Pipeline-Mode` | The mode that ran: `full`, `no_graph`, `llm_only` or `deterministic` |
 | `X-Analysis-Id` | The stored run's id, as listed by `GET /hypotheses/{anomaly_id}` |
+| `X-Model-Version` | The model that produced this answer, which a fallback chain means is not always the configured one, so it is reported rather than inferred. `none` in `deterministic` mode. When `X-Diagnosis-Mode` is `deterministic_fallback` no model produced the answer and this names the model that was *attempted*, which is what the audit trail needs to record |
 | `X-Cache` | `hit` when a stored answer was returned, otherwise `miss` |
 | `X-Persisted` | `false` if the run could not be stored; the answer is still returned |
 | `X-LLM-Attempts` | `0`–`3`: generation attempts made; `0` when the prompt could not fit the context budget |

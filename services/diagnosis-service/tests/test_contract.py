@@ -14,6 +14,7 @@ from app.db import DatabaseUnavailable
 from app.main import app, get_chat, get_embedder, get_store
 from app.models import AnalyzeRequest, AnalyzeResponse, AnomalyEvent, SimilarIncident
 from app.ollama import ChatReply, OllamaUnavailable
+from app.settings import settings
 
 client = TestClient(app)
 
@@ -163,6 +164,18 @@ def test_analyze_returns_contract_shape():
     body = AnalyzeResponse.model_validate(resp.json())
     assert set(resp.json()) == {"hypotheses"}  # nothing beyond the contract
     assert body.hypotheses[0].rank == 1
+
+
+def test_the_answering_model_is_reported_in_a_header():
+    """M4's orchestrator records which model diagnosed each incident. Without this it made a
+    second GET /hypotheses call per incident and stored "unknown" whenever that call failed, and
+    a fallback chain means the answering model is not always the configured one."""
+    resp = client.post("/analyze", json={"anomaly_id": "anom-0001"})
+    assert resp.headers["X-Model-Version"] == settings.llm_model
+    assert resp.headers["X-Diagnosis-Mode"] == "llm"
+
+    deterministic = client.post("/analyze?mode=deterministic", json={"anomaly_id": "anom-0001"})
+    assert deterministic.headers["X-Model-Version"] == "none", "no model ran, and the header says so"
 
 
 def test_analyze_returns_the_llm_hypotheses():
