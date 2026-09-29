@@ -316,13 +316,20 @@ full measurements in [services/diagnosis-service/README.md](services/diagnosis-s
 
 One service, `services/diagnosis-service/` (Python/FastAPI, port 8000). `POST /analyze
 {anomaly_id}` reads M2's `anomalies` table, gathers context, ranks candidate services,
-asks phi4-mini to explain the ranking, validates the reply, and stores the run.
+asks an LLM to explain the ranking, validates the reply, and stores the run.
 `GET /candidates/{id}` shows the deterministic ranking behind any answer,
 `GET /hypotheses/{id}` lists stored runs, `GET /stats` the guardrail counters.
 
-Ollama runs on the **host**, not in a container, because it needs the GPU: `phi4-mini`
-for generation and `nomic-embed-text` for embeddings, reached through
-`host.docker.internal` (`OLLAMA_HOST=0.0.0.0` is required).
+**Generation goes to OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`, falling back to
+`qwen/qwen3.8-27b:free`), with the key in the gitignored `.env` at the repo root as
+`OPENROUTER_API_KEY`. Without a key the service still answers, always from the deterministic
+ranking. `LLM_PROVIDER=ollama` switches generation back to a local `phi4-mini`, which is how the
+phi4-mini results below can be reproduced.
+
+**Embeddings stay local**: `nomic-embed-text` through Ollama on the host, reached at
+`host.docker.internal` (`OLLAMA_HOST=0.0.0.0` is required). The corpus itself needs no ingestion
+step — its embeddings ship with it — but retrieval embeds the anomaly *query* at request time, so
+without Ollama `retrieval_status` is `embedding_unavailable` and incident similarity scores 0.
 
 ## Phased plan
 
@@ -356,7 +363,8 @@ then cosine similarity. Only the *symptoms* are embedded — embedding whole wri
 few generic ones match almost every query.
 
 ### Phase 6 — LLM reasoning ✅
-phi4-mini with **JSON-schema constrained decoding**: each hypothesis is bound to one listed
+Built on phi4-mini, since moved to OpenRouter (see below), with **JSON-schema constrained
+decoding** throughout: each hypothesis is bound to one listed
 candidate, with only that candidate's citable evidence ids and permitted actions. Text
 instructions were not enough — with a flat action list the model proposed rolling back one
 service's deploy as the fix for another. Three validate-and-retry attempts, then the
@@ -413,6 +421,16 @@ injected on payment was reported by M2's staleness detector 31 s later as a `liv
 anomaly; `/analyze` ranked payment first, answered by the LLM (3 attempts, 21.5 s, no
 guardrail rejections), with the cause "the payment service stopped reporting liveness
 metrics, indicating a possible crash or unreachability".
+
+**Measured on real injected faults, not only fixtures** (2026-09-28,
+`scripts/eval_live.py`, issues #21 and #22). Two runs of five injected scenarios, 3 detected each:
+top-1 1/3 then 2/3, MRR 0.50 then 0.67, **evidence validity 100%** in both. Live accuracy sits
+below fixture accuracy for a reason worth stating: the anomaly usually names a symptom one or two
+hops from the broken service — a catalogue crash arrived as front-end errors, a payment latency
+fault as carts latency — where fixtures nearly always name the culprit or its caller. Detection is
+also nondeterministic: both runs missed two of five faults, but not the same two. Run 2's mode
+comparison is void, since the free-tier quota was exhausted and every `full` run fell back to the
+scorer.
 
 **M2's `liveness` signal solved the crash case.** A crashed service used to be invisible to
 scoring — it stops reporting, so it was never anomalous and never ranked. The staleness

@@ -1050,6 +1050,17 @@ retrieved top 3 for `anom-fx-07` reproduced the Phase 5 similarities exactly (0.
 so rounding the stored vectors to six decimals costs nothing. Retrieval at request time still needs
 Ollama to embed the query - that is inherent, and now visible rather than silent.
 
+**Measured on real injected faults (2026-09-28, issues #21 and #22).** `scripts/eval_live.py`
+injects a fault, waits for M2's detector, analyses the anomaly it produced, and scores against the
+injector's recorded ground truth. Two runs of five scenarios: 3 detected each time, top-1 1/3 then
+2/3, MRR 0.50 then 0.67, evidence validity 100% in both. Three findings matter more than the
+numbers: the anomaly usually names a symptom one or two hops from the broken service rather than
+the service itself, which is why live accuracy sits below fixture accuracy; detection is
+nondeterministic, with both runs missing two of five faults but not the same two; and run 2's
+mode comparison is void because the free-tier quota was exhausted and every `full` run fell back
+to the scorer. A live RAG-versus-LLM ablation needs quota before it needs code. Full table and the
+attribution bug found and fixed between runs are in `README.md`.
+
 **Verified live on 2026-09-16, on a real fault with real traffic.** With M1's `load-generator`
 holding 5 rps, a `service_crash` injection on payment was detected by M2's staleness detector 31 s
 later as a `liveness` anomaly, and `/analyze` ranked payment first and was answered by the LLM, not
