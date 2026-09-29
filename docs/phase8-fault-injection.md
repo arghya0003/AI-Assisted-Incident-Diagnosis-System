@@ -80,8 +80,9 @@ Two consequences for the harness:
 
   This is the same class of bug as the `db_pool_saturation` cap of 100 against a
   151-connection pool: a fault that runs, records itself, and physically does nothing.
-  `evaluation-runner`'s suite passes `cpu_limit` explicitly (0.05 / 0.10), so it is not
-  affected by this default and needs its own look — raised with M2 separately.
+  `evaluation-runner`'s suite passes `cpu_limit` explicitly, so it does not inherit this
+  default; its values are now catalogue `0.002` (measured), front-end and orders `0.005`
+  (estimated, not yet measured).
 - **Every scenario records the load that was running when it was injected.** `POST /faults`
   reads the generator's `/stats` and stores `params.offered_rps_at_inject` on the row. From
   `fault_scenarios` alone, a fault injected into an idle testbed and a detector that simply
