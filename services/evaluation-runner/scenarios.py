@@ -36,10 +36,16 @@ class ScenarioSpec:
 # Durations are long enough for a 1m-rate-window metric to actually move —
 # a 10s fault is invisible to a p95 computed over a 1m window, so scoring
 # one would measure the metrics pipeline's resolution, not the detector.
+#
+# cpu_limit is a fraction of ONE core and only bites below what the service
+# actually uses. 0.05 was measured as a no-op on catalogue (idles at ~0.17%
+# of a core; p95 flat at 4.8ms). 0.002 took it to 160ms. front-end idles near
+# 1.8%, so 0.005 is an estimate well under that; orders is unmeasured - if
+# its p95 doesn't move, lower it rather than suspecting the detector.
 DEFAULT_SUITE: list[ScenarioSpec] = [
-    ScenarioSpec("bad_deploy_latency", "catalogue", 90, {"cpu_limit": 0.05}),
-    ScenarioSpec("bad_deploy_latency", "front-end", 90, {"cpu_limit": 0.05}),
-    ScenarioSpec("bad_deploy_latency", "orders", 90, {"cpu_limit": 0.10}),
+    ScenarioSpec("bad_deploy_latency", "catalogue", 90, {"cpu_limit": 0.002}),
+    ScenarioSpec("bad_deploy_latency", "front-end", 90, {"cpu_limit": 0.005}),
+    ScenarioSpec("bad_deploy_latency", "orders", 90, {"cpu_limit": 0.005}),
     ScenarioSpec("service_crash", "payment", 60),
     ScenarioSpec("service_crash", "user", 60),
     ScenarioSpec("service_crash", "shipping", 60),
@@ -51,7 +57,7 @@ DEFAULT_SUITE: list[ScenarioSpec] = [
 # A quick pass for wiring checks, so nobody waits 20 minutes to find out the
 # consumer was misconfigured.
 SMOKE_SUITE: list[ScenarioSpec] = [
-    ScenarioSpec("bad_deploy_latency", "catalogue", 60, {"cpu_limit": 0.05}),
+    ScenarioSpec("bad_deploy_latency", "catalogue", 60, {"cpu_limit": 0.002}),
     ScenarioSpec("service_crash", "payment", 45),
 ]
 
