@@ -174,8 +174,9 @@ Also found while verifying, and **not** fixed here — each needs its owner's ca
 
 - `cpu_limit` defaults to `0.002` now, not `0.05`. A CPU quota only bites below what the
   service actually uses, and catalogue idles at 0.17% of a core, so `0.05` was a no-op —
-  measured, p95 flat through a full 90 s throttle. `evaluation-runner`'s suite passes
-  `0.05`/`0.10` explicitly and needs its own look (M2).
+  measured, p95 flat through a full 90 s throttle. `evaluation-runner`'s suite now passes
+  `0.002` for catalogue and `0.005` for front-end/orders; the latter two are estimates
+  that still need a measured run (M2).
 - `error_rate` is never ingested for any service: with no 5xx anywhere, the PromQL series
   doesn't exist and the bridge skips the sample instead of publishing 0 (M1).
 - The `anomalies` table is missing on any stack whose TimescaleDB volume predates
