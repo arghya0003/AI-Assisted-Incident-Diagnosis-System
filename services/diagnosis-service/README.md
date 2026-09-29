@@ -650,3 +650,68 @@ embedded too. On a machine with no embedding model, `retrieval_status` is `embed
 and incident similarity scores 0 — visible in `GET /health`, not silent. Removing that dependency
 means an embedding model whose dimensions match `vector(768)`, or a schema migration and
 re-running the Phase 5 retrieval comparison.
+
+## Live evaluation on real injected faults — 2026-09-28
+
+Every accuracy number above was measured on `fixtures/anomalies/*.json` — events written by the
+same author as the corpus. `scripts/eval_live.py` measures the same things on faults M1's injector
+actually caused and M2's detector actually reported, which is what issues #21 and #22 ask for:
+
+```bash
+LIVE_ARGS="--modes full,deterministic" bash services/diagnosis-service/scripts/test_in_docker.sh --live
+```
+
+Per scenario it injects a fault (the injector records `ground_truth_service`, so the label is not
+inferred), waits for an anomaly whose onset falls in the fault window, analyses it in each mode,
+and scores top-1, top-3, reciprocal rank and evidence validity. A fault the detector never reports
+is recorded as `undetected` rather than dropped — excluding it would flatter every number here.
+
+### Two runs, five scenarios each
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| detected / injected | 3/5 | 3/5 |
+| detection delay (median) | 86.2 s | 34.9 s |
+| top-1 (`full` / `deterministic`) | 1/3 · 1/3 | 2/3 · 2/3 |
+| top-3 | 2/3 · 2/3 | 2/3 · 2/3 |
+| MRR | 0.50 · 0.50 | 0.67 · 0.67 |
+| evidence validity | **100%** | **100%** |
+| answered by the LLM | 3/3 | **0/3** |
+
+**Read run 2's mode comparison as nothing at all.** Every `full` run fell back to the scorer —
+OpenRouter's free tier was exhausted or upstream was overloaded — so both rows are the same
+deterministic ranking under different labels. A live RAG-versus-LLM ablation (#22) needs quota
+before it needs code.
+
+### What the runs actually show
+
+- **The anomaly usually does not name the broken service.** A crash of catalogue surfaced as
+  `cpu_rate, error_rate, latency_p50_ms, memory_bytes` on **front-end**; a latency fault on payment
+  surfaced as `latency_p99_ms` on **carts**; a database-pool fault on catalogue surfaced as
+  `latency_p50_ms` on **orders**. Fixtures nearly always name the culprit or its immediate caller.
+  This is the main reason live accuracy (2/3) sits below fixture accuracy (18/27), and it is a
+  property of the problem rather than a defect in the ranker.
+- **Detection is nondeterministic.** Both runs missed 2 of 5 faults, but not the same two. Which
+  faults are observable depends on what traffic happens to be flowing.
+- **Evidence validity is 100%** across both runs: every cited id resolved to a record that exists.
+  One of the plan's five metrics, measured rather than asserted.
+- **Latency has a long tail.** One `full` run took 102 s against M4's 150 s `DIAGNOSIS_TIMEOUT_SECONDS`.
+  The typical case is 8-15 s, but the margin is thinner than that suggests.
+
+### A bug in the first run, recorded because it changes what the numbers mean
+
+Run 1 reported the payment crash as undetected. It was not: the detector fired with an onset 3.9 s
+after the fault window closed, and the window ended at the fault duration exactly. A detector
+aggregates over a trailing window, so an anomaly caused by a fault can begin just after the fault
+is withdrawn. `--grace` (default 90 s) now extends the window past the fault, and the onset offset
+is printed for every attribution so a reader can judge it.
+
+Left uncorrected this would have reported M2's detector as missing a fault it caught. The numbers
+in the table above are after the fix for run 2, and before it for run 1.
+
+### Honest limits
+
+Three detected scenarios per run is a small sample, and the two runs disagree (1/3 versus 2/3 top-1)
+on cases that differ mainly in which faults happened to be observable. These are indicative, not
+results. What is solid is the shape: the ranker is handed symptoms one or two hops from the cause,
+and the deterministic scorer and the LLM agree on the answer whenever both actually run.
