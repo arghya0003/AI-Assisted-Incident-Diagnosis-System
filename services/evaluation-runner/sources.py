@@ -48,6 +48,27 @@ def connect_postgres():
             time.sleep(3)
 
 
+def supported_fault_types() -> set[str] | None:
+    """Ask the injector which fault types it can produce.
+
+    Returns None when the injector cannot be reached or answers oddly. That
+    is deliberately distinct from an empty set: "I could not ask" must not be
+    read as "it supports nothing", or a transient network blip would skip an
+    entire run's worth of scenarios and report a 0% detection rate.
+    """
+    try:
+        response = requests.get(f"{FAULT_INJECTOR_URL}/fault-types", timeout=5)
+        response.raise_for_status()
+        types = response.json()
+    except Exception as exc:
+        log.warning("could not read supported fault types (%s); attempting all scenarios", exc)
+        return None
+    if not isinstance(types, list) or not all(isinstance(t, str) for t in types):
+        log.warning("unexpected /fault-types payload %r; attempting all scenarios", types)
+        return None
+    return set(types)
+
+
 def inject_fault(spec) -> str:
     """Start one fault and return its scenario_id."""
     response = requests.post(

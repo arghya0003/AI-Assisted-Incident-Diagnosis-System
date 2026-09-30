@@ -27,7 +27,7 @@ from pathlib import Path
 import report as reporting
 import scoring
 import sources
-from scenarios import SUITES
+from scenarios import SUITES, partition_by_support
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("evaluation-runner")
@@ -70,7 +70,18 @@ def run_live(args) -> int:
     log.info("listening on anomalies.detected")
 
     suite = SUITES[args.suite]
-    specs = [spec for spec in suite for _ in range(args.repeat)]
+    # Ask the injector what it can actually produce before committing an hour
+    # to a run. A fault type it does not implement returns 400, which the loop
+    # below would log and count as a scenario the detector failed to catch.
+    runnable, unsupported = partition_by_support(suite, sources.supported_fault_types())
+    for spec in unsupported:
+        log.warning("skipping %s: the injector does not implement %s",
+                    spec.label, spec.fault_type)
+    if not runnable:
+        log.error("the injector implements none of the %d scenario(s) in suite '%s'",
+                  len(suite), args.suite)
+        return 1
+    specs = [spec for spec in runnable for _ in range(args.repeat)]
 
     # The detector learns a baseline before it can flag a deviation from one.
     # Injecting during warm-up would score the detector on data it was never
@@ -116,10 +127,16 @@ def run_live(args) -> int:
     notes = [
         f"Detector under test: `{args.detector_label}` (as deployed).",
         f"{len(events)} anomaly event(s) observed in total.",
-        "Fault classes limited to the three the injector can physically produce; "
-        "memory leak / OOM, dependency timeout cascade and config error are not "
-        "implemented yet.",
     ]
+    if unsupported:
+        missing = sorted({spec.fault_type for spec in unsupported})
+        notes.append(
+            f"{len(unsupported)} scenario(s) skipped before injection: the deployed "
+            f"fault injector does not implement "
+            + ", ".join(f"`{name}`" for name in missing)
+            + ". They are excluded from the denominator — a fault that never ran is "
+              "not a fault the detector missed."
+        )
     if unobservable:
         notes.append(
             f"{len(unobservable)} scenario(s) marked unobservable — "
