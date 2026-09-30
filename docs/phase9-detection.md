@@ -512,10 +512,31 @@ today.
   fault so far is a step change, which is why EWMA, CUSUM and 3-sigma tie on all of them.
   The ramp — 180s in six 30s steps, each step longer than the 1m metric window — is the
   first labelled fault where a cumulative statistic has something to win on.
-- **MRR / top-k / evidence validity are unscored by this harness.** The scoring functions
-  are implemented and tested, but the runner never calls `POST /analyze` (issue #21). M3
-  has since built their own live scorer in PR #31 using the same MRR definition, so the
-  team should decide whether that feeds this report or whether the runner calls the
-  endpoint itself, rather than maintaining two harnesses.
+- ~~MRR / top-k / evidence validity are unscored by this harness (issue #21).~~ The
+  `attribute` subcommand closes this. It finds the anomaly the detector raised inside each
+  recorded fault window, asks the diagnosis service to diagnose it, and scores the returned
+  ranking against the service the fault was physically injected into: **top-1 92% (11/12),
+  top-3 100%, MRR 0.94, evidence validity 100%** across 12 scorable scenarios, all on the
+  deterministic path (`pipeline_mode = full`, LLM unused).
+
+  Three things about that number rather than the number alone. A scenario with no anomaly,
+  or an anomaly with no stored hypotheses, is excluded rather than scored zero — those are
+  detection failures and pipeline gaps, and charging them to the ranker would blend three
+  components into one metric; both `db_pool_saturation` runs fell out this way. Duplicate
+  services collapse to their best rank, so a ranker cannot pad its list into a better
+  top-3. And evidence ids are resolved against `evidence`, `anomalies` *and* `deploys`,
+  because the pipeline cites raw source ids rather than the `ev:` ids in
+  docs/evidence-model.md — both resolve to real records, and reporting 0% validity over a
+  format difference would have been a measurement of nothing.
+
+  The single top-1 miss is the most useful result in the set. A `front-end` fault scored
+  RR 0.33 because the grouper had bundled `front-end` and `orders` into one anomaly while
+  `orders` was independently degrading (#33); the ranker picked `orders`, which was the
+  correct read of the candidate set it was given. Later the same day an uncontaminated
+  anomaly named `front-end` alone and the ranker placed it first at 0.84 confidence. So
+  top-1 is currently measuring M2's grouping as much as M3's ranking, and the testbed
+  degradation has now cost the project a detection metric, a false-positive rate and an
+  attribution score. M3 has a separate live scorer (PR #31) on the same MRR definition;
+  which harness owns the reported number is still unsettled.
 - **The false-positive rate**, for the reasons above.
 - **The `db_pool_saturation` mechanism**, for the reasons above.

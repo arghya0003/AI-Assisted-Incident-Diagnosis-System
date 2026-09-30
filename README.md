@@ -292,10 +292,16 @@ stack's cold start. Neither is defensible yet. See below.
   scored as a miss. The mechanisms themselves are written and verified to apply cleanly
   against `services/fault-injector`, but that is M1's file and a shared container, so it
   waits on M1 (issue #35).
-- **MRR / top-k / evidence validity are unscored by this harness** (issue #21): the scoring
-  functions are implemented and tested, but the runner never calls `POST /analyze`. M3 has
-  since built their own live scorer (PR #31) using the same MRR definition, so the team
-  should settle which harness owns these numbers rather than maintaining two.
+- ~~MRR / top-k / evidence validity are unscored by this harness (issue #21).~~
+  `evaluation-runner attribute` now asks the diagnosis service about the anomaly raised
+  inside each fault window and scores the ranking against the injected service: **top-1
+  92%, top-3 100%, MRR 0.94, evidence validity 100%** over 12 scorable scenarios. Two
+  caveats. Rankings are read from the `hypotheses` table rather than the `/analyze`
+  response, because the response schema carries no service field while the table does; and
+  the single top-1 miss was an anomaly where the grouper had bundled the injected service
+  with `orders`, which was genuinely degrading (#33) — so top-1 currently measures M2's
+  grouping as much as M3's ranking. M3 has a separate live scorer (PR #31) using the same
+  MRR definition; the team should still settle which harness owns the number.
 - **Attribution under cascades is an open question.** With real traffic an anomaly often
   names the caller rather than the broken service (M3, PR #31). Whether M2 should order
   `services[]` by likely culpability, or M3 should disambiguate, is undecided.
@@ -447,8 +453,9 @@ detector names it directly, and the existing weights then rank it first, in all 
 - **The corpus is empty on a fresh volume** (issue #19). Ingestion needs `--ingest` and
   Ollama, so a clean `docker compose up` still runs a retrieval-free system — but it is no
   longer silent: `GET /health` reports `corpus_incidents` and a `retrieval` status.
-- **Accuracy, MRR and evidence validity are not produced by the evaluation harness**
-  (issue #21) — measured here on fixtures, but the runner does not yet call `/analyze`.
+- **Accuracy, MRR and evidence validity are measured here on fixtures.** M2's harness now
+  also scores them against injected faults via `POST /analyze` (issue #21), so there are
+  two sources for the same three metrics and the team should settle which the report uses.
 - **The ablation runs on fixtures, not real injected faults** (issue #22).
 - **`scale_service` is never proposed.** A deliberate choice, not an oversight: nothing
   measured here shows a service is overloaded, so offering it would be guessing.
