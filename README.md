@@ -285,8 +285,13 @@ stack's cold start. Neither is defensible yet. See below.
   established pool, so exhausting the database's capacity to accept *new* connections never
   touches it. Either the injector kills catalogue's existing connections, or the scenario
   should be dropped.
-- **Three fault classes, not the six in the plan** — no memory leak / OOM, dependency
-  timeout cascade or config error.
+- **Three fault classes injectable, not the six in the plan.** The four missing scenarios
+  (dependency timeout, config error, memory exhaustion, gradual resource exhaustion) now
+  exist in the suite with labelled ground truth as `--suite full`, and the runner asks the
+  injector what it supports before a run so an unimplemented class is skipped rather than
+  scored as a miss. The mechanisms themselves are written and verified to apply cleanly
+  against `services/fault-injector`, but that is M1's file and a shared container, so it
+  waits on M1 (issue #35).
 - **MRR / top-k / evidence validity are unscored by this harness** (issue #21): the scoring
   functions are implemented and tested, but the runner never calls `POST /analyze`. M3 has
   since built their own live scorer (PR #31) using the same MRR definition, so the team

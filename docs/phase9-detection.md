@@ -498,10 +498,20 @@ today.
 
 ## What is not done
 
-- **Three fault classes, not six.** The plan names memory leak / OOM, dependency timeout
-  cascade and config error as well. The injector cannot produce those. The natural
+- **Three fault classes injectable, not six.** The plan names memory leak / OOM,
+  dependency timeout cascade and config error as well. All four missing scenarios — those
+  three plus a gradual `resource_exhaustion` ramp — are now in `scenarios.py` with labelled
+  ground truth, reachable as `--suite full` or `--suite new-faults`, and `run_live` calls
+  `GET /fault-types` first so a class the deployed injector lacks is excluded from the
+  denominator instead of counted against the detector. What is still missing is the
+  injection mechanism for those four, which lives in M1's `services/fault-injector`: the
+  patch is written and verified to apply, and issue #35 asks for it. Until then the natural
   degradation above is the nearest thing to a slow-drift fault the testbed has, and it is
   unlabelled rather than injected.
+- **`resource_exhaustion` is the scenario the detector comparison needs.** Every injected
+  fault so far is a step change, which is why EWMA, CUSUM and 3-sigma tie on all of them.
+  The ramp — 180s in six 30s steps, each step longer than the 1m metric window — is the
+  first labelled fault where a cumulative statistic has something to win on.
 - **MRR / top-k / evidence validity are unscored by this harness.** The scoring functions
   are implemented and tested, but the runner never calls `POST /analyze` (issue #21). M3
   has since built their own live scorer in PR #31 using the same MRR definition, so the
