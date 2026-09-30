@@ -276,10 +276,12 @@ Reports land in `./results/` as Markdown and CSV, plus a stable `latest.md`.
 - **`t_inject` comes from the database**, not the runner's clock — the injector records it
   when the fault actually starts.
 - **Unmeasured metrics report "not measured", never 0.0.** Root-cause accuracy, MRR and
-  evidence validity all score M3's ranker, which is not wired up yet. `mean_reciprocal_rank`
-  returns `None` for an empty set rather than a confident zero that would read as a measured
-  failure. The functions are implemented and tested, so they start producing numbers the
-  moment M3 supplies a ranker.
+  evidence validity all score M3's ranker. `mean_reciprocal_rank` returns `None` for an
+  empty set rather than a confident zero that would read as a measured failure, and the
+  same rule applies per scenario: one that never reached the ranker is excluded, not scored
+  zero. The distinction stopped mattering in the abstract once `attribute` started calling
+  `POST /analyze` — but it is what makes the excluded scenarios legible instead of
+  invisible.
 
 ### Settle time between scenarios
 
