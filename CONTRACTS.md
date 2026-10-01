@@ -232,6 +232,7 @@ Response:
   "hypotheses": [
     {
       "rank": 1,
+      "service": "catalogue",
       "cause": "Bad deploy dep-2026-08-12-0007 to catalogue introduced a latency regression",
       "confidence": 0.81,
       "evidence_ids": ["anom-0001", "dep-2026-08-12-0007", "incident-0042"],
@@ -240,6 +241,25 @@ Response:
   ]
 }
 ```
+
+`service` is the candidate the hypothesis blames. It is optional: an analysis stored before the
+field existed replays without it. It was added because evaluation scores a ranking against the
+service a fault was injected into, and recovering that by parsing the prose in `cause` made a
+parsing failure indistinguishable from the ranker being wrong (issue #37).
+
+**`evidence_ids` carry source ids, not `evidence_id` values.** The ids are the records themselves -
+`anom-…` for an anomaly, `dep-…` for a deploy, `incident-…` for a past incident - exactly as the
+example above shows. `docs/evidence-model.md` previously said `/analyze` would return `evidence_id`
+values from the `evidence` table; that is now explicitly not the case, and the contradiction between
+the two documents is settled here in favour of source ids. They are what M4's `GET /evidence/{id}`
+resolves, they are meaningful to a human reading the approval console, and they survive a replay of
+a stored analysis.
+
+The `evidence` table is still written on every analysis, with one `ev:<incident>:<category>:<source>`
+row per item and the summary and payload behind it. Anything needing the richer record - M4's
+evidence inspector, or an evaluation checking citation validity - reads it there. A consumer
+resolving citations should accept both forms: source ids are what `/analyze` returns, and `ev:` ids
+appear in the table and in `GET /candidates/{anomaly_id}`.
 
 Every `evidence_ids` entry must resolve to a real anomaly, deploy, or incident record. A
 hypothesis citing an unknown ID is rejected outright (M3's hallucination guardrail).
@@ -304,3 +324,10 @@ shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST ch
       bare `no_action`. `services/orchestrator/app/models.py`'s `Hypothesis` validator accepts
       exactly this grammar; `GET /actions` on the orchestrator exposes it (with each verb's
       blast radius) for the approval UI. See `docs/phase-m4-orchestration.md`.
+- [x] Settle what `/analyze`'s `evidence_ids` contain, since this file's example showed source ids
+      while `docs/evidence-model.md` said `evidence_id` values (issue #37) -- **resolved:** source
+      ids, as the example above has always shown. They resolve through M4's `GET /evidence/{id}`,
+      they are legible to an approver, and they survive the replay of a stored analysis. The
+      `evidence` table is still written on every analysis and holds the `ev:` rows with their
+      summaries; `GET /candidates/{anomaly_id}` returns those in full. A consumer resolving
+      citations should accept both forms. `docs/evidence-model.md` is corrected to match.
