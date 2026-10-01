@@ -82,6 +82,13 @@ class Hypothesis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rank: int = Field(ge=1)
+    # Which candidate this hypothesis blames. The pipeline has always known it - the LLM
+    # schema requires it and `hypotheses.service` stores it on every row - but it was kept
+    # in Diagnosis.services, parallel to the response, so an API caller could only recover
+    # it by parsing the prose in `cause`. Scoring a ranking needs the name, and a regex
+    # failure there is indistinguishable from a wrong answer by the ranker (issue #37).
+    # Optional so that a stored analysis written before this field existed still loads.
+    service: str | None = None
     cause: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_ids: list[NonBlankId] = Field(min_length=1)
@@ -243,6 +250,7 @@ class StoredAnalysis(BaseModel):
             hypotheses=[
                 Hypothesis(
                     rank=h.rank,
+                    service=h.service,
                     cause=h.cause,
                     confidence=h.confidence,
                     evidence_ids=h.evidence_ids,

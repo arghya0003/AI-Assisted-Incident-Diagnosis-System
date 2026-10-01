@@ -137,6 +137,7 @@ def _normalise(hypotheses: list[LLMHypothesis]) -> Diagnosis:
         hypotheses=[
             Hypothesis(
                 rank=rank,
+                service=h.service,
                 cause=h.cause,
                 confidence=h.confidence,
                 evidence_ids=h.evidence_ids,
