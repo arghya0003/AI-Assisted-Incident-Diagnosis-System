@@ -225,7 +225,13 @@ SELECT
     h.service AS top_service, h.cause AS top_cause,
     h.confidence, h.proposed_action,
     i.incident_id, i.state, i.decision, i.decided_hypothesis_rank,
-    i.decided_by, i.decision_reason
+    i.decided_by, i.decision_reason, i.execution_logged,
+    chosen.proposed_action AS approved_action,
+    chosen.service AS approved_service,
+    audit.detail ->> 'verb' AS executed_verb,
+    (audit.detail ->> 'executed')::boolean AS executed,
+    audit.detail ->> 'blast_radius' AS blast_radius,
+    audit.created_at AS executed_at
 FROM fault_scenarios s
 LEFT JOIN LATERAL (
     SELECT anomaly_id, t_detected, severity
@@ -246,13 +252,46 @@ LEFT JOIN LATERAL (
     -- called `incidents` for its past-postmortem RAG corpus, which got the obvious
     -- name first and has no `state` column. M4's state machine is the one with the
     -- human decision on it. See the comment at the top of 008_incidents.sql.
-    SELECT incident_id, state, decision, decided_hypothesis_rank,
-           decided_by, decision_reason
-    FROM orchestrator_incidents
-    WHERE anomaly_id = a.anomaly_id
-    ORDER BY created_at DESC
+    --
+    -- Matched against every anomaly in the fault window, not just the earliest.
+    -- One fault often raises several anomalies and the incident can be opened on
+    -- a later one; keying this to `a.anomaly_id` lost the human decision whenever
+    -- that happened, and the row claimed nobody had decided when somebody had.
+    -- A decided incident wins over an undecided one, since the decision is the
+    -- thing this column exists to show.
+    SELECT oi.incident_id, oi.anomaly_id, oi.state, oi.decision,
+           oi.decided_hypothesis_rank, oi.decided_by, oi.decision_reason,
+           oi.execution_logged
+    FROM orchestrator_incidents oi
+    JOIN anomalies an ON an.anomaly_id = oi.anomaly_id
+    WHERE s.ground_truth_service = ANY(an.services)
+      AND an.t_detected BETWEEN s.t_inject AND
+          LEAST(
+              COALESCE(s.t_recovered, s.t_inject + make_interval(mins => %(max_window)s)),
+              s.t_inject + make_interval(mins => %(max_window)s)
+          ) + make_interval(secs => %(grace)s)
+    ORDER BY (oi.decision IS NOT NULL) DESC, oi.created_at DESC
     LIMIT 1
 ) i ON TRUE
+LEFT JOIN LATERAL (
+    -- The hypothesis a human actually picked, which is not always rank 1 - an
+    -- approver can choose a lower-ranked one, and that choice is the remedy that
+    -- was agreed to.
+    SELECT proposed_action, service
+    FROM hypotheses
+    WHERE anomaly_id = i.anomaly_id AND rank = i.decided_hypothesis_rank
+    ORDER BY created_at DESC
+    LIMIT 1
+) chosen ON TRUE
+LEFT JOIN LATERAL (
+    -- What the executor recorded. It is stubbed by design and never acts, so
+    -- `executed` is the field that keeps this honest: it says false.
+    SELECT detail, created_at
+    FROM audit_log
+    WHERE incident_id = i.incident_id AND event_type = 'EXECUTION_INTENT_LOGGED'
+    ORDER BY created_at DESC
+    LIMIT 1
+) audit ON TRUE
 WHERE s.t_inject > now() - make_interval(hours => %(hours)s)
 ORDER BY s.t_inject DESC
 LIMIT %(limit)s

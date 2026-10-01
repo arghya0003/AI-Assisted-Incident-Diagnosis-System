@@ -252,7 +252,12 @@
     <h2>Fault history, with what the system concluded</h2>
     <p class="hint">
       One row per injected fault, including the ones nothing detected — a history that listed
-      only detected faults would be the most misleading view here. Hours back:
+      only detected faults would be the most misleading view here.
+      <b>No remedy in this system is ever carried out:</b> the executor records intent and is
+      architecturally unable to act, so a service recovers when the injector withdraws the
+      fault, never because an action fixed it. The Remedy column shows what was proposed and
+      how far it got; the Recovery column shows what actually ended the fault.
+      Hours back:
       <select id="h-hours" class="mini">
         <option>6</option><option selected>24</option><option>72</option><option>168</option>
       </select>
@@ -603,7 +608,8 @@ async function loadHistory() {
       el("thead", {}, el("tr", {}, [
         el("th", { text: "Fault" }), el("th", { text: "Injected into" }),
         el("th", { text: "Started" }), el("th", { class: "num", text: "Detected in" }),
-        el("th", { text: "System's first answer" }), el("th", { text: "Human decision" }),
+        el("th", { text: "Diagnosis" }), el("th", { text: "Remedy" }),
+        el("th", { text: "How it recovered" }),
       ])),
       el("tbody", {}, rows.map(r => {
         const hit = r.top_service && r.top_service === r.ground_truth_service;
@@ -615,18 +621,74 @@ async function loadHistory() {
             ? el("span", { text: fmtSecs(r.detect_seconds) })
             : el("span", { class: "pill bad", text: "missed" })),
           el("td", {}, r.top_service
-            ? el("span", {}, [
-                el("span", { class: "pill " + (hit ? "good" : "warn"),
-                  text: (hit ? "✓ " : "≠ ") + r.top_service }),
-                el("div", { class: "sub", text: r.proposed_action || "" })])
+            ? el("span", { class: "pill " + (hit ? "good" : "warn"),
+                text: (hit ? "✓ " : "≠ ") + r.top_service })
             : el("span", { class: "sub", text: r.anomaly_id ? "not diagnosed" : "—" })),
-          el("td", {}, r.decision
-            ? el("span", { class: "pill " + (r.decision === "approved" ? "good" : "bad"),
-                text: r.decision })
-            : el("span", { class: "sub", text: r.state || "—" })),
+          el("td", {}, remedyCell(r)),
+          el("td", {}, recoveryCell(r)),
         ]);
       })));
   } catch (e) { t.innerHTML = '<tr><td class="empty">' + e.message + "</td></tr>"; }
+}
+
+// The remedy the system proposed, and how far it got through the approval chain.
+//
+// It never says "fixed". Nothing in this system remediates: the executor is
+// stubbed by design and records intent without acting (see executor.py, which
+// has no Docker client, no SSH and no HTTP client aimed at the testbed). A
+// column that implied an action restored the service would be the single most
+// misleading thing this dashboard could show, so `executed: false` from the
+// audit row is rendered as "logged, not executed", in those words.
+function remedyCell(r) {
+  const action = r.approved_action || r.proposed_action;
+  if (!action) {
+    return el("span", { class: "sub", text: r.anomaly_id ? "none proposed" : "—" });
+  }
+  let cls = "idle", status;
+  if (r.decision === "approved") {
+    cls = "warn";
+    status = r.executed ? "approved · executed" : "approved · logged, not executed";
+  } else if (r.decision === "rejected") {
+    cls = "bad";
+    status = "rejected";
+  } else if (r.state === "AWAITING_APPROVAL") {
+    cls = "warn";
+    status = "awaiting a human";
+  } else if (r.state) {
+    status = r.state.toLowerCase().replace(/_/g, " ");
+  } else {
+    status = "never reached a human";
+  }
+
+  const parts = [
+    el("div", {}, el("code", { text: action })),
+    el("div", { style: "margin-top:4px" }, el("span", { class: "pill " + cls, text: status })),
+  ];
+  // Who decided and why, because "approved" without an approver is not an audit
+  // trail. The rank matters too: an approver can pick a lower-ranked hypothesis.
+  if (r.decided_by) {
+    parts.push(el("div", { class: "sub", text: r.decided_by +
+      (r.decided_hypothesis_rank ? " · chose #" + r.decided_hypothesis_rank : "") +
+      (r.decision_reason ? " · " + r.decision_reason : "") }));
+  }
+  return el("span", {}, parts);
+}
+
+// How the service actually came back - which is not the remedy above.
+function recoveryCell(r) {
+  if (r.status === "running") {
+    return el("span", { class: "pill warn", text: "fault still running" });
+  }
+  if (r.status === "failed") {
+    return el("span", { class: "pill bad", text: "injector failed" });
+  }
+  const secs = r.t_recovered
+    ? (new Date(r.t_recovered) - new Date(r.t_inject)) / 1000 : null;
+  return el("span", {}, [
+    el("span", { class: "pill good", text: "fault withdrawn" }),
+    el("div", { class: "sub", text: secs != null
+      ? "injector reversed it after " + fmtSecs(secs) : "by the injector" }),
+  ]);
 }
 
 // ───────────────────────────── tab 4: the charts ───────────────────────────
