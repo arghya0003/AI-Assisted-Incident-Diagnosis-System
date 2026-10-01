@@ -41,6 +41,7 @@ def deterministic_diagnosis(report: CandidateReport, limit: int = MAX_HYPOTHESES
         hypotheses.append(
             Hypothesis(
                 rank=rank,
+                service=candidate.service,
                 cause=f"{CAUSE_PREFIX}{candidate.service} scored {candidate.score:.2f}: {detail}.",
                 confidence=round(candidate.score, 3),
                 evidence_ids=options.citable_ids,
