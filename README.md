@@ -10,6 +10,38 @@ every slice produces and consumes.
 | Retrieval-augmented reasoning | M3 | Phases 0-8 complete (`services/diagnosis-service/`); evaluated across four pipeline modes and verified live |
 | Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
 
+## Running it
+
+```bash
+cp .env.example .env     # then add your own OPENROUTER_API_KEY, see below
+docker compose up -d
+```
+
+Ports are listed below. The approval console is <http://localhost:3000>.
+
+**On an existing TimescaleDB volume**, Postgres does not re-run `timescaledb/init/*.sql`, so a
+stack that has been up since an earlier phase is missing newer tables. Apply the ones you need and
+restart the service that owns them; see the per-table instructions further down.
+
+### The API key, and why everyone needs their own
+
+`diagnosis-service` writes its explanations with a cloud model, through
+[OpenRouter](https://openrouter.ai). The key lives in `.env`, which is **gitignored and must stay
+that way** — so cloning this repository does not give you one. Get your own free key in about two
+minutes: sign in at <https://openrouter.ai> with GitHub, create a key at
+<https://openrouter.ai/keys>, and **enable prompt logging under Settings → Privacy**, which the free
+models require. Without that setting every request fails with "No endpoints found matching your data
+policy", which looks exactly like a broken key. The prompts contain synthetic Sock Shop incidents
+only.
+
+Use your own key rather than sharing one: the free tier is 20 requests a minute and 50 a day per
+account, so a shared key is a shared daily budget, and one evaluation run exhausts it for everyone.
+
+**Nothing breaks without a key.** The stack comes up, `/analyze` still returns a ranked,
+evidence-cited answer from the deterministic scorer, and the response header
+`X-Diagnosis-Mode: deterministic_fallback` says so. You lose the written explanation, not the
+diagnosis. `.env.example` documents the rest of the settings.
+
 ---
 
 # Member 1: Testbed & Ingestion Pipeline
