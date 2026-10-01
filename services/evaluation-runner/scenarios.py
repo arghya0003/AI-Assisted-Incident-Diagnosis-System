@@ -137,6 +137,38 @@ SUITES: dict[str, list[ScenarioSpec]] = {
 }
 
 
+# Fault magnitudes for the severity sweep (issue #34), weakest first. A higher
+# cpu_limit is a gentler fault: the quota only bites below what the service
+# actually uses. 0.05 was measured as a near no-op on catalogue and 0.002 took
+# the same service past 600ms, so the range spans "invisible" to "unmissable"
+# and the interesting answer is somewhere in between.
+#
+# These are a starting range, not a result. What the sweep reports is detection
+# rate against *measured* impact, because a quota that cripples one service is
+# a no-op on another and cpu_limit is not comparable across them.
+SEVERITY_LEVELS: tuple[float, ...] = (0.05, 0.02, 0.008, 0.002)
+
+
+def severity_suite(
+    cpu_limit: float,
+    services: tuple[str, ...] = ("catalogue",),
+    duration_s: int = 90,
+) -> list[ScenarioSpec]:
+    """A `bad_deploy_latency` suite at one fault magnitude.
+
+    One fault type on purpose. A sweep is only interpretable if severity is the
+    only thing that changed between rungs, and `service_crash` has no magnitude
+    to vary - a stopped container is stopped.
+    """
+    for service in services:
+        if service not in KNOWN_SERVICES:
+            raise ValueError(f"unknown service {service!r}")
+    return [
+        ScenarioSpec("bad_deploy_latency", service, duration_s, {"cpu_limit": cpu_limit})
+        for service in services
+    ]
+
+
 def partition_by_support(
     specs: list[ScenarioSpec], supported: set[str] | None
 ) -> tuple[list[ScenarioSpec], list[ScenarioSpec]]:

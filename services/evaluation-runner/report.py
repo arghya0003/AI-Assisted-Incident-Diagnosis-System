@@ -316,3 +316,70 @@ def build_attribution_report(generated_at: datetime, results: list, since: datet
         lines += ["", "## Notes", ""] + [f"- {n}" for n in notes]
 
     return "\n".join(lines) + "\n"
+
+
+def build_sweep_report(generated_at: datetime, points: list, services, detectors) -> str:
+    """Render the severity sweep: detection rate against measured fault impact.
+
+    The x-axis is measured impact, never cpu_limit. A quota of 0.002 is a no-op
+    on an idle service and crippling on a busy one, so cpu_limit is not
+    comparable across services or across days - which is the whole reason this
+    sweep exists.
+    """
+    from sweep import STATIC_DETECTOR, best_adaptive_rate, crossover, verdict
+
+    usable = [p for p in points if p.observed]
+    point = crossover(usable)
+
+    lines = [
+        "# Detector ablation across fault severity",
+        "",
+        f"Generated {generated_at.isoformat(timespec='seconds')} · "
+        f"throttling `{'`, `'.join(services)}` · detectors: {', '.join(detectors)}",
+        "",
+        verdict(points),
+        "",
+        "| cpu_limit | baseline p95 | under fault | impact | "
+        + " | ".join(f"`{d}`" for d in detectors) + " |",
+        "| --- | --- | --- | --- | " + " | ".join("---" for _ in detectors) + " |",
+    ]
+    for p in sorted(points, key=lambda p: (p.impact_ms is None, p.impact_ms or 0)):
+        cells = []
+        for d in detectors:
+            detected, total = p.outcomes.get(d, (0, 0))
+            cells.append(f"{detected}/{total}" if total else "—")
+        lines.append(
+            f"| {p.cpu_limit} | {fmt(p.baseline_p95_ms, ' ms')} | "
+            f"{fmt(p.fault_p95_ms, ' ms')} | {fmt(p.impact_ms, ' ms')} | "
+            + " | ".join(cells) + " |"
+        )
+
+    lines += ["", "## Crossover", ""]
+    if point is not None:
+        lines.append(
+            f"At **{point.impact_ms:.0f} ms** of impact (`cpu_limit` {point.cpu_limit}) the "
+            f"`{STATIC_DETECTOR}` detector reaches {fmt_pct(point.rate(STATIC_DETECTOR))}, "
+            f"matching the best adaptive detector at {fmt_pct(best_adaptive_rate(point))}. "
+            "Below that magnitude the learned baseline catches faults the fixed threshold "
+            "does not; above it, the choice of detector stops mattering."
+        )
+    else:
+        lines.append(
+            "The fixed threshold never caught up within the range swept. The crossover is "
+            "above the largest fault measured rather than absent — extend the range before "
+            "claiming a learned baseline wins at every magnitude."
+        )
+
+    lines += [
+        "",
+        "## Reading this",
+        "",
+        "- The x-axis is **measured impact**, not `cpu_limit`. The same quota is a no-op on "
+        "an idle service and crippling on a busy one, so only the measured number compares "
+        "across services and across runs.",
+        "- Each rung resets the testbed first, so a later rung is not scored against a "
+        "service that has been degrading all afternoon (issue #33).",
+        "- Every detector sees the identical recorded sample stream for its rung, replayed "
+        "offline, so nothing separates them except the algorithm.",
+    ]
+    return "\n".join(lines) + "\n"

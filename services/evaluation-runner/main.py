@@ -28,7 +28,10 @@ import report as reporting
 import scoring
 import sources
 import attribution
-from scenarios import SUITES, partition_by_support
+import sweep as sweeping
+from scenarios import (
+    SEVERITY_LEVELS, SUITES, partition_by_support, severity_suite,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("evaluation-runner")
@@ -302,6 +305,111 @@ def run_attribute(args) -> int:
     return 0
 
 
+def run_sweep(args) -> int:
+    """Sweep fault severity and report where a fixed threshold catches up (#34).
+
+    The ablation's answer depends on how hard the injected fault is, and the
+    suite never controlled for that. This runs the same scenario at several
+    magnitudes, replays each window through every detector, and reports
+    detection rate against *measured* p95 impact rather than against cpu_limit -
+    a quota that cripples one service is a no-op on another, so cpu_limit is not
+    a comparable x-axis.
+    """
+    import replay as replaying
+
+    conn = sources.connect_postgres()
+    services = tuple(args.services)
+    points: list[sweeping.SeverityPoint] = []
+
+    for index, cpu_limit in enumerate(args.severities, start=1):
+        specs = severity_suite(cpu_limit, services=services, duration_s=args.duration_seconds)
+        log.info("[rung %d/%d] cpu_limit=%s on %s",
+                 index, len(args.severities), cpu_limit, ", ".join(services))
+
+        # Every rung starts from the same baseline, or the curve measures how
+        # long the testbed has been up rather than fault severity (#33).
+        if not args.no_reset:
+            sources.reset_testbed()
+
+        log.info("warming up detector baselines for %ss", args.warmup_seconds)
+        time.sleep(args.warmup_seconds)
+
+        rung_start = now_utc()
+        scenario_ids: list[str] = []
+        for spec in specs:
+            try:
+                scenario_ids.append(sources.inject_fault(spec))
+            except Exception:
+                log.exception("could not inject %s; continuing", spec.label)
+                continue
+            time.sleep(spec.duration_s + args.settle_seconds)
+        rung_end = now_utc()
+
+        if not scenario_ids:
+            log.error("rung cpu_limit=%s injected nothing; skipping it", cpu_limit)
+            continue
+
+        scenarios = sources.load_scenarios(conn, scenario_ids=scenario_ids)
+        point = sweeping.SeverityPoint(
+            cpu_limit=cpu_limit,
+            baseline_p95_ms=None,
+            fault_p95_ms=None,
+            scenario_ids=scenario_ids,
+        )
+
+        # Impact is measured on the first service only: with one service per
+        # rung (the default) that is the whole picture, and with several it is
+        # at least an unambiguous x-axis rather than a mean across services with
+        # different baselines.
+        subject = services[0]
+        first = min(scenarios, key=lambda s: s.t_inject)
+        point.baseline_p95_ms = sources.measure_p95(
+            conn, subject, sweeping.SWEEP_METRIC,
+            first.t_inject - timedelta(seconds=args.warmup_seconds), first.t_inject,
+        )
+        point.fault_p95_ms = sources.measure_p95(
+            conn, subject, sweeping.SWEEP_METRIC, first.t_inject, rung_end,
+        )
+
+        samples = sources.load_metric_samples(
+            conn, rung_start - timedelta(seconds=args.warmup_seconds), rung_end,
+            IGNORED_METRICS,
+        )
+        deploys = sources.load_deploys(conn, rung_start, rung_end)
+        if not samples:
+            log.error("no metric samples for rung cpu_limit=%s", cpu_limit)
+            points.append(point)
+            continue
+
+        for kind in args.detectors:
+            events = replaying.replay(samples, kind, deploys=deploys)
+            results, summaries, _, _, _ = score_run(
+                scenarios, events, samples[0][0], samples[-1][0]
+            )
+            overall = summaries["overall"]
+            point.outcomes[kind] = (overall.detected, overall.total)
+            log.info("  %-7s %d/%d", kind, overall.detected, overall.total)
+
+        log.info("  impact: baseline %s ms -> %s ms",
+                 point.baseline_p95_ms, point.fault_p95_ms)
+        points.append(point)
+
+    if not points:
+        log.error("no rung produced a result")
+        return 1
+
+    markdown = reporting.build_sweep_report(now_utc(), points, services, args.detectors)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = now_utc().strftime("%Y%m%dT%H%M%SZ")
+    (out_dir / f"sweep-{stamp}.md").write_text(markdown, encoding="utf-8")
+    (out_dir / "sweep-latest.md").write_text(markdown, encoding="utf-8")
+    log.info("wrote %s", out_dir / f"sweep-{stamp}.md")
+    print()
+    print(markdown)
+    return 0
+
+
 def write_outputs(args, title, results, summaries, fp_rate, fp_count, quiet_s,
                    ablation=None, notes=None) -> None:
     out_dir = Path(args.out)
@@ -377,6 +485,26 @@ def build_parser() -> argparse.ArgumentParser:
     attribute.add_argument("--timeout", type=int, default=120,
                            help="seconds to wait for one diagnosis")
     attribute.set_defaults(func=run_attribute)
+
+    sweep = sub.add_parser(
+        "sweep", help="vary fault severity and find where a fixed threshold catches up (#34)"
+    )
+    sweep.add_argument("--severities", type=lambda v: [float(x) for x in v.split(",")],
+                        default=list(SEVERITY_LEVELS),
+                        help="cpu_limit values, weakest first")
+    sweep.add_argument("--services", type=lambda v: [s.strip() for s in v.split(",") if s.strip()],
+                        default=["catalogue"],
+                        help="service(s) to throttle; impact is measured on the first")
+    sweep.add_argument("--duration-seconds", type=int, default=90)
+    sweep.add_argument("--warmup-seconds", type=int, default=90)
+    sweep.add_argument("--settle-seconds", type=int, default=150,
+                        help="gap after each fault; must exceed the grouper cooldown")
+    sweep.add_argument("--detectors", default="ewma,static,zscore,cusum",
+                        type=lambda v: [d.strip() for d in v.split(",") if d.strip()])
+    sweep.add_argument("--no-reset", action="store_true",
+                        help="skip the per-rung testbed reset; rungs then differ by more "
+                             "than severity")
+    sweep.set_defaults(func=run_sweep)
 
     return parser
 
