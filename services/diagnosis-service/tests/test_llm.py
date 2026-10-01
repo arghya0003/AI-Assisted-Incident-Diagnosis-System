@@ -83,8 +83,19 @@ def test_a_valid_reply_becomes_the_contract_shape():
     assert errors == [] and diagnosis.adjustments == []
     assert diagnosis.services == ["catalogue", "user"]
     first = diagnosis.response.hypotheses[0].model_dump()
-    assert "service" not in first  # the contract has no service field
+    # The contract now carries the blamed service (issue #37). It used to live only in
+    # Diagnosis.services, so a caller could recover it only by parsing the prose in `cause`
+    # - and a parsing failure there looks exactly like a wrong answer from the ranker.
+    assert first["service"] == "catalogue"
     assert first["proposed_action"] == "rollback_deploy:dep-1"
+
+
+def test_the_contract_service_matches_the_parallel_candidate_list():
+    """The two must not drift: Diagnosis.services still feeds the guardrail and the stored
+    rows, while the response field is what an API caller reads."""
+    diagnosis, errors = validate_reply(reply(hypothesis(), user_hypothesis(rank=2)), PROMPT)
+    assert errors == []
+    assert [h.service for h in diagnosis.response.hypotheses] == diagnosis.services
 
 
 @pytest.mark.parametrize(

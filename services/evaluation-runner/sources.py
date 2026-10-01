@@ -299,11 +299,11 @@ def request_diagnosis(anomaly_id: str, timeout: int = 120) -> bool:
 def load_hypotheses(conn, anomaly_id: str) -> list[HypothesisRow]:
     """The most recent analysis's hypotheses for one anomaly.
 
-    Read from the database, not from the `POST /analyze` response, for one
-    reason: the response schema has no `service` field, while the table has
-    one and it is populated on every row. Scoring a ranking needs the service,
-    and taking it from the table beats parsing it back out of the prose in
-    `cause`. When M3 adds the field to the response this can prefer it.
+    Read from the database rather than the `POST /analyze` response. The
+    response now carries `service` too (issue #37), so either would work - but
+    the `attribute` subcommand also has to score runs with `--no-analyze`,
+    where there is no response to read. One path that always works beats two
+    that each cover half the cases.
 
     Scoped to the latest `analysis_id` so re-diagnosing an anomaly does not
     blend two runs' rankings into one list.
