@@ -20,7 +20,10 @@ FIXTURE_ID_PREFIX = "anom-fx-"
 FIXTURE_DEPLOY_PREFIX = "dep-fx-"
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "anomalies"
 
-# Fault types fault-injector can produce (services/fault-injector/main.py, FAULT_TYPES).
+# The fault types these fixtures were written against. The injector produces seven since issue #35
+# (also dependency_timeout, config_error, memory_exhaustion, resource_exhaustion); the fixtures
+# predate those, and the new classes are exercised by scripts/eval_live.py --suite full against
+# real injections rather than hand-written events.
 FaultType = Literal["bad_deploy_latency", "service_crash", "db_pool_saturation"]
 
 
