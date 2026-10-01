@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Incident Console</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --ghost: rgba(11, 11, 11, 0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --plane: #0d0d0d;
+      --surface-1: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --ghost: rgba(255, 255, 255, 0.06);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane: #0d0d0d;
+    --surface-1: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --ghost: rgba(255, 255, 255, 0.06);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--plane);
+    color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 21px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  .spacer { flex: 1 1 auto; }
+
+  button, select, input, textarea {
+    font: inherit; color: inherit;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 7px; padding: 7px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { background: var(--ghost); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--series-1); border-color: transparent; color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--series-1); }
+  button.danger { border-color: var(--critical); color: var(--critical); }
+  .mini { font-size: 12.5px; padding: 4px 8px; }
+
+  /* health strip */
+  .health { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0 18px; font-size: 12.5px;
+            color: var(--text-secondary); }
+  .health span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+  .dot.ok { background: var(--good); }
+  .dot.bad { background: var(--critical); }
+
+  /* tabs */
+  nav.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 22px;
+             overflow-x: auto; }
+  nav.tabs button {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 10px 14px; color: var(--text-secondary); white-space: nowrap;
+  }
+  nav.tabs button[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--series-1);
+                                          font-weight: 600; }
+  section[hidden] { display: none; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 11px;
+          padding: 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 4px; }
+  .card .hint { color: var(--text-secondary); font-size: 13px; margin: 0 0 16px; }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px;
+                color: var(--text-secondary); }
+  label.field select, label.field input { color: var(--text-primary); }
+
+  /* stat tiles */
+  .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+           margin-bottom: 16px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 11px; padding: 14px 16px; }
+  .tile .k { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .tile .v { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+  .tile .n { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+          padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+  .pill.good { color: var(--good); } .pill.bad { color: var(--critical); }
+  .pill.warn { color: var(--serious); } .pill.idle { color: var(--text-muted); }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px;
+            color: var(--text-secondary); margin: 0 0 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+  .msg { font-size: 13px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+         margin-top: 14px; }
+  .msg.ok { border-color: var(--good); }
+  .msg.err { border-color: var(--critical); }
+  .msg.warn { border-color: var(--warning); }
+  .empty { color: var(--text-secondary); font-size: 13.5px; padding: 8px 0; }
+
+  .hyp { border: 1px solid var(--border); border-radius: 9px; padding: 11px 13px; margin-bottom: 9px; }
+  .hyp.top { border-color: var(--series-1); }
+  .hyp .rank { font-size: 12px; color: var(--text-secondary); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+  svg { display: block; max-width: 100%; }
+  svg text { fill: var(--text-muted); font-size: 11px; }
+  svg text.lbl { fill: var(--text-secondary); font-size: 11.5px; font-weight: 600; }
+  .tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1);
+         border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
+         box-shadow: 0 6px 20px rgba(0,0,0,0.14); opacity: 0; transition: opacity .1s; }
+  .tip.on { opacity: 1; }
+  .tip b { font-weight: 600; }
+  .tip div { display: flex; gap: 8px; align-items: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Incident Console</h1>
+  <span class="sub">inject · decide · review · measure</span>
+  <span class="spacer"></span>
+  <button class="mini" id="theme">Theme</button>
+  <button class="mini" id="refresh">Refresh</button>
+</header>
+
+<div class="health" id="health"><span><i class="dot"></i>checking services…</span></div>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="inject" aria-selected="true">Inject a fault</button>
+  <button role="tab" data-tab="decide" aria-selected="false">Decisions</button>
+  <button role="tab" data-tab="history" aria-selected="false">History</button>
+  <button role="tab" data-tab="rate" aria-selected="false">Detection rate</button>
+</nav>
+
+<!-- ───────────────────────────────── tab 1 ───────────────────────────────── -->
+<section id="tab-inject">
+  <div class="card">
+    <h2>Inject a labelled fault</h2>
+    <p class="hint">
+      The fault is recorded as ground truth before it starts, so detection can be scored
+      against it afterwards. A fault into an idle testbed moves no metric and nothing can
+      detect it — the offered load is shown above.
+    </p>
+    <div class="grid">
+      <label class="field">Fault type
+        <select id="f-type"></select>
+      </label>
+      <label class="field">Service (ground truth)
+        <select id="f-service"></select>
+      </label>
+      <label class="field">Duration (seconds)
+        <input id="f-duration" type="number" value="90" min="10" max="300">
+      </label>
+    </div>
+    <div class="grid" id="f-params" style="margin-top:14px"></div>
+    <div class="row" style="margin-top:18px">
+      <button class="primary" id="f-go">Inject</button>
+      <span class="sub" id="f-note"></span>
+    </div>
+    <div id="f-result"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent injections</h2>
+    <p class="hint">Straight from the injector, newest first.</p>
+    <div class="scroll"><table id="t-recent"></table></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── tab 2 ───────────────────────────────── -->
+<section id="tab-decide" hidden>
+  <div class="card">
+    <h2>Awaiting a human decision</h2>
+    <p class="hint">
+      Approving records intent only — the executor never touches the running system. Decisions
+      go to the orchestrator, which owns the state machine and the audit chain; this page is a
+      second view onto it, not a second copy.
+    </p>
+    <div class="row" style="margin-bottom:14px">
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px">Your name
+        <input id="approver" value="operator" style="width:160px">
+      </label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px">Show
+        <select id="i-state">
+          <option value="AWAITING_APPROVAL">Awaiting approval</option>
+          <option value="">All states</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="ANALYZING">Analyzing</option>
+          <option value="ANALYSIS_FAILED">Analysis failed</option>
+          <option value="EXPIRED">Expired</option>
+        </select>
+      </label>
+    </div>
+    <div id="incidents"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── tab 3 ───────────────────────────────── -->
+<section id="tab-history" hidden>
+  <div class="card">
+    <h2>Fault history, with what the system concluded</h2>
+    <p class="hint">
+      One row per injected fault, including the ones nothing detected — a history that listed
+      only detected faults would be the most misleading view here.
+      <b>No remedy in this system is ever carried out:</b> the executor records intent and is
+      architecturally unable to act, so a service recovers when the injector withdraws the
+      fault, never because an action fixed it. The Remedy column shows what was proposed and
+      how far it got; the Recovery column shows what actually ended the fault.
+      Hours back:
+      <select id="h-hours" class="mini">
+        <option>6</option><option selected>24</option><option>72</option><option>168</option>
+      </select>
+    </p>
+    <div class="scroll"><table id="t-history"></table></div>
+  </div>
+</section>
+
+<!-- ───────────────────────────────── tab 4 ───────────────────────────────── -->
+<section id="tab-rate" hidden>
+  <div class="tiles" id="rate-tiles"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <div>
+        <h2>Faults injected vs faults detected</h2>
+        <p class="hint" style="margin:0">
+          Counts per time bucket. Anything in the gap between the two lines is a fault the
+          detector did not catch.
+        </p>
+      </div>
+      <div class="row">
+        <select id="r-hours" class="mini">
+          <option value="6">6 h</option><option value="24" selected>24 h</option>
+          <option value="72">3 d</option><option value="168">7 d</option>
+        </select>
+        <select id="r-bucket" class="mini">
+          <option value="10">10 min</option><option value="30" selected>30 min</option>
+          <option value="60">1 h</option><option value="360">6 h</option>
+        </select>
+        <button class="mini" id="r-table">Table view</button>
+      </div>
+    </div>
+    <div class="legend" id="r-legend"></div>
+    <div id="chart-rate"></div>
+    <div class="scroll" id="rate-table" hidden><table id="t-rate"></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Detection rate by fault class</h2>
+    <p class="hint">
+      Share of injections of each class that produced an anomaly naming the injected service,
+      within the same 90-second grace the evaluation report uses.
+    </p>
+    <div id="chart-type"></div>
+  </div>
+</section>
+
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+// ───────────────────────────────── helpers ─────────────────────────────────
+const $ = (s, r = document) => r.querySelector(s);
+const el = (t, a = {}, kids = []) => {
+  const n = document.createElementNS(a.ns || "http://www.w3.org/1999/xhtml", t);
+  for (const [k, v] of Object.entries(a)) {
+    if (k === "ns" || v == null) continue;
+    if (k === "text") n.textContent = v;
+    else if (k === "html") n.innerHTML = v;
+    else n.setAttribute(k, v);
+  }
+  for (const c of [].concat(kids)) if (c) n.append(c);
+  return n;
+};
+const svgEl = (t, a = {}, kids = []) => el(t, { ...a, ns: "http://www.w3.org/2000/svg" }, kids);
+
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleString([], {
+  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+const fmtClock = (iso) => iso ? new Date(iso).toLocaleTimeString([], {
+  hour: "2-digit", minute: "2-digit" }) : "";
+const fmtSecs = (s) => s == null ? "—" : (s < 10 ? s.toFixed(1) : Math.round(s)) + " s";
+const pct = (n, d) => d ? Math.round(100 * n / d) + "%" : "—";
+
+async function api(path, opts) {
+  const res = await fetch("/api" + path, opts);
+  let body = null;
+  try { body = await res.json(); } catch { body = { error: "unreadable response" }; }
+  if (!res.ok) throw new Error(body && body.error ? body.error
+    : (body && body.detail ? JSON.stringify(body.detail) : "HTTP " + res.status));
+  return body;
+}
+const post = (path, body) => api(path, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+function message(host, kind, text) {
+  host.replaceChildren(el("div", { class: "msg " + kind, text }));
+}
+
+// ───────────────────────────────── chrome ──────────────────────────────────
+$("#theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme === "dark";
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  if (current === "rate") loadRate();   // SVG strokes are painted, not inherited
+};
+
+const TABS = ["inject", "decide", "history", "rate"];
+let current = "inject";
+
+function showTab(name, pushHash = true) {
+  if (!TABS.includes(name)) name = "inject";
+  current = name;
+  for (const o of document.querySelectorAll("nav.tabs button"))
+    o.setAttribute("aria-selected", String(o.dataset.tab === name));
+  for (const s of document.querySelectorAll("section"))
+    s.hidden = s.id !== "tab-" + name;
+  // The tab lives in the URL so a view can be linked to or reloaded in place -
+  // useful when someone is asked to look at one specific thing.
+  if (pushHash && location.hash !== "#" + name) location.hash = name;
+  loadCurrent();
+}
+for (const b of document.querySelectorAll("nav.tabs button"))
+  b.onclick = () => showTab(b.dataset.tab);
+addEventListener("hashchange", () => showTab(location.hash.slice(1), false));
+$("#refresh").onclick = () => { loadHealth(); loadCurrent(); };
+
+function loadCurrent() {
+  if (current === "inject") loadRecent();
+  if (current === "decide") loadIncidents();
+  if (current === "history") loadHistory();
+  if (current === "rate") loadRate();
+}
+
+// ───────────────────────────────── health ──────────────────────────────────
+async function loadHealth() {
+  const host = $("#health");
+  try {
+    const { checks, offered_rps } = await api("/health");
+    host.replaceChildren(...Object.entries(checks).map(([name, c]) =>
+      el("span", { title: c.error || ("HTTP " + (c.status ?? "ok")) }, [
+        el("i", { class: "dot " + (c.ok ? "ok" : "bad") }),
+        el("span", { text: name })])));
+    const idle = offered_rps != null && offered_rps < 1;
+    host.append(el("span", { title: "offered request rate at the edge router" }, [
+      el("i", { class: "dot " + (offered_rps == null ? "" : idle ? "bad" : "ok") }),
+      el("span", { text: offered_rps == null ? "load unknown"
+        : offered_rps.toFixed(1) + " req/s offered" })]));
+    $("#f-note").textContent = idle
+      ? "Testbed is nearly idle — a fault now may move no metric."
+      : "";
+  } catch (e) {
+    host.replaceChildren(el("span", {}, [el("i", { class: "dot bad" }),
+      el("span", { text: "dashboard backend unreachable: " + e.message })]));
+  }
+}
+
+// ──────────────────────────────── tab 1: inject ────────────────────────────
+// Each fault type's own parameters. Defaults match the injector's, so an
+// unchanged form reproduces its default behaviour.
+const PARAMS = {
+  bad_deploy_latency: [["cpu_limit", "CPU quota (fraction of a core)", 0.002, "number", "any"]],
+  db_pool_saturation: [["connections", "Held connections", 155, "number", "1"]],
+  memory_exhaustion:  [["limit_mb", "Memory cap (MB)", 64, "number", "1"]],
+  resource_exhaustion: [["cpu_limit", "Final CPU quota", 0.002, "number", "any"],
+                        ["steps", "Ramp steps", 6, "number", "1"]],
+  dependency_timeout: [["dependency", "Dependency to freeze", "", "text"]],
+  config_error:       [["dependency", "Hostname to break", "", "text"]],
+  service_crash:      [],
+};
+
+function renderParams() {
+  const type = $("#f-type").value;
+  const host = $("#f-params");
+  host.replaceChildren(...(PARAMS[type] || []).map(([key, label, dflt, type2, step]) =>
+    el("label", { class: "field", text: label }, [
+      el("input", { id: "p-" + key, type: type2, step, value: dflt })])));
+}
+
+async function loadFaultTypes() {
+  try {
+    const { fault_types, services } = await api("/fault-types");
+    $("#f-type").replaceChildren(...fault_types.map(t => el("option", { value: t, text: t })));
+    $("#f-service").replaceChildren(...services.map(s => el("option", { value: s, text: s })));
+    renderParams();
+  } catch (e) {
+    message($("#f-result"), "err", e.message);
+    $("#f-go").disabled = true;
+  }
+}
+$("#f-type").onchange = renderParams;
+
+$("#f-go").onclick = async () => {
+  const btn = $("#f-go");
+  const type = $("#f-type").value;
+  const body = {
+    fault_type: type,
+    service: $("#f-service").value,
+    duration_s: Number($("#f-duration").value),
+  };
+  for (const [key, , , kind] of PARAMS[type] || []) {
+    const raw = $("#p-" + key).value;
+    if (raw === "") continue;              // let the injector apply its own default
+    body[key] = kind === "number" ? Number(raw) : raw;
+  }
+  btn.disabled = true;
+  btn.textContent = "Injecting…";
+  try {
+    const r = await post("/faults", body);
+    const host = $("#f-result");
+    host.replaceChildren(el("div", { class: "msg ok", html:
+      "Injected <code>" + r.scenario_id + "</code> — " + r.fault_type + " on <b>" +
+      r.ground_truth_service + "</b>. It runs for " + body.duration_s +
+      "s and recovers on its own." }));
+    if (r.warning) host.append(el("div", { class: "msg warn", text: r.warning }));
+    loadRecent();
+  } catch (e) {
+    message($("#f-result"), "err", e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Inject";
+  }
+};
+
+async function loadRecent() {
+  const t = $("#t-recent");
+  try {
+    const rows = await api("/faults?limit=15");
+    if (!rows.length) {
+      t.innerHTML = '<tr><td class="empty">Nothing injected yet.</td></tr>';
+      return;
+    }
+    t.replaceChildren(
+      el("thead", {}, el("tr", {}, ["Fault", "Service", "Started", "Status"].map(h =>
+        el("th", { text: h })))),
+      el("tbody", {}, rows.map(r => el("tr", {}, [
+        el("td", {}, el("code", { text: r.fault_type })),
+        el("td", { text: r.ground_truth_service }),
+        el("td", { text: fmtTime(r.t_inject) }),
+        el("td", {}, el("span", {
+          class: "pill " + (r.status === "recovered" ? "good" : r.status === "failed" ? "bad" : "warn"),
+          text: r.status })),
+      ]))));
+  } catch (e) { t.innerHTML = '<tr><td class="empty">' + e.message + "</td></tr>"; }
+}
+
+// ─────────────────────────── tab 2: human decisions ────────────────────────
+$("#i-state").onchange = loadIncidents;
+
+async function loadIncidents() {
+  const host = $("#incidents");
+  try {
+    const state = $("#i-state").value;
+    const rows = await api("/incidents?limit=50" + (state ? "&state=" + state : ""));
+    if (!rows.length) {
+      host.replaceChildren(el("p", { class: "empty",
+        text: state ? "No incidents in " + state + "." : "No incidents yet." }));
+      return;
+    }
+    host.replaceChildren(...rows.map(incidentCard));
+  } catch (e) { message(host, "err", e.message); }
+}
+
+function incidentCard(inc) {
+  const open = inc.state === "AWAITING_APPROVAL";
+  const head = el("div", { class: "row", style: "justify-content:space-between" }, [
+    el("div", {}, [
+      el("div", {}, [
+        el("b", { text: (inc.services || []).join(", ") || "unknown service" }),
+        el("span", { class: "sub", text: "  " + (inc.severity || "") }),
+      ]),
+      el("div", { class: "sub" }, el("code", { text: inc.anomaly_id })),
+    ]),
+    el("span", { class: "pill " + stateClass(inc.state), text: inc.state }),
+  ]);
+
+  const body = el("div", { style: "margin-top:12px" });
+  const out = el("div");   // where this card's own errors land
+  const hyps = inc.hypotheses || [];
+  if (!hyps.length) {
+    body.append(el("p", { class: "empty", text: inc.fail_reason ||
+      "No hypotheses — nothing has diagnosed this anomaly yet." }));
+  }
+  for (const h of hyps) {
+    const card = el("div", { class: "hyp" + (h.rank === 1 ? " top" : "") }, [
+      el("div", { class: "rank", text: "#" + h.rank + " · confidence " +
+        (h.confidence != null ? h.confidence.toFixed(2) : "—") +
+        (h.service ? " · " + h.service : "") }),
+      el("div", { text: h.cause }),
+      el("div", { class: "sub", text: "proposed: " + (h.proposed_action || "no_action") }),
+    ]);
+    if (open) {
+      const note = el("input", { placeholder: "note (optional)", style: "flex:1 1 180px" });
+      card.append(el("div", { class: "row", style: "margin-top:10px" }, [
+        el("button", { class: "primary mini", text: "Approve #" + h.rank }),
+        note,
+      ]));
+      card.querySelector("button").onclick = (ev) =>
+        decide(ev.target, out, inc.incident_id, "approve",
+          { hypothesis_rank: h.rank, approver: approverName(), note: note.value || null });
+    }
+    body.append(card);
+  }
+
+  if (open) {
+    const reason = el("input", { placeholder: "why (required to reject)", style: "flex:1 1 200px" });
+    const cat = el("select", {}, ["wrong_root_cause", "wrong_action", "insufficient_evidence",
+      "duplicate", "other"].map(c => el("option", { value: c, text: c.replace(/_/g, " ") })));
+    const rejectBtn = el("button", { class: "danger mini", text: "Reject" });
+    const infoBtn = el("button", { class: "mini", text: "Request info" });
+    rejectBtn.onclick = (ev) => {
+      if (!reason.value.trim()) return message(out, "err", "A rejection needs a reason.");
+      decide(ev.target, out, inc.incident_id, "reject",
+        { approver: approverName(), reason: reason.value, reason_category: cat.value });
+    };
+    infoBtn.onclick = (ev) => {
+      if (!reason.value.trim()) return message(out, "err", "Say what else you need.");
+      decide(ev.target, out, inc.incident_id, "request-info",
+        { approver: approverName(), note: reason.value });
+    };
+    body.append(el("div", { class: "row", style: "margin-top:6px" }, [reason, cat, rejectBtn, infoBtn]));
+  } else if (inc.decision) {
+    body.append(el("p", { class: "sub", text: inc.decision + " by " + (inc.decided_by || "—") +
+      (inc.decided_hypothesis_rank ? " (hypothesis #" + inc.decided_hypothesis_rank + ")" : "") +
+      (inc.decision_reason ? " — " + inc.decision_reason : "") }));
+  }
+
+  body.append(out);
+  return el("div", { class: "card" }, [head, body]);
+}
+
+const approverName = () => $("#approver").value.trim() || "operator";
+const stateClass = (s) => s === "APPROVED" ? "good" : s === "REJECTED" ? "bad"
+  : s === "AWAITING_APPROVAL" ? "warn" : "idle";
+
+async function decide(btn, out, id, verb, body) {
+  btn.disabled = true;
+  try {
+    await post("/incidents/" + id + "/" + verb, body);
+    await loadIncidents();   // re-read rather than patch: the orchestrator owns the state
+  } catch (e) {
+    message(out, "err", e.message);
+    btn.disabled = false;
+  }
+}
+
+// ──────────────────────────────── tab 3: history ───────────────────────────
+$("#h-hours").onchange = loadHistory;
+
+async function loadHistory() {
+  const t = $("#t-history");
+  try {
+    const rows = await api("/history?hours=" + $("#h-hours").value);
+    if (!rows.length) {
+      t.innerHTML = '<tr><td class="empty">No faults injected in this window.</td></tr>';
+      return;
+    }
+    t.replaceChildren(
+      el("thead", {}, el("tr", {}, [
+        el("th", { text: "Fault" }), el("th", { text: "Injected into" }),
+        el("th", { text: "Started" }), el("th", { class: "num", text: "Detected in" }),
+        el("th", { text: "Diagnosis" }), el("th", { text: "Remedy" }),
+        el("th", { text: "How it recovered" }),
+      ])),
+      el("tbody", {}, rows.map(r => {
+        const hit = r.top_service && r.top_service === r.ground_truth_service;
+        return el("tr", {}, [
+          el("td", {}, el("code", { text: r.fault_type })),
+          el("td", {}, el("b", { text: r.ground_truth_service })),
+          el("td", { text: fmtTime(r.t_inject) }),
+          el("td", { class: "num" }, r.anomaly_id
+            ? el("span", { text: fmtSecs(r.detect_seconds) })
+            : el("span", { class: "pill bad", text: "missed" })),
+          el("td", {}, r.top_service
+            ? el("span", { class: "pill " + (hit ? "good" : "warn"),
+                text: (hit ? "✓ " : "≠ ") + r.top_service })
+            : el("span", { class: "sub", text: r.anomaly_id ? "not diagnosed" : "—" })),
+          el("td", {}, remedyCell(r)),
+          el("td", {}, recoveryCell(r)),
+        ]);
+      })));
+  } catch (e) { t.innerHTML = '<tr><td class="empty">' + e.message + "</td></tr>"; }
+}
+
+// The remedy the system proposed, and how far it got through the approval chain.
+//
+// It never says "fixed". Nothing in this system remediates: the executor is
+// stubbed by design and records intent without acting (see executor.py, which
+// has no Docker client, no SSH and no HTTP client aimed at the testbed). A
+// column that implied an action restored the service would be the single most
+// misleading thing this dashboard could show, so `executed: false` from the
+// audit row is rendered as "logged, not executed", in those words.
+function remedyCell(r) {
+  const action = r.approved_action || r.proposed_action;
+  if (!action) {
+    return el("span", { class: "sub", text: r.anomaly_id ? "none proposed" : "—" });
+  }
+  let cls = "idle", status;
+  if (r.decision === "approved") {
+    cls = "warn";
+    status = r.executed ? "approved · executed" : "approved · logged, not executed";
+  } else if (r.decision === "rejected") {
+    cls = "bad";
+    status = "rejected";
+  } else if (r.state === "AWAITING_APPROVAL") {
+    cls = "warn";
+    status = "awaiting a human";
+  } else if (r.state) {
+    status = r.state.toLowerCase().replace(/_/g, " ");
+  } else {
+    status = "never reached a human";
+  }
+
+  const parts = [
+    el("div", {}, el("code", { text: action })),
+    el("div", { style: "margin-top:4px" }, el("span", { class: "pill " + cls, text: status })),
+  ];
+  // Who decided and why, because "approved" without an approver is not an audit
+  // trail. The rank matters too: an approver can pick a lower-ranked hypothesis.
+  if (r.decided_by) {
+    parts.push(el("div", { class: "sub", text: r.decided_by +
+      (r.decided_hypothesis_rank ? " · chose #" + r.decided_hypothesis_rank : "") +
+      (r.decision_reason ? " · " + r.decision_reason : "") }));
+  }
+  return el("span", {}, parts);
+}
+
+// How the service actually came back - which is not the remedy above.
+function recoveryCell(r) {
+  if (r.status === "running") {
+    return el("span", { class: "pill warn", text: "fault still running" });
+  }
+  if (r.status === "failed") {
+    return el("span", { class: "pill bad", text: "injector failed" });
+  }
+  const secs = r.t_recovered
+    ? (new Date(r.t_recovered) - new Date(r.t_inject)) / 1000 : null;
+  return el("span", {}, [
+    el("span", { class: "pill good", text: "fault withdrawn" }),
+    el("div", { class: "sub", text: secs != null
+      ? "injector reversed it after " + fmtSecs(secs) : "by the injector" }),
+  ]);
+}
+
+// ───────────────────────────── tab 4: the charts ───────────────────────────
+$("#r-hours").onchange = loadRate;
+$("#r-bucket").onchange = loadRate;
+$("#r-table").onclick = () => {
+  const tbl = $("#rate-table");
+  tbl.hidden = !tbl.hidden;
+  $("#r-table").textContent = tbl.hidden ? "Table view" : "Hide table";
+};
+
+const SERIES = [
+  { key: "injected", label: "Faults injected", color: "--series-1" },
+  { key: "detected", label: "Detected", color: "--series-2" },
+  { key: "unattributed", label: "Anomalies with no fault running", color: "--series-3" },
+];
+
+async function loadRate() {
+  let data;
+  try { data = await api("/fault-rate?hours=" + $("#r-hours").value +
+                         "&bucket=" + $("#r-bucket").value); }
+  catch (e) { message($("#chart-rate"), "err", e.message); return; }
+
+  // Merge the two bucketed queries onto one time axis.
+  const byBucket = new Map();
+  for (const r of data.series) byBucket.set(r.bucket,
+    { bucket: r.bucket, injected: +r.injected, detected: +r.detected, unattributed: 0 });
+  for (const r of data.unattributed) {
+    const row = byBucket.get(r.bucket) ||
+      { bucket: r.bucket, injected: 0, detected: 0, unattributed: 0 };
+    row.unattributed = +r.unattributed;
+    byBucket.set(r.bucket, row);
+  }
+  const rows = [...byBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
+
+  const injected = rows.reduce((s, r) => s + r.injected, 0);
+  const detected = rows.reduce((s, r) => s + r.detected, 0);
+  const unattributed = rows.reduce((s, r) => s + r.unattributed, 0);
+  const medians = data.by_type.map(t => t.median_detect_seconds).filter(v => v != null).map(Number);
+  medians.sort((a, b) => a - b);
+
+  $("#rate-tiles").replaceChildren(
+    tile("Faults injected", injected, data.hours + " h window"),
+    tile("Detected", detected, injected ? pct(detected, injected) + " of injected" : "—"),
+    tile("Missed", injected - detected, injected ? pct(injected - detected, injected) : "—"),
+    tile("Median detection", medians.length
+      ? fmtSecs(medians[Math.floor(medians.length / 2)]) : "—", "target under 60 s"),
+    tile("Unattributed alerts", unattributed, "no fault was running"),
+  );
+
+  $("#r-legend").replaceChildren(...SERIES.map(s => el("span", {}, [
+    el("i", { class: "swatch", style: "background:var(" + s.color + ")" }),
+    el("span", { text: s.label })])));
+
+  drawLines($("#chart-rate"), rows);
+  drawTable($("#t-rate"), rows);
+  drawByType($("#chart-type"), data.by_type);
+}
+
+const tile = (k, v, n) => el("div", { class: "tile" }, [
+  el("div", { class: "k", text: k }), el("div", { class: "v", text: v }),
+  el("div", { class: "n", text: n })]);
+
+function drawTable(t, rows) {
+  t.replaceChildren(
+    el("thead", {}, el("tr", {}, [el("th", { text: "Bucket" }),
+      ...SERIES.map(s => el("th", { class: "num", text: s.label }))])),
+    el("tbody", {}, rows.map(r => el("tr", {}, [el("td", { text: fmtTime(r.bucket) }),
+      ...SERIES.map(s => el("td", { class: "num", text: r[s.key] }))]))));
+}
+
+function drawLines(host, rows) {
+  host.replaceChildren();
+  if (rows.length === 0) {
+    host.append(el("p", { class: "empty", text: "No faults injected in this window." }));
+    return;
+  }
+  const W = Math.min(host.clientWidth || 900, 1100), H = 260;
+  const m = { t: 14, r: 54, b: 28, l: 34 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const maxY = Math.max(2, ...rows.flatMap(r => SERIES.map(s => r[s.key])));
+  const x = (i) => rows.length === 1 ? m.l + iw / 2 : m.l + (i / (rows.length - 1)) * iw;
+  const y = (v) => m.t + ih - (v / maxY) * ih;
+
+  const g = [];
+  // Recessive gridlines and ticks: whole numbers only, since these are counts.
+  const step = Math.max(1, Math.ceil(maxY / 4));
+  for (let v = 0; v <= maxY; v += step) {
+    g.push(svgEl("line", { x1: m.l, x2: m.l + iw, y1: y(v), y2: y(v),
+      stroke: "var(--grid)", "stroke-width": 1 }));
+    g.push(svgEl("text", { x: m.l - 7, y: y(v) + 4, "text-anchor": "end", text: v }));
+  }
+  g.push(svgEl("line", { x1: m.l, x2: m.l + iw, y1: y(0), y2: y(0),
+    stroke: "var(--axis)", "stroke-width": 1 }));
+
+  // Once the window crosses midnight, a bare clock time reads as unsorted
+  // ("11 pm, 12 am, 8 pm"), so the day goes on the label too.
+  const spanH = rows.length > 1
+    ? (new Date(rows[rows.length - 1].bucket) - new Date(rows[0].bucket)) / 3.6e6 : 0;
+  const tickLabel = (iso) => spanH > 12
+    ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" })
+    : fmtClock(iso);
+  const ticks = Math.min(rows.length, spanH > 12 ? 5 : 6);
+  for (let k = 0; k < ticks; k++) {
+    const i = Math.round(k * (rows.length - 1) / Math.max(1, ticks - 1));
+    g.push(svgEl("text", { x: x(i), y: H - 8, "text-anchor": "middle",
+      text: tickLabel(rows[i].bucket) }));
+  }
+
+  for (const s of SERIES) {
+    const d = rows.map((r, i) => (i ? "L" : "M") + x(i) + " " + y(r[s.key])).join(" ");
+    g.push(svgEl("path", { d, fill: "none", stroke: "var(" + s.color + ")",
+      "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    // A 2px surface ring keeps overlapping markers separable where lines cross.
+    for (const [i, r] of rows.entries())
+      g.push(svgEl("circle", { cx: x(i), cy: y(r[s.key]), r: 4,
+        fill: "var(" + s.color + ")", stroke: "var(--surface-1)", "stroke-width": 2 }));
+    // Direct label at the last point, so identity never rests on colour alone.
+    const last = rows[rows.length - 1];
+    g.push(svgEl("text", { x: m.l + iw + 7, y: y(last[s.key]) + 4, class: "lbl",
+      fill: "var(" + s.color + ")", text: last[s.key] }));
+  }
+
+  const crosshair = svgEl("line", { y1: m.t, y2: m.t + ih, stroke: "var(--axis)",
+    "stroke-width": 1, opacity: 0 });
+  g.push(crosshair);
+
+  const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H,
+    role: "img", "aria-label": "Faults injected, detected and unattributed alerts over time" }, g);
+  const hit = svgEl("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+  svg.append(hit);
+
+  const tip = $("#tip");
+  hit.onmousemove = (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) * (W / box.width);
+    let i = 0, best = Infinity;
+    rows.forEach((_, k) => { const d = Math.abs(x(k) - px); if (d < best) { best = d; i = k; } });
+    crosshair.setAttribute("x1", x(i)); crosshair.setAttribute("x2", x(i));
+    crosshair.setAttribute("opacity", 1);
+    tip.replaceChildren(el("b", { text: fmtTime(rows[i].bucket) }),
+      ...SERIES.map(s => el("div", {}, [
+        el("i", { class: "swatch", style: "background:var(" + s.color + ")" }),
+        el("span", { text: s.label + ": " + rows[i][s.key] })])));
+    tip.classList.add("on");
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - 230) + "px";
+    tip.style.top = (ev.clientY + 14) + "px";
+  };
+  hit.onmouseleave = () => { tip.classList.remove("on"); crosshair.setAttribute("opacity", 0); };
+
+  host.append(svg);
+}
+
+function drawByType(host, byType) {
+  host.replaceChildren();
+  if (!byType.length) {
+    host.append(el("p", { class: "empty", text: "No faults injected in this window." }));
+    return;
+  }
+  const rowH = 34, W = Math.min(host.clientWidth || 900, 1100);
+  const labelW = 168, valueW = 104;
+  const barW = W - labelW - valueW;
+  const H = byType.length * rowH + 8;
+  const g = [];
+  for (const [i, t] of byType.entries()) {
+    const injected = +t.injected, detected = +t.detected;
+    const rate = injected ? detected / injected : 0;
+    const y = i * rowH + 8;
+    g.push(svgEl("text", { x: 0, y: y + 14, class: "lbl", text: t.fault_type }));
+    // Track, then the filled portion: 4px rounded ends, anchored at the baseline.
+    g.push(svgEl("rect", { x: labelW, y, width: barW, height: 16, rx: 4,
+      fill: "var(--grid)" }));
+    if (rate > 0)
+      g.push(svgEl("rect", { x: labelW, y, width: Math.max(4, barW * rate), height: 16, rx: 4,
+        fill: "var(--series-1)" }));
+    g.push(svgEl("text", { x: labelW + barW + 8, y: y + 13, class: "lbl",
+      text: Math.round(rate * 100) + "%" }));
+    g.push(svgEl("text", { x: labelW + barW + 54, y: y + 13,
+      text: detected + "/" + injected }));
+  }
+  host.append(svgEl("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H,
+    role: "img", "aria-label": "Detection rate by fault class" }, g));
+}
+
+// ───────────────────────────────── boot ────────────────────────────────────
+loadHealth();
+loadFaultTypes();
+showTab(location.hash.slice(1) || "inject", false);
+setInterval(loadHealth, 20000);
+setInterval(() => { if (current !== "inject") loadCurrent(); }, 15000);
+addEventListener("resize", () => { if (current === "rate") loadRate(); });
+</script>
+</body>
+</html>

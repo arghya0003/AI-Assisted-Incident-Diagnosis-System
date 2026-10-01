@@ -363,3 +363,25 @@ def resolve_evidence_ids(conn, evidence_ids: list[str]) -> set[str]:
             log.warning("could not check evidence ids (%s): %s", query.split()[3], exc)
             conn.rollback()
     return found
+
+
+# ------------------------------------------------------------- severity sweep
+
+def measure_p95(conn, service: str, metric: str, start, end) -> float | None:
+    """Median of a metric over a window, or None if nothing was recorded.
+
+    Median, not mean or max: the fault window includes the seconds before the
+    throttle takes hold and after it is lifted, and a max would report the
+    single worst sample as though it were the fault's magnitude.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value)
+            FROM metrics
+            WHERE service = %s AND metric = %s AND time BETWEEN %s AND %s
+            """,
+            (service, metric, start, end),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
