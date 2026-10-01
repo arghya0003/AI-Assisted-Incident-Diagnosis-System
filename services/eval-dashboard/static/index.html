@@ -349,17 +349,24 @@ $("#theme").onclick = () => {
   if (current === "rate") loadRate();   // SVG strokes are painted, not inherited
 };
 
+const TABS = ["inject", "decide", "history", "rate"];
 let current = "inject";
-for (const b of document.querySelectorAll("nav.tabs button")) {
-  b.onclick = () => {
-    current = b.dataset.tab;
-    for (const o of document.querySelectorAll("nav.tabs button"))
-      o.setAttribute("aria-selected", String(o === b));
-    for (const s of document.querySelectorAll("section"))
-      s.hidden = s.id !== "tab-" + current;
-    loadCurrent();
-  };
+
+function showTab(name, pushHash = true) {
+  if (!TABS.includes(name)) name = "inject";
+  current = name;
+  for (const o of document.querySelectorAll("nav.tabs button"))
+    o.setAttribute("aria-selected", String(o.dataset.tab === name));
+  for (const s of document.querySelectorAll("section"))
+    s.hidden = s.id !== "tab-" + name;
+  // The tab lives in the URL so a view can be linked to or reloaded in place -
+  // useful when someone is asked to look at one specific thing.
+  if (pushHash && location.hash !== "#" + name) location.hash = name;
+  loadCurrent();
 }
+for (const b of document.querySelectorAll("nav.tabs button"))
+  b.onclick = () => showTab(b.dataset.tab);
+addEventListener("hashchange", () => showTab(location.hash.slice(1), false));
 $("#refresh").onclick = () => { loadHealth(); loadCurrent(); };
 
 function loadCurrent() {
@@ -715,11 +722,18 @@ function drawLines(host, rows) {
   g.push(svgEl("line", { x1: m.l, x2: m.l + iw, y1: y(0), y2: y(0),
     stroke: "var(--axis)", "stroke-width": 1 }));
 
-  const ticks = Math.min(rows.length, 6);
+  // Once the window crosses midnight, a bare clock time reads as unsorted
+  // ("11 pm, 12 am, 8 pm"), so the day goes on the label too.
+  const spanH = rows.length > 1
+    ? (new Date(rows[rows.length - 1].bucket) - new Date(rows[0].bucket)) / 3.6e6 : 0;
+  const tickLabel = (iso) => spanH > 12
+    ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit" })
+    : fmtClock(iso);
+  const ticks = Math.min(rows.length, spanH > 12 ? 5 : 6);
   for (let k = 0; k < ticks; k++) {
     const i = Math.round(k * (rows.length - 1) / Math.max(1, ticks - 1));
     g.push(svgEl("text", { x: x(i), y: H - 8, "text-anchor": "middle",
-      text: fmtClock(rows[i].bucket) }));
+      text: tickLabel(rows[i].bucket) }));
   }
 
   for (const s of SERIES) {
@@ -800,7 +814,7 @@ function drawByType(host, byType) {
 // ───────────────────────────────── boot ────────────────────────────────────
 loadHealth();
 loadFaultTypes();
-loadRecent();
+showTab(location.hash.slice(1) || "inject", false);
 setInterval(loadHealth, 20000);
 setInterval(() => { if (current !== "inject") loadCurrent(); }, 15000);
 addEventListener("resize", () => { if (current === "rate") loadRate(); });

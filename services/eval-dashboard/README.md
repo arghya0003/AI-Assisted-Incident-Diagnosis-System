@@ -75,8 +75,23 @@ space to make it.
 
 ## State of testing
 
-The server and the page are verified: it serves, and every endpoint returns a
-readable error rather than a stack trace when a backend is down. The four SQL
-queries have **not** been run against a live TimescaleDB yet — Docker was stopped
-when this was written. Run it against the stack before relying on the History and
-Detection-rate tabs.
+Verified against the live stack on 2026-10-01: all five backends reachable, all
+four SQL queries run, and a fault injected through the Inject tab appeared in
+History 24.1 seconds later. Per-class detection rates match the evaluation report
+exactly (`bad_deploy_latency` 6/6, `service_crash` 6/6, `db_pool_saturation` 0/2).
+
+Two bugs the live run found, both fixed:
+
+- The history query joined `incidents`, which is M3's past-postmortem RAG corpus
+  and has no `state` column. M4's state machine is `orchestrator_incidents` — the
+  comment at the top of `008_incidents.sql` warns about exactly this collision.
+- `EXTRACT` and `percentile_cont` return `numeric`, psycopg2 maps that to
+  `Decimal`, and Flask serialises `Decimal` as a JSON *string*. A detection
+  latency arrived in the browser as `"31.123"` and the first `.toFixed()` on it
+  would have thrown. `jsonable()` now converts.
+
+One thing the dashboard surfaced rather than caused: a fault detected on
+2026-10-01 produced no hypotheses and no incident, and the orchestrator's newest
+incident is still from 23 September. Nothing is consuming `anomalies.detected`
+into the decision path right now, so the Decisions tab will stay empty until that
+is resolved. It is raised in PR #36.

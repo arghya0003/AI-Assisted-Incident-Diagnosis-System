@@ -16,6 +16,7 @@ path and this is a second view onto it, not a second copy of it.
 
 from __future__ import annotations
 
+import decimal
 import logging
 import os
 
@@ -74,12 +75,24 @@ def query(sql: str, params=()) -> list[dict]:
 
 
 def jsonable(rows: list[dict]) -> list[dict]:
-    """Make timestamps JSON-safe without needing a custom encoder."""
+    """Make timestamps and numerics JSON-safe without a custom encoder.
+
+    Decimal matters more than it looks. Postgres returns `numeric` for EXTRACT
+    and percentile_cont, psycopg2 maps that to Decimal, and Flask serialises
+    Decimal as a JSON *string* - so a latency would arrive in the browser as
+    "31.123" and the first `.toFixed()` on it would throw. Converting here keeps
+    the fix in one place rather than coercing at every call site on the page.
+    """
     out = []
     for row in rows:
         clean = {}
         for key, value in row.items():
-            clean[key] = value.isoformat() if hasattr(value, "isoformat") else value
+            if hasattr(value, "isoformat"):
+                clean[key] = value.isoformat()
+            elif isinstance(value, decimal.Decimal):
+                clean[key] = float(value)
+            else:
+                clean[key] = value
         out.append(clean)
     return out
 
@@ -229,9 +242,13 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) h ON TRUE
 LEFT JOIN LATERAL (
+    -- orchestrator_incidents, NOT incidents: M3's diagnosis-service owns a table
+    -- called `incidents` for its past-postmortem RAG corpus, which got the obvious
+    -- name first and has no `state` column. M4's state machine is the one with the
+    -- human decision on it. See the comment at the top of 008_incidents.sql.
     SELECT incident_id, state, decision, decided_hypothesis_rank,
            decided_by, decision_reason
-    FROM incidents
+    FROM orchestrator_incidents
     WHERE anomaly_id = a.anomaly_id
     ORDER BY created_at DESC
     LIMIT 1
