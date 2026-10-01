@@ -27,7 +27,8 @@ from pathlib import Path
 import report as reporting
 import scoring
 import sources
-from scenarios import SUITES
+import attribution
+from scenarios import SUITES, partition_by_support
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("evaluation-runner")
@@ -70,7 +71,18 @@ def run_live(args) -> int:
     log.info("listening on anomalies.detected")
 
     suite = SUITES[args.suite]
-    specs = [spec for spec in suite for _ in range(args.repeat)]
+    # Ask the injector what it can actually produce before committing an hour
+    # to a run. A fault type it does not implement returns 400, which the loop
+    # below would log and count as a scenario the detector failed to catch.
+    runnable, unsupported = partition_by_support(suite, sources.supported_fault_types())
+    for spec in unsupported:
+        log.warning("skipping %s: the injector does not implement %s",
+                    spec.label, spec.fault_type)
+    if not runnable:
+        log.error("the injector implements none of the %d scenario(s) in suite '%s'",
+                  len(suite), args.suite)
+        return 1
+    specs = [spec for spec in runnable for _ in range(args.repeat)]
 
     # The detector learns a baseline before it can flag a deviation from one.
     # Injecting during warm-up would score the detector on data it was never
@@ -116,10 +128,16 @@ def run_live(args) -> int:
     notes = [
         f"Detector under test: `{args.detector_label}` (as deployed).",
         f"{len(events)} anomaly event(s) observed in total.",
-        "Fault classes limited to the three the injector can physically produce; "
-        "memory leak / OOM, dependency timeout cascade and config error are not "
-        "implemented yet.",
     ]
+    if unsupported:
+        missing = sorted({spec.fault_type for spec in unsupported})
+        notes.append(
+            f"{len(unsupported)} scenario(s) skipped before injection: the deployed "
+            f"fault injector does not implement "
+            + ", ".join(f"`{name}`" for name in missing)
+            + ". They are excluded from the denominator — a fault that never ran is "
+              "not a fault the detector missed."
+        )
     if unobservable:
         notes.append(
             f"{len(unobservable)} scenario(s) marked unobservable — "
@@ -198,6 +216,67 @@ def run_replay(args) -> int:
     return 0
 
 
+def run_attribute(args) -> int:
+    """Score the attribution half: did M3's ranker name the injected service?
+
+    This closes issue #21. Detection was always scored from the detector's own
+    events; these three metrics need the diagnosis layer's answer, which means
+    something has to call `POST /analyze` and compare the ranking against the
+    fault we injected. Nothing did.
+
+    Deliberately a separate subcommand rather than part of `live`: a diagnosis
+    can be requested for an anomaly recorded days ago, so attribution can be
+    re-scored against a changed ranker without re-injecting faults. That also
+    keeps a slow or broken diagnosis service from costing a run its detection
+    numbers.
+    """
+    conn = sources.connect_postgres()
+    since = now_utc() - timedelta(minutes=args.since_minutes)
+    scenarios = sources.load_scenarios(conn, since=since)
+    if not scenarios:
+        log.error("no fault scenarios recorded since %s; run `live` first", since.isoformat())
+        return 1
+
+    results: list[attribution.AttributionResult] = []
+    for scenario in scenarios:
+        start, end = scoring.fault_window(scenario)
+        anomaly_id = sources.find_anomaly_for_scenario(
+            conn, scenario.ground_truth_service, start, end
+        )
+        if anomaly_id is None:
+            log.info("%s (%s): no anomaly in the fault window",
+                     scenario.scenario_id, scenario.ground_truth_service)
+            results.append(attribution.score_attribution(scenario, [], None))
+            continue
+
+        hypotheses = sources.load_hypotheses(conn, anomaly_id)
+        if not hypotheses and not args.no_analyze:
+            log.info("asking the diagnosis service about %s", anomaly_id)
+            if sources.request_diagnosis(anomaly_id, timeout=args.timeout):
+                hypotheses = sources.load_hypotheses(conn, anomaly_id)
+        elif hypotheses:
+            log.info("reusing %d stored hypotheses for %s", len(hypotheses), anomaly_id)
+
+        cited = attribution.cited_evidence_ids(hypotheses)
+        resolved = sources.resolve_evidence_ids(conn, cited) if cited else set()
+        results.append(
+            attribution.score_attribution(scenario, hypotheses, anomaly_id, resolved)
+        )
+
+    markdown = reporting.build_attribution_report(
+        generated_at=now_utc(), results=results, since=since
+    )
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = now_utc().strftime("%Y%m%dT%H%M%SZ")
+    (out_dir / f"attribution-{stamp}.md").write_text(markdown, encoding="utf-8")
+    (out_dir / "attribution-latest.md").write_text(markdown, encoding="utf-8")
+    log.info("wrote %s", out_dir / f"attribution-{stamp}.md")
+    print()
+    print(markdown)
+    return 0
+
+
 def write_outputs(args, title, results, summaries, fp_rate, fp_count, quiet_s,
                    ablation=None, notes=None) -> None:
     out_dir = Path(args.out)
@@ -259,6 +338,17 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--detectors", default="ewma,static,zscore,cusum",
                          type=lambda v: [d.strip() for d in v.split(",") if d.strip()])
     replay.set_defaults(func=run_replay)
+
+    attribute = sub.add_parser(
+        "attribute", help="score M3's ranking against the injected ground truth (MRR, top-k)"
+    )
+    attribute.add_argument("--since-minutes", type=int, default=240,
+                           help="how far back to look for recorded fault scenarios")
+    attribute.add_argument("--no-analyze", action="store_true",
+                           help="score only already-stored hypotheses; never call /analyze")
+    attribute.add_argument("--timeout", type=int, default=120,
+                           help="seconds to wait for one diagnosis")
+    attribute.set_defaults(func=run_attribute)
 
     return parser
 

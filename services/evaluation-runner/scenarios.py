@@ -1,16 +1,47 @@
 """
 The labelled fault suite the evaluation runs against.
 
-Only the three fault types the injector can physically produce are listed.
-The project plan names six classes; memory leak / OOM, dependency timeout
-cascade and config error are not implemented in `services/fault-injector`
-yet, so they are absent here rather than represented by a scenario that
-quietly does nothing. See docs/phase9-detection.md for that gap.
+`default` holds the three fault types the injector can physically produce
+today. `full` is the six-class suite the project plan calls for; the four
+extra scenarios need fault types that do not exist in
+`services/fault-injector` yet, so they live in their own suite rather than
+silently dragging `default`'s detection rate down with scenarios that fail
+to inject. The runner asks the injector what it supports before a run and
+reports anything it cannot produce separately (see
+`sources.supported_fault_types`).
+
+When the injector gains the four new types, `default` becomes `full` and
+this note goes away. See docs/phase9-detection.md for the gap.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+# Mirrors KNOWN_SERVICES in services/fault-injector/main.py. Duplicated
+# deliberately: a scenario naming a service the injector will reject should
+# fail in a unit test, not 20 minutes into a live run.
+KNOWN_SERVICES = frozenset({
+    "front-end", "catalogue", "payment", "user", "carts", "orders", "shipping",
+})
+
+# The injector's own safety cap (MAX_DURATION_SECONDS). A longer duration is
+# silently truncated, which would make the recorded fault window a lie.
+MAX_DURATION_S = 300
+
+# Params each fault type needs beyond duration_s. The injector supplies
+# defaults for all of them, but a scenario is a ground-truth record: the
+# severity it ran at belongs in the suite where it can be read and changed,
+# not in the injector's fallbacks.
+REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
+    "bad_deploy_latency": ("cpu_limit",),
+    "service_crash": (),
+    "db_pool_saturation": ("connections",),
+    "dependency_timeout": ("dependency",),
+    "config_error": ("dependency",),
+    "memory_exhaustion": ("limit_mb",),
+    "resource_exhaustion": ("cpu_limit", "steps"),
+}
 
 
 @dataclass(frozen=True)
@@ -21,11 +52,14 @@ class ScenarioSpec:
     params: dict = field(default_factory=dict)
 
     def request_body(self) -> dict:
+        # params first, envelope last: fault_type, service and duration_s are
+        # the ground truth the whole run is scored against, so a stray key in
+        # params must not be able to redirect the fault to another service.
         return {
+            **self.params,
             "fault_type": self.fault_type,
             "service": self.service,
             "duration_s": self.duration_s,
-            **self.params,
         }
 
     @property
@@ -54,6 +88,36 @@ DEFAULT_SUITE: list[ScenarioSpec] = [
     ScenarioSpec("db_pool_saturation", "catalogue", 90, {"connections": 155}),
 ]
 
+# The three classes the plan names and the injector cannot yet produce.
+#
+# `service` is the detection ground truth in every case — the service whose
+# metrics are expected to move — while `dependency` records where the fault
+# was physically applied. For dependency_timeout and config_error those
+# differ, which is the point: the anomaly should surface on `catalogue` or
+# `front-end`, and naming the actual culprit is M3's job, not the detector's.
+MISSING_CLASS_SCENARIOS: list[ScenarioSpec] = [
+    # A paused catalogue-db accepts connections and never answers, so
+    # catalogue's queries hang instead of failing fast. Latency first, errors
+    # only once its own timeouts fire.
+    ScenarioSpec("dependency_timeout", "catalogue", 90, {"dependency": "catalogue-db"}),
+    # front-end resolving `catalogue` to loopback: the service stays up and
+    # keeps reporting, unlike a crash, so it exercises the error-rate path
+    # rather than the staleness path.
+    ScenarioSpec("config_error", "front-end", 90, {"dependency": "catalogue"}),
+    # carts is a JVM with a heap well above 64MB, so the limit lands below
+    # its working set and the kernel OOM-kills it — a memory-caused outage
+    # rather than an arbitrary stop.
+    ScenarioSpec("memory_exhaustion", "carts", 90, {"limit_mb": 64}),
+    # The only slow-drift fault in the set: 180s in 6 steps is 30s per step,
+    # so the degradation is gradual enough that a cumulative statistic
+    # (CUSUM) can plausibly beat a per-sample one (3-sigma). Every other
+    # fault here is a step change, which is why the detectors have tied on
+    # all of them so far (issue #34).
+    ScenarioSpec("resource_exhaustion", "user", 180, {"cpu_limit": 0.002, "steps": 6}),
+]
+
+FULL_SUITE: list[ScenarioSpec] = DEFAULT_SUITE + MISSING_CLASS_SCENARIOS
+
 # A quick pass for wiring checks, so nobody waits 20 minutes to find out the
 # consumer was misconfigured.
 SMOKE_SUITE: list[ScenarioSpec] = [
@@ -61,7 +125,36 @@ SMOKE_SUITE: list[ScenarioSpec] = [
     ScenarioSpec("service_crash", "payment", 45),
 ]
 
+# One scenario per new fault class, for verifying the injector's new code
+# lands a real effect before spending an hour on the full suite.
+NEW_FAULTS_SUITE: list[ScenarioSpec] = list(MISSING_CLASS_SCENARIOS)
+
 SUITES: dict[str, list[ScenarioSpec]] = {
     "default": DEFAULT_SUITE,
+    "full": FULL_SUITE,
     "smoke": SMOKE_SUITE,
+    "new-faults": NEW_FAULTS_SUITE,
 }
+
+
+def partition_by_support(
+    specs: list[ScenarioSpec], supported: set[str] | None
+) -> tuple[list[ScenarioSpec], list[ScenarioSpec]]:
+    """Split specs into what this injector can produce and what it cannot.
+
+    `supported is None` means the injector could not be asked, in which case
+    every spec is attempted — a preflight that cannot reach the injector is
+    not evidence that a fault type is missing.
+
+    Skipping unsupported scenarios up front matters for the headline number:
+    a scenario that never injected is not a scenario the detector missed, and
+    counting it as one would understate detection by however many fault
+    classes the injector happens to lack that week.
+    """
+    if supported is None:
+        return list(specs), []
+    runnable: list[ScenarioSpec] = []
+    unsupported: list[ScenarioSpec] = []
+    for spec in specs:
+        (runnable if spec.fault_type in supported else unsupported).append(spec)
+    return runnable, unsupported

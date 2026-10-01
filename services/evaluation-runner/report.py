@@ -224,3 +224,95 @@ def write_csv(results: list[ScenarioResult], path: Path) -> None:
                 r.matched_event_id or "",
                 r.events_in_window,
             ])
+
+
+def build_attribution_report(generated_at: datetime, results: list, since: datetime) -> str:
+    """Render the attribution metrics: MRR, top-k, evidence validity.
+
+    Separate from `build_report` because it answers a different question about
+    a different component — that one scores M2's detector, this one scores
+    M3's ranker against the ground truth M2 injected. Merging them would hide
+    which half of the pipeline a bad number came from.
+    """
+    from attribution import evidence_validity, rankings_for_scoring
+    from scoring import mean_reciprocal_rank, top_k_accuracy
+
+    rankings = rankings_for_scoring(results)
+    mrr = mean_reciprocal_rank(rankings)
+    top1 = top_k_accuracy(rankings, 1)
+    top3 = top_k_accuracy(rankings, 3)
+    validity = evidence_validity(results)
+
+    scored = [r for r in results if r.scored]
+    unscored = [r for r in results if not r.scored]
+
+    lines = [
+        "# Attribution evaluation",
+        "",
+        f"Generated {generated_at.isoformat(timespec='seconds')} · "
+        f"scenarios recorded since {since.isoformat(timespec='seconds')}",
+        "",
+        f"**{len(scored)} of {len(results)} scenario(s) scored.** A scenario is scored only "
+        "if the detector raised an anomaly for it and the ranker returned hypotheses; "
+        "one that never reached the ranker measures detection, not attribution, and "
+        "counting it here would charge the ranker for a detection miss.",
+        "",
+        "| Metric | Measured | Target | Verdict |",
+        "| --- | --- | --- | --- |",
+    ]
+    for label, value, key, formatter in (
+        ("Root-cause accuracy (Top-1)", top1, None, fmt_pct),
+        ("Root-cause accuracy (Top-3)", top3, "top3", fmt_pct),
+        ("Ranking quality (MRR)", mrr, "mrr", lambda v: fmt(v, "", 2)),
+        ("Evidence validity", validity, "evidence", fmt_pct),
+    ):
+        target = TARGETS[key][0] if key else "—"
+        result = verdict(key, value) if key else "—"
+        lines += [f"| {label} | {formatter(value)} | {target} | {result} |"]
+
+    lines += [
+        "",
+        "## Per scenario",
+        "",
+        "| Fault | Injected into | Ranked | RR | Evidence |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for r in results:
+        if r.scored:
+            ranked = " → ".join(
+                f"**{s}**" if s == r.ground_truth_service else s for s in r.ranked[:5]
+            )
+            ev = (
+                "—" if r.evidence_validity is None
+                else f"{r.evidence_resolved}/{r.evidence_total}"
+            )
+            rr = f"{r.reciprocal_rank:.2f}"
+        else:
+            ranked, rr, ev = f"_{r.note}_", "—", "—"
+        lines += [f"| `{r.fault_type}` | `{r.ground_truth_service}` | {ranked} | {rr} | {ev} |"]
+
+    inferred = sum(r.inferred_services for r in results)
+    unresolved = [e for r in results for e in r.unresolved_ids]
+    notes = []
+    if inferred:
+        notes.append(
+            f"{inferred} ranking entr(y/ies) had no `service` field and were inferred from "
+            "the free-text `cause`. A parsing failure there looks identical to a wrong "
+            "answer from the ranker, so these weaken the metric."
+        )
+    if unresolved:
+        shown = ", ".join(f"`{e}`" for e in sorted(set(unresolved))[:5])
+        notes.append(
+            f"{len(set(unresolved))} cited evidence id(s) resolve to no record: {shown}. "
+            "A hypothesis citing evidence that does not exist is the failure mode this "
+            "metric exists to catch."
+        )
+    if unscored:
+        notes.append(
+            f"{len(unscored)} scenario(s) excluded: "
+            + "; ".join(f"`{r.fault_type}`/{r.ground_truth_service} — {r.note}" for r in unscored)
+        )
+    if notes:
+        lines += ["", "## Notes", ""] + [f"- {n}" for n in notes]
+
+    return "\n".join(lines) + "\n"

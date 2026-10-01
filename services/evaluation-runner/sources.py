@@ -19,6 +19,7 @@ import psycopg2
 import psycopg2.extras
 import requests
 
+from attribution import HypothesisRow
 from scoring import DetectedEvent, Scenario, parse_ts, to_detected_event
 
 log = logging.getLogger("evaluation-runner")
@@ -30,6 +31,7 @@ PG_USER = os.environ.get("PG_USER", "postgres")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 
 FAULT_INJECTOR_URL = os.environ.get("FAULT_INJECTOR_URL", "http://fault-injector:5001")
+DIAGNOSIS_URL = os.environ.get("DIAGNOSIS_URL", "http://diagnosis-service:8000")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 ANOMALY_TOPIC = "anomalies.detected"
 
@@ -46,6 +48,27 @@ def connect_postgres():
         except psycopg2.OperationalError as exc:
             log.warning("timescaledb not reachable yet (%s), retrying in 3s", exc)
             time.sleep(3)
+
+
+def supported_fault_types() -> set[str] | None:
+    """Ask the injector which fault types it can produce.
+
+    Returns None when the injector cannot be reached or answers oddly. That
+    is deliberately distinct from an empty set: "I could not ask" must not be
+    read as "it supports nothing", or a transient network blip would skip an
+    entire run's worth of scenarios and report a 0% detection rate.
+    """
+    try:
+        response = requests.get(f"{FAULT_INJECTOR_URL}/fault-types", timeout=5)
+        response.raise_for_status()
+        types = response.json()
+    except Exception as exc:
+        log.warning("could not read supported fault types (%s); attempting all scenarios", exc)
+        return None
+    if not isinstance(types, list) or not all(isinstance(t, str) for t in types):
+        log.warning("unexpected /fault-types payload %r; attempting all scenarios", types)
+        return None
+    return set(types)
 
 
 def inject_fault(spec) -> str:
@@ -205,3 +228,120 @@ class AnomalyCollector:
                 log.info("observed %s services=%s", event.anomaly_id, list(event.services))
 
         consumer.close()
+
+
+# --------------------------------------------------------------- attribution
+
+def find_anomaly_for_scenario(conn, service: str, start: datetime, end: datetime) -> str | None:
+    """The first anomaly naming `service` inside the fault window.
+
+    Read from the `anomalies` table rather than the Kafka topic, so a run can
+    be scored for attribution long after the 24h retention has passed — which
+    is the whole reason the detector writes there.
+
+    The earliest matching anomaly is the one the ranker should be asked about:
+    a later one in the same window is the same incident re-alerting after the
+    cooldown lapsed, and diagnosing it would score the same fault twice.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT anomaly_id FROM anomalies
+            WHERE %s = ANY(services) AND t_detected BETWEEN %s AND %s
+            ORDER BY t_detected ASC LIMIT 1
+            """,
+            (service, start, end),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def request_diagnosis(anomaly_id: str, timeout: int = 120) -> bool:
+    """Ask M3's pipeline to diagnose one anomaly.
+
+    Returns whether the call succeeded. A failure is logged and reported
+    rather than raised: one unreachable diagnosis should not throw away the
+    scoring for every other scenario in the run.
+
+    The generous timeout is not defensive padding — the pipeline's own
+    recorded latencies run to several seconds per analysis, and an LLM-backed
+    mode can be far slower than the deterministic fallback.
+    """
+    try:
+        response = requests.post(
+            f"{DIAGNOSIS_URL}/analyze", json={"anomaly_id": anomaly_id}, timeout=timeout
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        log.warning("diagnosis failed for %s: %s", anomaly_id, exc)
+        return False
+
+
+def load_hypotheses(conn, anomaly_id: str) -> list[HypothesisRow]:
+    """The most recent analysis's hypotheses for one anomaly.
+
+    Read from the database, not from the `POST /analyze` response, for one
+    reason: the response schema has no `service` field, while the table has
+    one and it is populated on every row. Scoring a ranking needs the service,
+    and taking it from the table beats parsing it back out of the prose in
+    `cause`. When M3 adds the field to the response this can prefer it.
+
+    Scoped to the latest `analysis_id` so re-diagnosing an anomaly does not
+    blend two runs' rankings into one list.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT rank, cause, confidence, evidence_ids, service
+            FROM hypotheses
+            WHERE anomaly_id = %s
+              AND analysis_id IS NOT DISTINCT FROM (
+                  SELECT analysis_id FROM hypotheses
+                  WHERE anomaly_id = %s
+                  ORDER BY created_at DESC LIMIT 1
+              )
+            ORDER BY rank ASC
+            """,
+            (anomaly_id, anomaly_id),
+        )
+        return [
+            HypothesisRow(
+                rank=r["rank"],
+                cause=r["cause"],
+                confidence=r["confidence"],
+                evidence_ids=tuple(r["evidence_ids"] or ()),
+                service=r["service"],
+            )
+            for r in cur.fetchall()
+        ]
+
+
+def resolve_evidence_ids(conn, evidence_ids: list[str]) -> set[str]:
+    """Which cited ids point at a record that actually exists.
+
+    Three id shapes are accepted because the pipeline cites all of them: the
+    `evidence` table's own ids, and the raw `anomalies` / `deploys` source ids
+    it uses instead. An id in none of them is a citation of something that
+    does not exist, which is exactly what evidence validity is meant to catch.
+    """
+    if not evidence_ids:
+        return set()
+    unique = list({e for e in evidence_ids})
+    found: set[str] = set()
+    queries = (
+        "SELECT evidence_id FROM evidence WHERE evidence_id = ANY(%s)",
+        "SELECT anomaly_id FROM anomalies WHERE anomaly_id = ANY(%s)",
+        "SELECT deploy_id FROM deploys WHERE deploy_id = ANY(%s)",
+    )
+    for query in queries:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, (unique,))
+                found.update(row[0] for row in cur.fetchall())
+        except psycopg2.Error as exc:
+            # A missing table is M3's or M1's schema drifting, not a reason to
+            # report every citation as invalid.
+            log.warning("could not check evidence ids (%s): %s", query.split()[3], exc)
+            conn.rollback()
+    return found

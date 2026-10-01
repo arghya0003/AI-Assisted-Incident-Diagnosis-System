@@ -276,10 +276,12 @@ Reports land in `./results/` as Markdown and CSV, plus a stable `latest.md`.
 - **`t_inject` comes from the database**, not the runner's clock — the injector records it
   when the fault actually starts.
 - **Unmeasured metrics report "not measured", never 0.0.** Root-cause accuracy, MRR and
-  evidence validity all score M3's ranker, which is not wired up yet. `mean_reciprocal_rank`
-  returns `None` for an empty set rather than a confident zero that would read as a measured
-  failure. The functions are implemented and tested, so they start producing numbers the
-  moment M3 supplies a ranker.
+  evidence validity all score M3's ranker. `mean_reciprocal_rank` returns `None` for an
+  empty set rather than a confident zero that would read as a measured failure, and the
+  same rule applies per scenario: one that never reached the ranker is excluded, not scored
+  zero. The distinction stopped mattering in the abstract once `attribute` started calling
+  `POST /analyze` — but it is what makes the excluded scenarios legible instead of
+  invisible.
 
 ### Settle time between scenarios
 
@@ -304,7 +306,35 @@ what a `live` run plus a `replay` ablation is for.
 
 ## Results
 
-Full seven-scenario suite against the live stack (2026-09-13):
+Two measurements, taken before and after the testbed had standing traffic. Both are kept:
+the difference between them is the most useful thing the evaluation has produced.
+
+### With standing traffic (2026-09-23) — current
+
+M1's load generator (issue #6) drives about 5 req/s of browse, login, cart and checkout
+journeys through `edge-router`. All seven services now serve requests, where previously
+four served none.
+
+| Fault type | Scenarios | Detected | Missed | Median latency | p95 latency |
+| --- | --- | --- | --- | --- | --- |
+| `bad_deploy_latency` | 3 | **3 (100%)** | 0 | 23.1 s | 58.0 s |
+| `db_pool_saturation` | 1 | 0 (0%) | 1 | — | — |
+| `service_crash` | 3 | 3 (100%) | 0 | 34.1 s | 39.0 s |
+| **overall** | **7** | **6 (86%)** | **1** | **31.0 s** | **58.0 s** |
+
+No scenario was scored `unobservable`, and none was misattributed. The two fastest
+detections were the two scenarios that had been undetectable by construction before:
+`front-end` in 23.1 s and `orders` in 17.9 s.
+
+`error_rate` reached the detector for the first time — 286 samples, peaking at 1.8%. With
+no traffic there were no 5xx responses at all, so the PromQL selector returned an empty
+vector and the metric was never ingested. The relative-noise-floor fix described above was
+therefore correct but untestable against live data until this run.
+
+Latency during faults peaked at 10 s: failures a real user would feel, rather than a slow
+scrape of `/metrics`.
+
+### Before standing traffic (2026-09-13) — superseded
 
 | Fault type | Scenarios | Detected | Of observable | Missed | Unobservable | Median latency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -313,102 +343,202 @@ Full seven-scenario suite against the live stack (2026-09-13):
 | `service_crash` | 3 | 3 (100%) | 100% | 0 | 0 | 39.0 s |
 | **overall** | **7** | **4 (57%)** | **80%** | **1** | **2** | **36.5 s** |
 
-Median detection latency 36.5s against a 60s target, and **zero false positives across 11.9
-minutes of quiet observation** against a target of under one per hour.
+Two of those seven scenarios could not be detected by anything: the target service served
+no requests, so a CPU throttle changed no metric. That is why the harness reports
+`unobservable` separately — it measures the testbed, not the detector — and why that
+column is now all zeroes.
 
-Both rates are quoted deliberately. 57% is over every scenario attempted and cannot be
-gamed; 80% excludes scenarios where the target service emitted nothing to detect. Reporting
-only the second would let a broken testbed pose as a good detector.
-
-Detection latency varies by tens of seconds between runs — the same `bad_deploy_latency`
-scenario measured 28.1s, 41.9s and 32.9s across three runs. The underlying metric is a
-`rate(...[1m])` window sampled every 5s, so where a fault lands inside a scrape cycle moves
-the result substantially. Quote medians from the full suite; a single scenario is one
-sample, not a measurement.
+Detection latency still varies by tens of seconds between runs. The same
+`bad_deploy_latency` scenario has measured 17.9 s, 23.1 s, 28.1 s, 32.9 s, 41.9 s and
+58.0 s across runs. The underlying metric is a `rate(...[1m])` window sampled every 5 s, so
+where a fault lands inside a scrape cycle moves the result substantially. Quote medians
+from a full suite; a single scenario is one sample, not a measurement.
 
 ## Ablation: learned baselines vs a fixed threshold
 
-Replay over 26,370 recorded samples spanning 18 real injected scenarios. Every detector saw
-byte-identical input, so the differences are attributable to the detector.
+### Under traffic (2026-09-23)
 
-| Detector | Scenarios | Detected | Missed | Median latency | False positives/hour |
-| --- | --- | --- | --- | --- | --- |
-| `ewma` | 18 | 12 (67%) | 6 | 35.5 s | 0.00 |
-| `cusum` | 18 | 12 (67%) | 6 | 35.5 s | 0.00 |
-| `zscore` | 18 | 12 (67%) | 6 | 35.5 s | 0.00 |
-| `static` | 18 | **8 (44%)** | 10 | 35.5 s | 0.00 |
+Replay over 15,062 recorded samples covering the window the live run used. Every detector
+saw byte-identical input, so differences are attributable to the detector.
 
-**The static threshold missed every single latency fault.** Its 8 detections are exactly the
-8 `service_crash` scenarios, which the staleness monitor catches regardless of which
-detector is configured. On latency it scored zero.
+| Detector | Scenarios | Detected | Missed | Median latency |
+| --- | --- | --- | --- | --- |
+| `ewma` | 7 | **6 (86%)** | 1 | 30.5 s |
+| `cusum` | 7 | 6 (86%) | 1 | 30.5 s |
+| `zscore` | 7 | 6 (86%) | 1 | 30.5 s |
+| `static` | 7 | **4 (57%)** | 3 | 30.5 s |
 
-The reason is worth quoting in the report, because it is the entire argument for a learned
-baseline. During a CPU throttle, `catalogue`'s p95 went from a **5.9 ms** baseline to
-**141 ms average, peaking at 222 ms** — a 38x regression, a service unambiguously in
-trouble. The hand-configured threshold for `latency_p95_ms` is 500 ms, so it never fired.
+### Before traffic (2026-09-13)
+
+Replay over 26,370 samples spanning 18 scenarios: `ewma`, `cusum` and `zscore` each
+detected 12 (67%); `static` managed 8 (44%) and missed *every* latency fault. Its 8
+detections were exactly the 8 `service_crash` scenarios, which the staleness monitor
+catches regardless of which detector is configured.
+
+### Why the fixed threshold loses, in both worlds
+
+During a CPU throttle, `catalogue`'s p95 went from a **5.9 ms** baseline to **141 ms
+average, peaking at 222 ms** — a 38x regression, a service unambiguously in trouble. The
+hand-configured threshold for `latency_p95_ms` is 500 ms, so it never fired.
 
 And 500 ms is not a strawman. It is a defensible number for a global latency alert; setting
 it at 20 ms to catch this incident would make it scream continuously on any service whose
-healthy p95 is 200 ms. **No single fixed threshold can serve both services.** A baseline
-learned per (service, metric) can, which is precisely what EWMA buys.
+healthy p95 is 200 ms — and under traffic `orders` sits at about 240 ms while `user` sits
+at 5 ms. **No single fixed threshold can serve both services.** A baseline learned per
+(service, metric) can, which is precisely what EWMA buys.
 
 Two honest caveats:
 
-- `ewma`, `cusum` and `zscore` tie exactly on this data. The result supports "a learned
+- `ewma`, `cusum` and `zscore` tie exactly, in both runs. The result supports "a learned
   baseline beats a fixed threshold", **not** "EWMA beats other adaptive statistics" — the
-  faults here are large step changes, which all three handle equally well. Distinguishing
-  them would need the slow-drift faults (memory leak / OOM) the injector cannot yet produce.
+  injected faults are large step changes, which all three handle equally well.
+  Distinguishing them needs slow drift, which the testbed now produces by itself: see the
+  degradation section below.
 - The static thresholds were chosen before any of these runs and deliberately set to
   plausible engineer-written values. Picking absurd ones would have made the comparison
   meaningless.
 
+## The false-positive rate is not yet characterised
+
+Three numbers exist for the same detector on the same day, and they disagree:
+
+| Source | Measured | What it covers |
+| --- | --- | --- |
+| Live run | **0.00 /hour** | 11.9 minutes of quiet observation, steady state |
+| Replay of the same window | **9.34 /hour** | 19.3 fault-free minutes, including the stack's cold start |
+| `audit.py` over everything recorded | 5.64 /hour | 0.71 fault-free hours; 3 of its 4 alerts fell within 2 minutes of a restart |
+
+The replay and audit windows begin before the stack had settled. Restarting containers
+makes services briefly silent, so the staleness monitor fires, and JVM warm-up moves CPU
+and latency. The live window began after warm-up and saw none of that.
+
+**None of these is a defensible headline number.** 11.9 minutes is too short to quote
+against a per-hour target, and the other two are contaminated by a restart. A quiet
+observation of an hour or more, with no restart inside it, is needed — and it has to
+account for the degradation described next, which is not detector error at all.
+
+## A natural slow-drift incident the testbed now produces
+
+After the 2026-09-23 suite finished, the detector raised **8 alerts in 55 minutes with no
+fault injected**. They are not false alarms. `orders` was genuinely degrading under steady
+load:
+
+| Time | Offered load | p95 latency | CPU | Memory |
+| --- | --- | --- | --- | --- |
+| 09:35 | 0.61 rps | 107 ms | 0.073 | 367 MB |
+| 10:00 | 0.62 rps | 238 ms | 0.102 | 369 MB |
+| 10:20 | 0.60 rps | **288 ms** | **0.127** | 372 MB |
+
+Constant traffic, latency up 2.7x, CPU up 74%, memory flat. Over the same period the load
+generator accumulated 418 orders and 3,246 cart items. The leading explanation is that
+accumulated state makes each request more expensive — the order-history read grows with the
+data — but the mechanism is not proven. Restarting `orders`, or clearing the collection,
+and watching whether p95 returns to about 107 ms would settle it.
+
+Three consequences, all of which matter more than the count of alerts:
+
+- **This is the slow-drift fault class the injector cannot produce.** Memory leak / OOM is
+  one of the three missing classes, and the testbed now generates an equivalent condition
+  on its own. It is exactly the case where CUSUM should beat a per-sample z-score, so it is
+  the natural experiment for separating the three adaptive detectors that currently tie.
+- **Quiet periods are no longer quiet.** The harness counts any alert outside an injected
+  fault window as a false positive, so it will keep scoring a real degradation as detector
+  error. Either the degradation is controlled (reset state between runs) or it is labelled
+  and excluded, but it cannot be ignored.
+- **It is probably what M3 saw** in PR #31 when they reported detection as
+  nondeterministic: which faults are observable depends on what else is degrading at the
+  time.
+
 ## Two testbed limitations the evaluation exposed
 
-Neither is a detector failure, and both were confirmed against the database rather than
-assumed. They are the most useful output of the harness so far.
+### Four of seven services had no traffic to degrade — resolved 2026-09-22
 
-### Four of seven services have no traffic to degrade
+`carts`, `front-end`, `orders` and `shipping` emitted only `cpu_rate` and `memory_bytes`.
+Sock Shop ran without a load generator, so those services served no requests; their
+`request_duration_seconds` histograms were empty, `histogram_quantile` returned NaN and
+metrics-bridge dropped the sample. CPU-throttling an idle service changed nothing anyone
+could measure, so a latency fault there was undetectable by construction, and `error_rate`
+was never ingested for any service.
 
-`carts`, `front-end`, `orders` and `shipping` emit only `cpu_rate` and `memory_bytes`.
-Sock Shop runs without a load generator, so those services serve no requests; their
-`request_duration_seconds` histograms are empty, `histogram_quantile` returns NaN and
-metrics-bridge drops the sample. CPU-throttling an idle service changes nothing anyone can
-measure — a latency fault there is undetectable by construction.
+M1 added `services/load-generator/` (issue #6). All seven services now report latency and
+request rate, `error_rate` is ingested, and the `unobservable` outcome has not been used
+since. Detection on the same scenario suite went from 4/7 to 6/7.
 
-The same gap means **`error_rate` is never ingested for any service**: with no 5xx
-responses the PromQL selector returns an empty vector rather than zero, so the sample is
-skipped entirely. The relative-noise-floor fix described above is therefore correct but
-currently untestable against live data.
+### `db_pool_saturation` starves connections nobody asks for — still missed
 
-This is why the harness classifies such scenarios `unobservable` rather than `missed`.
-
-### `db_pool_saturation` starves connections nobody asks for
-
-Raising the injector's cap from 100 to 160 made the fault genuinely work — it opened 152
+Raising the injector's cap from 100 to 160 made the fault genuinely work: it opened 152
 connections and MySQL returned `1040 Too many connections`, so `catalogue-db`'s pool of 151
-really was exhausted. Catalogue was completely unaffected regardless: p95 6.1ms, p99 7.2ms,
-indistinguishable from baseline.
+really was exhausted.
 
-The fault exhausts the database's capacity to accept *new* connections, but `catalogue`
-holds an already-established pool and, at 0.2 req/s, never needs to open another one. The
-fault is real and lands on something the victim does not use.
+The obvious explanation used to be that catalogue served too little traffic to need a new
+connection. **Traffic did not fix it.** In the 2026-09-23 run, with catalogue serving
+2.2 req/s, its p95 sat at exactly 4.8 ms for the entire fault window. The fault exhausts
+the database's capacity to accept *new* connections while catalogue reuses an established
+pool, and that holds at 0.2 req/s and at 2.2 req/s alike.
 
-Making it a genuine incident needs one of:
+Making it a genuine incident now needs killing catalogue's existing connections (MySQL
+`KILL` on its threads) so it is forced to reconnect into an exhausted pool. That is
+surgical, but it risks leaving catalogue unable to refill its pool at all — a state that
+may need a container restart and would corrupt any run in progress. It touches M1's fault
+injector and the shared testbed, so it is written up here for the team rather than changed
+unilaterally. The alternative is to drop the scenario and report three fault classes
+honestly rather than four with one that cannot land.
 
-- enough traffic that catalogue's own pool comes under pressure (the load-generator gap
-  again), or
-- killing catalogue's existing connections (MySQL `KILL` on its threads) so it is forced to
-  reconnect into an exhausted pool.
+## Attribution under cascades — open question
 
-The second is surgical and needs no load generator, but it carries a real risk of leaving
-catalogue unable to refill its pool at all — a state that may need a container restart and
-would corrupt any run in progress. It touches M1's fault injector and the shared testbed,
-so it is written up here for the team rather than changed unilaterally.
+M3 reported in PR #31 that under traffic an anomaly frequently does not name the broken
+service: a catalogue crash arrived as an anomaly on `front-end`, a payment latency fault as
+one on `carts`, a db-pool fault as one on `orders`. With real traffic a failure propagates
+to whatever calls it, and the caller often degrades first and hardest.
+
+This is grouping working as designed — `services[]` is a member list, and the scoring here
+counts a detection when the ground-truth service appears anywhere in it — but it shifts
+work onto M3's ranker, which has to pick the culprit out of that list. It deserves a
+deliberate team position: either M2 orders `services[]` by likely culpability (deepest
+anomalous service first), or M3 owns the disambiguation entirely. Neither is written down
+today.
 
 ## What is not done
 
-- **Three fault classes, not six.** The plan names memory leak / OOM, dependency timeout
-  cascade and config error as well. The injector cannot produce those yet; the scenario
-  suite lists only what physically exists rather than scenarios that quietly do nothing.
-- **MRR / top-k / evidence validity are unscored** until M3 exists. The harness is ready.
-- **No CI.** Tests run locally only.
+- **Three fault classes injectable, not six.** The plan names memory leak / OOM,
+  dependency timeout cascade and config error as well. All four missing scenarios — those
+  three plus a gradual `resource_exhaustion` ramp — are now in `scenarios.py` with labelled
+  ground truth, reachable as `--suite full` or `--suite new-faults`, and `run_live` calls
+  `GET /fault-types` first so a class the deployed injector lacks is excluded from the
+  denominator instead of counted against the detector. What is still missing is the
+  injection mechanism for those four, which lives in M1's `services/fault-injector`: the
+  patch is written and verified to apply, and issue #35 asks for it. Until then the natural
+  degradation above is the nearest thing to a slow-drift fault the testbed has, and it is
+  unlabelled rather than injected.
+- **`resource_exhaustion` is the scenario the detector comparison needs.** Every injected
+  fault so far is a step change, which is why EWMA, CUSUM and 3-sigma tie on all of them.
+  The ramp — 180s in six 30s steps, each step longer than the 1m metric window — is the
+  first labelled fault where a cumulative statistic has something to win on.
+- ~~MRR / top-k / evidence validity are unscored by this harness (issue #21).~~ The
+  `attribute` subcommand closes this. It finds the anomaly the detector raised inside each
+  recorded fault window, asks the diagnosis service to diagnose it, and scores the returned
+  ranking against the service the fault was physically injected into: **top-1 92% (11/12),
+  top-3 100%, MRR 0.94, evidence validity 100%** across 12 scorable scenarios, all on the
+  deterministic path (`pipeline_mode = full`, LLM unused).
+
+  Three things about that number rather than the number alone. A scenario with no anomaly,
+  or an anomaly with no stored hypotheses, is excluded rather than scored zero — those are
+  detection failures and pipeline gaps, and charging them to the ranker would blend three
+  components into one metric; both `db_pool_saturation` runs fell out this way. Duplicate
+  services collapse to their best rank, so a ranker cannot pad its list into a better
+  top-3. And evidence ids are resolved against `evidence`, `anomalies` *and* `deploys`,
+  because the pipeline cites raw source ids rather than the `ev:` ids in
+  docs/evidence-model.md — both resolve to real records, and reporting 0% validity over a
+  format difference would have been a measurement of nothing.
+
+  The single top-1 miss is the most useful result in the set. A `front-end` fault scored
+  RR 0.33 because the grouper had bundled `front-end` and `orders` into one anomaly while
+  `orders` was independently degrading (#33); the ranker picked `orders`, which was the
+  correct read of the candidate set it was given. Later the same day an uncontaminated
+  anomaly named `front-end` alone and the ranker placed it first at 0.84 confidence. So
+  top-1 is currently measuring M2's grouping as much as M3's ranking, and the testbed
+  degradation has now cost the project a detection metric, a false-positive rate and an
+  attribution score. M3 has a separate live scorer (PR #31) on the same MRR definition;
+  which harness owns the reported number is still unsettled.
+- **The false-positive rate**, for the reasons above.
+- **The `db_pool_saturation` mechanism**, for the reasons above.

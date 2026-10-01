@@ -6,7 +6,7 @@ every slice produces and consumes.
 | Slice | Owner | Status |
 | --- | --- | --- |
 | Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
-| Anomaly detection & evaluation | M2 | Detector and harness built and run against the live testbed |
+| Anomaly detection & evaluation | M2 | Detector and harness built; 6/7 faults detected under standing traffic, median 31.0s |
 | Retrieval-augmented reasoning | M3 | Phases 0-8 complete (`services/diagnosis-service/`); evaluated across four pipeline modes and verified live |
 | Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
 
@@ -218,7 +218,7 @@ baseline so the detector went quiet mid-incident, and CUSUM could never fire at 
 The liveness gap was found by the evaluation harness, not by the tests — the first live run
 missed a `service_crash` completely. See [docs/phase9-detection.md](docs/phase9-detection.md).
 
-### Phase 9 — Evaluation harness ✅ (built, not yet run against the testbed)
+### Phase 9 — Evaluation harness ✅ (run against the live testbed, with and without standing traffic)
 `services/evaluation-runner/` — the command every number in the final report comes from.
 
 ```bash
@@ -248,38 +248,66 @@ cd services/evaluation-runner  && python -m pytest tests -q   # 40
 stream with a known fault — an end-to-end check of the whole chain.
 
 ### Results
-Full seven-scenario suite against the live stack: **4/7 detected (80% of observable),
-median latency 36.5s** against a 60s target, and **zero false positives** across 11.9
-minutes of quiet observation. `service_crash` is 3/3.
+Full seven-scenario suite against the live stack **with standing traffic** (2026-09-23):
+**6/7 detected (86%), median latency 31.0s** against a 60s target, nothing scored
+`unobservable` and nothing misattributed. `bad_deploy_latency` and `service_crash` are both
+3/3; the only miss is `db_pool_saturation`. The two fastest detections — `front-end` at
+23.1s and `orders` at 17.9s — are scenarios that were undetectable by construction before
+M1's load generator existed. `error_rate` reached the detector for the first time (286
+samples, peaking at 1.8%), so the noise-floor fix is finally testable against live data.
 
-**Ablation (18 scenarios, 26,370 replayed samples, identical input per detector):** EWMA,
-CUSUM and 3-sigma all detect 12/18; a static threshold manages **8/18** and misses *every*
-latency fault. Catalogue's p95 goes from a 5.9ms baseline to 222ms under CPU throttle — a
-38x regression that a defensible 500ms global threshold sails straight past. No single fixed
-threshold works across services with different healthy baselines; that is what EWMA buys.
+**Ablation (same window, 15,062 replayed samples, identical input per detector):** EWMA,
+CUSUM and 3-sigma each detect **6/7**; a static threshold manages **4/7**. Under load
+`orders` sits at about 240ms while `user` sits at about 5ms, so no single fixed threshold
+can serve both — which is exactly what a per-(service, metric) learned baseline buys.
 
-The three non-detections are testbed limitations, not detector failures, and the harness
-distinguishes them — see [docs/phase9-detection.md](docs/phase9-detection.md):
+**Before the load generator (2026-09-13), for comparison:** 4/7 (57%), median 36.5s, two
+scenarios unobservable; replay over 18 scenarios gave 12/18 for the three adaptive
+detectors against 8/18 for the static one. Both runs are kept in
+[docs/phase9-detection.md](docs/phase9-detection.md) — the difference between them is the
+most useful thing the harness has produced.
 
-- `front-end` and `orders` serve no traffic (Sock Shop runs without a load generator), so
-  they emit only cpu/memory and a latency fault there is undetectable by construction.
-  Scored `unobservable`, but still counted against the headline rate.
-- `db_pool_saturation` genuinely exhausts catalogue-db's 151-connection pool, yet catalogue
-  is unaffected — it holds an established pool and never needs a new connection at 0.2
-  req/s. The fault starves something the victim does not use.
+**The false-positive rate is not settled.** The live run measured 0.00/hour over 11.9
+quiet minutes; a replay of the same window measured 9.34/hour because it includes the
+stack's cold start. Neither is defensible yet. See below.
 
 ### Not done yet
-- **Four of seven services have no traffic**, which caps what the evaluation can cover, and
-  means `error_rate` is never ingested for any service. ~~Fixing it means adding a load
-  generator to the shared testbed — M1's call, flagged for the team.~~ **M1 added one**
-  (`services/load-generator/`, issue #6). Every result in this section was measured before
-  it existed, so the detection rates, the `unobservable` scorings for `front-end`/`orders`
-  and the `db_pool_saturation` finding all need re-running under standing load.
-- Three fault classes, not the six in the plan — the injector cannot produce memory leak /
-  OOM, dependency timeout cascade or config error yet.
+- **The false-positive rate is uncharacterised.** Three measurements of the same day
+  disagree (0.00, 5.64 and 9.34 per hour) depending on whether a restart falls inside the
+  window. Needs an hour or more of quiet observation with no restart in it.
+- **The testbed now degrades on its own.** Under steady load `orders` latency climbs from
+  107ms to 288ms over 45 minutes at constant traffic, and the detector raised 8 alerts in
+  55 minutes with no fault injected. That is a real degradation rather than detector error,
+  it is the slow-drift class the injector cannot produce, and it is the natural experiment
+  for separating CUSUM from EWMA — which tie on every injected fault so far.
+- **`db_pool_saturation` still misses, and traffic did not fix it.** At 2.2 req/s
+  catalogue's p95 stayed at exactly 4.8ms through the whole fault window: it reuses an
+  established pool, so exhausting the database's capacity to accept *new* connections never
+  touches it. Either the injector kills catalogue's existing connections, or the scenario
+  should be dropped.
+- **Three fault classes injectable, not the six in the plan.** The four missing scenarios
+  (dependency timeout, config error, memory exhaustion, gradual resource exhaustion) now
+  exist in the suite with labelled ground truth as `--suite full`, and the runner asks the
+  injector what it supports before a run so an unimplemented class is skipped rather than
+  scored as a miss. The mechanisms themselves are written and verified to apply cleanly
+  against `services/fault-injector`, but that is M1's file and a shared container, so it
+  waits on M1 (issue #35).
+- ~~MRR / top-k / evidence validity are unscored by this harness (issue #21).~~
+  `evaluation-runner attribute` now asks the diagnosis service about the anomaly raised
+  inside each fault window and scores the ranking against the injected service: **top-1
+  92%, top-3 100%, MRR 0.94, evidence validity 100%** over 12 scorable scenarios. Two
+  caveats. Rankings are read from the `hypotheses` table rather than the `/analyze`
+  response, because the response schema carries no service field while the table does; and
+  the single top-1 miss was an anomaly where the grouper had bundled the injected service
+  with `orders`, which was genuinely degrading (#33) — so top-1 currently measures M2's
+  grouping as much as M3's ranking. M3 has a separate live scorer (PR #31) using the same
+  MRR definition; the team should still settle which harness owns the number.
+- **Attribution under cascades is an open question.** With real traffic an anomaly often
+  names the caller rather than the broken service (M3, PR #31). Whether M2 should order
+  `services[]` by likely culpability, or M3 should disambiguate, is undecided.
 - Seasonality suppression deliberately skipped (no diurnal cycle in synthetic traffic).
-- No CI.
-
+- ~~No CI.~~ M4 added `.github/workflows/ci.yml`, which runs both M2 suites on every pull
+  request alongside M3's and M4's, plus a compose validation.
 ---
 
 ## Diagnosis evidence
@@ -425,8 +453,9 @@ detector names it directly, and the existing weights then rank it first, in all 
 - **The corpus is empty on a fresh volume** (issue #19). Ingestion needs `--ingest` and
   Ollama, so a clean `docker compose up` still runs a retrieval-free system — but it is no
   longer silent: `GET /health` reports `corpus_incidents` and a `retrieval` status.
-- **Accuracy, MRR and evidence validity are not produced by the evaluation harness**
-  (issue #21) — measured here on fixtures, but the runner does not yet call `/analyze`.
+- **Accuracy, MRR and evidence validity are measured here on fixtures.** M2's harness now
+  also scores them against injected faults via `POST /analyze` (issue #21), so there are
+  two sources for the same three metrics and the team should settle which the report uses.
 - **The ablation runs on fixtures, not real injected faults** (issue #22).
 - **`scale_service` is never proposed.** A deliberate choice, not an oversight: nothing
   measured here shows a service is overloaded, so offering it would be guessing.
