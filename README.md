@@ -334,13 +334,27 @@ asks an LLM to explain the ranking, validates the reply, and stores the run.
 
 **Generation goes to OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`, falling back to
 `qwen/qwen3.8-27b:free`), with the key in the gitignored `.env` at the repo root as
-`OPENROUTER_API_KEY`. Copy `.env.example` to `.env` and use **your own** key — get one at
-<https://openrouter.ai/keys>. One key per person, not one shared across the team: this
-repository is public, so a key committed anywhere in it is a key published to everyone and
-revoked within minutes; and the free tier rate-limits per account, so a shared key means
-four people throttling each other. A run that hits the limit part-way through finishes with
-some hypotheses from the model and some from the deterministic fallback, which makes the
-evaluation uninterpretable without saying so — check `answered_by` in the report. Without a key the service still answers, always from the deterministic
+`OPENROUTER_API_KEY`. Copy `.env.example` to `.env` and put a key in it.
+
+The key is only ever read by `diagnosis-service`, which uses it to sign its own request to
+OpenRouter. It is never returned by any endpoint and no frontend references it, so **a person
+using the deployed site never needs a key of their own** — the server holds one on their
+behalf, and the browser never sees it.
+
+That makes the setup different in the two places it runs:
+
+- **Deployed**, one key belongs to the deployment, supplied as an environment variable by
+  whatever runs it — a `.env` placed on the server, a systemd unit, or the host's own secrets
+  UI (Render, Railway, Fly, Azure, AWS all have one). Never bake it into the image and never
+  commit it: this repository is public, so a key committed anywhere in it is published, and
+  is usually auto-revoked within minutes. Note that a public deployment spends *your* quota
+  on every visitor, so put the demo behind a login or accept that free-tier throttling is
+  the only limit.
+- **Developing locally**, use your own key rather than passing one around. The free tier
+  rate-limits per account, so a shared key means the team throttles itself — and a run that
+  hits the limit part-way through finishes with some hypotheses from the model and some from
+  the deterministic fallback, which makes an evaluation uninterpretable without saying so.
+  Check `answered_by` in the report rather than assuming. Without a key the service still answers, always from the deterministic
 ranking. `LLM_PROVIDER=ollama` switches generation back to a local `phi4-mini`, which is how the
 phi4-mini results below can be reproduced.
 
