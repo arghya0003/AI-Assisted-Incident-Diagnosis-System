@@ -709,6 +709,25 @@ is printed for every attribution so a reader can judge it.
 Left uncorrected this would have reported M2's detector as missing a fault it caught. The numbers
 in the table above are after the fix for run 2, and before it for run 1.
 
+### Corrections from M1's fault-injector work (issue #35)
+
+Two of the numbers above measured less than they appeared to, and M1 found out why.
+
+**`db_pool_saturation` was never landing.** The injector held database connections open, but
+catalogue reuses two pooled connections, so the held connections never reached it. In run 1 that
+scenario was scored a miss (`orders` ranked first, rr 0.00) and in run 2 it was recorded as
+undetected. Neither tells you anything about the ranker: run 2's detector was correct that nothing
+had happened, and run 1 scored background noise attributed to a non-event. Dropping it moves run 1
+to 1/2 top-1. The injector now holds a table lock instead, so the class is worth re-running.
+
+**Two of the new fault classes label the symptom, not the cause.** For `dependency_timeout` and
+`config_error` the injector breaks a *dependency* and records `ground_truth_service` as the service
+that visibly degrades, with `params.dependency` as the one it actually broke. Scoring root-cause
+accuracy against the first would mark a correct diagnosis wrong: pausing `catalogue-db` would
+require the answer "catalogue" to score. `eval_live.py` therefore scores against
+`params.dependency` when it is present and different, and prints both labels for the run. Detection
+scoring still uses the degrading service, which is what a detector can see.
+
 ### Honest limits
 
 Three detected scenarios per run is a small sample, and the two runs disagree (1/3 versus 2/3 top-1)

@@ -59,13 +59,29 @@ DEFAULT_SCENARIOS = [
     ("bad_deploy_latency", "payment"),
     ("db_pool_saturation", "catalogue"),
 ]
+# The classes M1 added in #42. Opt-in with --suite full, so the numbers recorded against the
+# default set do not move when the injector grows. dependency_timeout and config_error break a
+# dependency rather than the named service, which is why Scenario tracks both labels.
+NEW_FAULT_SCENARIOS = [
+    ("dependency_timeout", "catalogue"),
+    ("config_error", "front-end"),
+    ("memory_exhaustion", "carts"),
+    ("resource_exhaustion", "user"),
+]
 UNDETECTED = "undetected"
 
 
 @dataclass
 class Scenario:
     fault_type: str
-    service: str  # the ground truth: what was actually broken
+    service: str  # what the fault is aimed at, and what the detector should see degrade
+    # Where the fault was actually applied, when that is a different service. For
+    # dependency_timeout and config_error the injector breaks a *dependency* and records
+    # ground_truth_service as the service that visibly degrades, with params.dependency as the
+    # one it broke. Root-cause scoring has to use the latter: naming the paused catalogue-db is
+    # the correct diagnosis, and scoring it against catalogue would mark the right answer wrong
+    # and the symptom right. Detection scoring keeps using `service`.
+    dependency: str | None = None
     scenario_id: str = ""
     t_inject: datetime | None = None
     anomaly_id: str = ""
@@ -78,6 +94,11 @@ class Scenario:
     @property
     def detected(self) -> bool:
         return bool(self.anomaly_id)
+
+    @property
+    def root_cause(self) -> str:
+        """The service a correct diagnosis should name."""
+        return self.dependency or self.service
 
 
 def iso(moment: datetime) -> str:
@@ -93,6 +114,23 @@ def reciprocal_rank(ranked_services: list[str], truth: str) -> float:
     return 0.0
 
 
+def supported_fault_types(client: httpx.Client, injector_url: str) -> set[str] | None:
+    """What the deployed injector can actually produce, or None if it could not be asked.
+
+    A class the running injector lacks is skipped rather than attempted, because a fault that
+    never ran is not a fault the detector missed, and counting it would understate detection. None
+    rather than an empty set when the call fails: "could not ask" must not be read as "supports
+    nothing", which would skip everything and report a perfect score over zero scenarios.
+    """
+    try:
+        response = client.get(f"{injector_url}/fault-types", timeout=10.0)
+        response.raise_for_status()
+        return set(response.json())
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as exc:
+        print(f"  could not read /fault-types ({exc}); attempting every scenario")
+        return None
+
+
 def inject(client: httpx.Client, injector_url: str, scenario: Scenario, duration_s: int) -> None:
     body = {"service": scenario.service, "fault_type": scenario.fault_type, "duration_s": duration_s}
     response = client.post(f"{injector_url}/faults", json=body, timeout=30.0)
@@ -103,6 +141,10 @@ def inject(client: httpx.Client, injector_url: str, scenario: Scenario, duration
     # The injector reports the ground truth back; assert rather than assume, so a mismatch is a
     # loud failure instead of a silently mislabelled result.
     assert payload["ground_truth_service"] == scenario.service, payload
+    # Only the dependency-shaped classes carry this, and only then is the root cause elsewhere.
+    dependency = (payload.get("params") or {}).get("dependency")
+    if dependency and dependency != scenario.service:
+        scenario.dependency = dependency
 
 
 def wait_for_anomaly(settings: Settings, scenario: Scenario, timeout_s: float, duration_s: int,
@@ -241,21 +283,24 @@ def run_scenario(clients, settings: Settings, scenario: Scenario, args) -> None:
         f"(onset +{scenario.onset_after_seconds:.1f}s; {', '.join(scenario.anomaly_metrics)} "
         f"on {', '.join(scenario.anomaly_services)})"
     )
-    if scenario.service not in scenario.anomaly_services:
+    if scenario.dependency:
+        print(f"     root cause is {scenario.dependency} (the dependency the fault was applied to), "
+              f"not {scenario.service} (what degrades); scoring against the former")
+    if scenario.root_cause not in scenario.anomaly_services:
         # Worth seeing: the detector named only the symptoms, so the ranker has to reach the cause
         # from services that are not in the event at all.
-        print(f"     note: {scenario.service} is not among the anomalous services")
+        print(f"     note: {scenario.root_cause} is not among the anomalous services")
 
     for mode in args.modes:
         run = analyze(clients["http"], args.service_url, scenario.anomaly_id, mode, args.analyze_timeout)
         run["ranked"] = ranked_services(settings, run["analysis_id"], scenario.anomaly_id)
         cited = [i for h in run["hypotheses"] for i in h.get("evidence_ids", [])]
         run["cited"], run["unresolved"] = len(cited), resolvable(settings, cited)[1]
-        run["truth"] = scenario.service
-        run["rr"] = reciprocal_rank(run["ranked"], scenario.service)
+        run["truth"] = scenario.root_cause
+        run["rr"] = reciprocal_rank(run["ranked"], scenario.root_cause)
         scenario.runs.append(run)
         top = run["ranked"][0] if run["ranked"] else "(none)"
-        hit = "OK " if top == scenario.service else "   "
+        hit = "OK " if top == scenario.root_cause else "   "
         print(
             f"  {hit}{mode:<14} rank1={top:<12} rr={run['rr']:.2f} {run['answered_by']:<22} "
             f"{run['latency_ms']:6d}ms cited={run['cited']} unresolved={len(run['unresolved'])}"
@@ -306,7 +351,9 @@ def report(scenarios: list[Scenario], modes: list[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--modes", default="full,deterministic", help="comma-separated pipeline modes")
-    parser.add_argument("--scenarios", default="", help="'fault_type:service,...' (default: a spread of five)")
+    parser.add_argument("--scenarios", default="", help="'fault_type:service,...' (overrides --suite)")
+    parser.add_argument("--suite", default="default", choices=("default", "full", "new-faults"),
+                        help="default: the original five; full: plus the four classes added in #42")
     parser.add_argument("--duration", type=int, default=90, help="fault duration in seconds")
     parser.add_argument("--detect-timeout", type=float, default=150.0, help="how long to wait for an anomaly")
     parser.add_argument("--analyze-timeout", type=float, default=180.0)
@@ -322,7 +369,9 @@ def main() -> int:
     args = parser.parse_args()
 
     args.modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-    pairs = DEFAULT_SCENARIOS
+    pairs = {"default": DEFAULT_SCENARIOS,
+             "full": DEFAULT_SCENARIOS + NEW_FAULT_SCENARIOS,
+             "new-faults": NEW_FAULT_SCENARIOS}[args.suite]
     if args.scenarios:
         pairs = [tuple(part.split(":", 1)) for part in args.scenarios.split(",") if part.strip()]
     scenarios = [Scenario(fault_type=f, service=s) for f, s in pairs]
@@ -355,6 +404,12 @@ def main() -> int:
                 print(f"  testbed reset: cleared {reset.json().get('orders_removed')} accumulated order(s)")
             except httpx.HTTPError as exc:
                 print(f"  WARNING: could not reset the testbed ({exc}); orders may be degraded")
+        supported = supported_fault_types(http, args.injector_url)
+        runnable = [s for s in scenarios if supported is None or s.fault_type in supported]
+        for skipped in (s for s in scenarios if s not in runnable):
+            print(f"  skipping {skipped.fault_type} on {skipped.service}: the deployed injector "
+                  "cannot produce it")
+        scenarios = runnable
         for scenario in scenarios:
             run_scenario({"http": http}, settings, scenario, args)
 
