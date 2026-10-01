@@ -473,15 +473,24 @@ anomaly; `/analyze` ranked payment first, answered by the LLM (3 attempts, 21.5 
 guardrail rejections), with the cause "the payment service stopped reporting liveness
 metrics, indicating a possible crash or unreachability".
 
-**Measured on real injected faults, not only fixtures** (2026-09-28,
-`scripts/eval_live.py`, issues #21 and #22). Two runs of five injected scenarios, 3 detected each:
-top-1 1/3 then 2/3, MRR 0.50 then 0.67, **evidence validity 100%** in both. Live accuracy sits
-below fixture accuracy for a reason worth stating: the anomaly usually names a symptom one or two
-hops from the broken service — a catalogue crash arrived as front-end errors, a payment latency
-fault as carts latency — where fixtures nearly always name the culprit or its caller. Detection is
-also nondeterministic: both runs missed two of five faults, but not the same two. Run 2's mode
-comparison is void, since the free-tier quota was exhausted and every `full` run fell back to the
-scorer.
+**The ablation, on real injected faults** (2026-10-01, `scripts/eval_live.py`, issue #22). Nine
+scenarios across all seven fault classes, 8 detected, 24 scored runs:
+
+| Mode | top-1 | MRR | evidence validity | p50 latency |
+| --- | --- | --- | --- | --- |
+| `full` | **7/8** | **0.88** | 100% | 20.0 s |
+| `llm_only` | 5/8 | 0.69 | 100% | 22.5 s |
+| `deterministic` | **7/8** | **0.88** | 100% | **0.20 s** |
+
+Median detection delay 33.9 s, inside the plan's 60 s target. **Retrieval and scoring beat the model
+on its own**, and the two `llm_only` misses share one shape: given the facts with no graph, scores or
+past incidents, it blamed the caller `front-end` where `full` named the crashed service. front-end
+appears in nearly every cascade, and nothing weighs it down. **The LLM still adds no ranking
+accuracy** — `full` and `deterministic` agree scenario for scenario at about 100 times the latency.
+One class is systematically wrong: `dependency_timeout` pauses `catalogue-db` and every mode answered
+`catalogue`. Earlier live runs on 2026-09-28 scored 1/3 and 2/3; those were depressed by a stale
+injector image, uncleaned `orders` history (issue #33) and a fallback model that never answered, not
+by the problem being harder than fixtures.
 
 **M2's `liveness` signal solved the crash case.** A crashed service used to be invisible to
 scoring — it stops reporting, so it was never anomalous and never ranked. The staleness

@@ -409,6 +409,12 @@ def main() -> int:
         for skipped in (s for s in scenarios if s not in runnable):
             print(f"  skipping {skipped.fault_type} on {skipped.service}: the deployed injector "
                   "cannot produce it")
+        if any(s not in runnable for s in scenarios):
+            # Merging a PR does not rebuild a running container. A whole evaluation run was spent
+            # before this said so: four fault classes were skipped and db_pool_saturation silently
+            # did not land, because the injector image predated M1's fixes.
+            print("  NOTE: if those classes exist in the repository, the running image is stale - "
+                  "rebuild with: docker compose up -d --build fault-injector")
         scenarios = runnable
         for scenario in scenarios:
             run_scenario({"http": http}, settings, scenario, args)
