@@ -367,8 +367,14 @@ def run_sweep(args) -> int:
             conn, subject, sweeping.SWEEP_METRIC,
             first.t_inject - timedelta(seconds=args.warmup_seconds), first.t_inject,
         )
+        # The fault's own window, NOT through to the end of the rung. The gap
+        # after a fault is 150s of recovered traffic against 90s of fault, so
+        # measuring to rung_end puts the median in the healthy part: a first run
+        # reported 248ms for a fault that actually reached 917ms, and ranked a
+        # weaker fault above a stronger one because the dilution differed.
         point.fault_p95_ms = sources.measure_p95(
-            conn, subject, sweeping.SWEEP_METRIC, first.t_inject, rung_end,
+            conn, subject, sweeping.SWEEP_METRIC,
+            first.t_inject, first.t_recovered or rung_end,
         )
 
         samples = sources.load_metric_samples(
