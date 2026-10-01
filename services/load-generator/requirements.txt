@@ -1,2 +1,4 @@
 flask==3.0.3
 requests==2.32.3
+# 3.x: orders-db is mongo:3.4, which pymongo 4 no longer speaks to.
+pymongo==3.13.0
