@@ -76,6 +76,11 @@ class Hypothesis(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     rank: int = Field(ge=1)
+    # Which service the hypothesis blames. diagnosis-service now returns this
+    # (issue #37); before, extra="ignore" silently dropped it and an approver
+    # could only tell which service was implicated by reading `cause`. Optional,
+    # so incidents stored before the field existed still load.
+    service: str | None = None
     cause: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_ids: list[NonBlankId] = Field(min_length=1)
