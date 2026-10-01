@@ -1050,6 +1050,19 @@ retrieved top 3 for `anom-fx-07` reproduced the Phase 5 similarities exactly (0.
 so rounding the stored vectors to six decimals costs nothing. Retrieval at request time still needs
 Ollama to embed the query - that is inherent, and now visible rather than silent.
 
+**The plan's ablation, on real injected faults (2026-10-01, issue #22).** Nine scenarios across all
+seven fault classes, three modes, 24 scored runs: `full` 7/8 top-1 and MRR 0.88, `llm_only` 5/8 and
+0.69, `deterministic` 7/8 and 0.88. Evidence validity 100% throughout; detection median 33.9 s,
+inside the 60 s target. Retrieval and scoring therefore beat the model on its own - and the two
+`llm_only` misses share one shape, blaming the caller `front-end` where `full` named the crashed
+service, because front-end appears in nearly every cascade and nothing weighs it down. The LLM still
+adds no ranking accuracy over the scorer: `full` and `deterministic` agree scenario for scenario at
+about 100 times the latency. One class is systematically wrong - `dependency_timeout` pauses
+`catalogue-db` and every mode answered `catalogue` - and `config_error` was not detected at all.
+A 136 s outlier sits close to M4's 150 s timeout. This also **corrects the 2026-09-28 runs**, whose
+low scores came from a stale injector image, an uncleaned `orders` history and a fallback model that
+never answered, rather than from the problem being hard. Full tables in `README.md`.
+
 **Measured on real injected faults (2026-09-28, issues #21 and #22).** `scripts/eval_live.py`
 injects a fault, waits for M2's detector, analyses the anomaly it produced, and scores against the
 injector's recorded ground truth. Two runs of five scenarios: 3 detected each time, top-1 1/3 then

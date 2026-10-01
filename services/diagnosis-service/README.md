@@ -734,3 +734,73 @@ Three detected scenarios per run is a small sample, and the two runs disagree (1
 on cases that differ mainly in which faults happened to be observable. These are indicative, not
 results. What is solid is the shape: the ranker is handed symptoms one or two hops from the cause,
 and the deterministic scorer and the LLM agree on the answer whenever both actually run.
+
+## The ablation on real injected faults — 2026-10-01
+
+The comparison the plan actually asks for — retrieval-augmented ranking against LLM-only ranking —
+measured on faults M1's injector caused and M2's detector reported, across all seven fault classes
+(issue #22). Nine scenarios, three modes, 24 scored runs:
+
+```bash
+LIVE_ARGS="--suite full --modes full,llm_only,deterministic" \
+  bash services/diagnosis-service/scripts/test_in_docker.sh --live
+```
+
+| Mode | top-1 | top-3 | MRR | evidence validity | answered by the LLM | p50 / max latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `full` | **7/8** | 7/8 | **0.88** | 100% | 8/8 | 20.0 s / 136 s |
+| `llm_only` | 5/8 | 6/8 | 0.69 | 100% | 8/8 | 22.5 s / 37 s |
+| `deterministic` | **7/8** | 7/8 | **0.88** | 100% | 0/8 | **0.20 s** / 0.23 s |
+
+9 scenarios injected, 8 detected, median detection delay **33.9 s** — inside the plan's 60 s target.
+
+### What it shows
+
+**Retrieval and scoring beat the model on its own.** `full` 7/8 against `llm_only` 5/8, MRR 0.88
+against 0.69. This is the first time the ablation has shown a real difference: on fixtures the two
+differed only in degree, because a fixture usually names the culprit outright.
+
+**The two `llm_only` failures have the same shape.** Given the facts with no graph, no scores and no
+retrieved incidents, it blamed **front-end** — the caller — where `full` correctly blamed the crashed
+service: `service_crash` on catalogue, and `memory_exhaustion` on carts. front-end appears in nearly
+every cascade, so with no structure to weigh it against, the loudest service wins. That is a
+concrete answer to "what does the structure buy", and it is not an accuracy point: it is the
+difference between naming a cause and naming a symptom.
+
+**The LLM still adds no ranking accuracy.** `full` and `deterministic` are identical — same 7/8,
+same 0.88, scenario for scenario — at roughly 100 times the latency. Every earlier finding holds:
+the structure determines the ranking, and the model writes the explanation.
+
+**One class the system gets systematically wrong.** `dependency_timeout` pauses `catalogue-db`, and
+all three modes answered `catalogue`. Nothing named the datastore one hop below, even though it is in
+the candidate set. The anomaly never mentions it, and no signal distinguishes "catalogue is slow"
+from "what catalogue depends on is gone". This is the one case where the ranker is confidently wrong
+rather than uncertain, and it is only visible because the scoring was corrected to score against the
+dependency (see "Corrections from M1's fault-injector work").
+
+**`config_error` was not detected at all.** The injector points a dependency's hostname at loopback,
+so front-end answers errors quickly rather than slowly - no latency signal, and `error_rate` did not
+trip within 150 s. A detection gap, reported rather than dropped.
+
+**The latency tail is a real integration risk.** One `full` run took **136 s** against M4's 150 s
+`DIAGNOSIS_TIMEOUT_SECONDS`. The median is 20 s. A retry inside that budget would not fit.
+
+### Correcting the earlier live runs
+
+The 2026-09-28 runs reported 1/3 and 2/3 top-1, and this file concluded from them that live accuracy
+sits well below fixture accuracy because real anomalies name symptoms rather than causes. **That
+conclusion was wrong, and the cause was a dirty testbed rather than a hard problem.** Three things
+differed, all of them environmental:
+
+- The running `fault-injector` image predated M1's fixes, so `db_pool_saturation` never landed and
+  four fault classes could not be produced at all. Merging a PR does not rebuild a running
+  container.
+- `orders` carried accumulated order history, so it sat in the candidate set degraded for reasons
+  unrelated to any injected fault (issue #33). `eval_live.py` now calls the load generator's
+  `/reset` first.
+- The fallback model `qwen/qwen3.8-27b:free` had never once answered, so `full` mode silently fell
+  back to the scorer and the mode comparison measured nothing.
+
+With current images, a reset testbed and a working fallback chain, live top-1 is **7/8** — better
+than the 18/27 measured on fixtures, not worse. The earlier numbers are left in place above with
+this correction, because the mistake is more instructive than the numbers were.
