@@ -92,6 +92,20 @@ Two bugs the live run found, both fixed:
 
 One thing the dashboard surfaced rather than caused: a fault detected on
 2026-10-01 produced no hypotheses and no incident, and the orchestrator's newest
-incident is still from 23 September. Nothing is consuming `anomalies.detected`
-into the decision path right now, so the Decisions tab will stay empty until that
-is resolved. It is raised in PR #36.
+incident was still from 23 September. Its Kafka consumer thread had died on
+30 September with `KafkaTimeoutError: Unable to bootstrap from kafka:9092`, which
+`_connect()` does not catch - it retries `NoBrokersAvailable`, aliased to
+`KafkaConnectionError`, and `KafkaTimeoutError` inherits from `RetriableError`
+instead. The thread exits, the HTTP API stays healthy, and nothing says so. The
+consumer group had 101 messages of lag and no members.
+
+Reviving it needed a group reset to `latest` before the restart, so it skipped
+the backlog rather than opening 101 incidents at once - which is what the
+consumer's own comment says should happen on a restart. The underlying bug is
+still there and will recur on any cold start where Kafka is slower to come up
+than the orchestrator.
+
+The remedy columns were then verified end to end: a catalogue latency fault
+detected in 31s, `rollback_deploy:dep-2026-10-01-0612` proposed, approved through
+the Decisions tab, and the whole chain visible in one History row - with the
+fault ending because the injector withdrew it, not because the action ran.
