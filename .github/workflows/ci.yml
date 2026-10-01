@@ -20,6 +20,7 @@ jobs:
         service:
           - anomaly-detector
           - evaluation-runner
+          - load-generator
           - diagnosis-service
           - orchestrator
     runs-on: ubuntu-latest
