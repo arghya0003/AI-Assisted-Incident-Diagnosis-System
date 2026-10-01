@@ -30,6 +30,11 @@ evaluation run can check what load was really offered instead of assuming.
 
 `GET /stats` on port 5002 is the answer to "was traffic actually running
 during that fault?" - see docs/load-generator.md.
+
+Checkout writes to orders-db, so this service also bounds that data
+(issue #33): a background pruner keeps the order history under a ceiling,
+and `POST /reset` clears it so an evaluation run starts from a known
+baseline. See orders_store.py.
 """
 
 import os
@@ -41,6 +46,9 @@ from collections import Counter, deque
 
 import requests
 from flask import Flask, jsonify
+from pymongo import MongoClient
+
+import orders_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("load-generator")
@@ -49,8 +57,7 @@ TARGET_URL = os.environ.get("TARGET_URL", "http://edge-router").rstrip("/")
 WORKERS = int(os.environ.get("WORKERS", "4"))
 TARGET_RPS = float(os.environ.get("TARGET_RPS", "5"))
 # Checkout is the expensive journey (orders -> payment/shipping/user/carts,
-# plus a row in orders-db that nothing cleans up), so only a fraction of
-# journeys check out. 0 disables checkout entirely - payment and shipping
+# plus a document in orders-db), so only a fraction of journeys check out. 0 disables checkout entirely - payment and shipping
 # then get no traffic at all.
 ORDER_PROBABILITY = float(os.environ.get("ORDER_PROBABILITY", "0.15"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "10"))
@@ -65,6 +72,14 @@ RECENT_WINDOW_SECONDS = float(os.environ.get("RECENT_WINDOW_SECONDS", "60"))
 SHOP_USER = os.environ.get("SHOP_USER", "user")
 SHOP_PASSWORD = os.environ.get("SHOP_PASSWORD", "password")
 PORT = int(os.environ.get("PORT", "5002"))
+# Every checkout adds to the one customer's order history, and `GET /orders`
+# returns all of it, so orders latency tracks the document count (issue #33).
+# The pruner holds it under ORDERS_MAX_DOCUMENTS; 0 disables pruning.
+ORDERS_DB_URI = os.environ.get("ORDERS_DB_URI", "mongodb://orders-db:27017")
+ORDERS_DB_NAME = os.environ.get("ORDERS_DB_NAME", "data")
+ORDERS_COLLECTION = os.environ.get("ORDERS_COLLECTION", "customerOrder")
+ORDERS_MAX_DOCUMENTS = int(os.environ.get("ORDERS_MAX_DOCUMENTS", "50"))
+ORDERS_PRUNE_INTERVAL_SECONDS = float(os.environ.get("ORDERS_PRUNE_INTERVAL_SECONDS", "60"))
 
 app = Flask(__name__)
 
@@ -111,6 +126,14 @@ _stats = {
     "last_failure": None,
 }
 _recent_requests: deque[float] = deque()
+# `/reset` restarts the lifetime counters but not the recent window, so the
+# window is measured against process start rather than `started_at`.
+_process_started_at = time.time()
+
+# Connects lazily; a short selection timeout keeps /stats responsive while
+# orders-db is down rather than hanging on it.
+_orders = MongoClient(ORDERS_DB_URI, serverSelectionTimeoutMS=5000)[ORDERS_DB_NAME][ORDERS_COLLECTION]
+_orders_stats = {"pruned": 0, "last_prune_error": None, "last_reset": None}
 
 _catalogue_lock = threading.Lock()
 _catalogue_ids: list[str] = []
@@ -222,6 +245,30 @@ def worker(index: int) -> None:
             time.sleep(1)
 
 
+def order_pruner() -> None:
+    while True:
+        try:
+            pruned = orders_store.prune(_orders, ORDERS_MAX_DOCUMENTS)
+            with _stats_lock:
+                _orders_stats["pruned"] += pruned
+                _orders_stats["last_prune_error"] = None
+        except Exception as exc:
+            # orders-db being briefly down must not kill the pruner, or the
+            # history would start growing without bound again unnoticed.
+            log.warning("could not prune orders-db: %s", exc)
+            with _stats_lock:
+                _orders_stats["last_prune_error"] = {"detail": str(exc), "at": time.time()}
+        time.sleep(ORDERS_PRUNE_INTERVAL_SECONDS)
+
+
+def orders_db_documents() -> int | None:
+    try:
+        return orders_store.count(_orders)
+    except Exception as exc:
+        log.warning("could not count orders-db documents: %s", exc)
+        return None
+
+
 def wait_for_testbed() -> None:
     while True:
         try:
@@ -238,9 +285,37 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+@app.post("/reset")
+def post_reset():
+    """Return the testbed to a known baseline before an evaluation run.
+
+    Clears the order history and zeroes the lifetime counters, so `/stats`
+    afterwards describes this run alone. The recent-rate window is kept: it
+    is what the fault injector checks to see that traffic is flowing.
+    """
+    try:
+        removed = orders_store.reset(_orders)
+    except Exception as exc:
+        log.warning("reset failed: %s", exc)
+        return jsonify({"error": f"could not clear orders-db: {exc}"}), 503
+
+    now = time.time()
+    with _stats_lock:
+        _stats.update({
+            "started_at": now, "requests": 0, "failures": 0, "journeys": 0, "orders": 0,
+            "by_step": Counter(), "failures_by_step": Counter(),
+            "client_errors_by_step": Counter(), "last_failure": None,
+        })
+        _orders_stats["pruned"] = 0
+        _orders_stats["last_reset"] = {"removed": removed, "at": now}
+    return jsonify({"orders_removed": removed, "orders_db_documents": orders_db_documents(),
+                    "reset_at": now})
+
+
 @app.get("/stats")
 def get_stats():
     """What load was actually offered - not what was configured."""
+    documents = orders_db_documents()
     now = time.time()
     with _stats_lock:
         elapsed = max(now - _stats["started_at"], 1e-9)
@@ -249,7 +324,7 @@ def get_stats():
         cutoff = now - RECENT_WINDOW_SECONDS
         while _recent_requests and _recent_requests[0] < cutoff:
             _recent_requests.popleft()
-        recent_window = min(elapsed, RECENT_WINDOW_SECONDS)
+        recent_window = min(max(now - _process_started_at, 1e-9), RECENT_WINDOW_SECONDS)
         return jsonify({
             "target_url": TARGET_URL,
             "workers": WORKERS,
@@ -270,6 +345,15 @@ def get_stats():
             "failures_by_step": dict(_stats["failures_by_step"]),
             "client_errors_by_step": dict(_stats["client_errors_by_step"]),
             "last_failure": _stats["last_failure"],
+            # The size of the order history is a testbed variable: orders
+            # latency follows it (issue #33). None means orders-db is unreachable.
+            "orders_db": {
+                "documents": documents,
+                "max_documents": ORDERS_MAX_DOCUMENTS,
+                "pruned": _orders_stats["pruned"],
+                "last_prune_error": _orders_stats["last_prune_error"],
+                "last_reset": _orders_stats["last_reset"],
+            },
         })
 
 
@@ -279,6 +363,7 @@ def main() -> None:
     log.info("offering %.2f req/s across %d workers against %s", TARGET_RPS, WORKERS, TARGET_URL)
     for index in range(WORKERS):
         threading.Thread(target=worker, args=(index,), daemon=True).start()
+    threading.Thread(target=order_pruner, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
 
 

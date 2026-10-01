@@ -315,6 +315,9 @@ def main() -> int:
                         help="how long after the fault ends an anomaly may still be attributed to it")
     parser.add_argument("--service-url", default=os.environ.get("DIAGNOSIS_URL", "http://localhost:8000"))
     parser.add_argument("--injector-url", default=os.environ.get("INJECTOR_URL", "http://localhost:5001"))
+    parser.add_argument("--load-generator-url", default=os.environ.get("LOAD_GENERATOR_URL", "http://localhost:5002"))
+    parser.add_argument("--no-reset", action="store_true",
+                        help="keep the load generator's accumulated order history instead of clearing it first")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and the request budget, inject nothing")
     args = parser.parse_args()
 
@@ -341,6 +344,17 @@ def main() -> int:
               f"retrieval={health.get('retrieval')}")
         if not health.get("corpus_incidents"):
             print("  WARNING: the corpus is empty, so incident similarity contributes nothing")
+        # A slow `orders` from accumulated order history lands in the candidate set next to the
+        # injected service and costs top-1 for reasons unrelated to the ranker (issue #33).
+        if args.no_reset:
+            print("  not resetting the testbed (--no-reset): orders history carries over")
+        else:
+            try:
+                reset = http.post(f"{args.load_generator_url}/reset", timeout=30.0)
+                reset.raise_for_status()
+                print(f"  testbed reset: cleared {reset.json().get('orders_removed')} accumulated order(s)")
+            except httpx.HTTPError as exc:
+                print(f"  WARNING: could not reset the testbed ({exc}); orders may be degraded")
         for scenario in scenarios:
             run_scenario({"http": http}, settings, scenario, args)
 

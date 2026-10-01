@@ -195,11 +195,16 @@ services:
       - user
       - payment
       - shipping
+      - orders-db
     environment:
       TARGET_URL: http://edge-router
       WORKERS: "4"
       TARGET_RPS: "5"
       ORDER_PROBABILITY: "0.15"
+      # Checkout writes to orders-db; the generator keeps that history under
+      # a ceiling, since orders latency grows with it (issue #33).
+      ORDERS_DB_URI: mongodb://orders-db:27017
+      ORDERS_MAX_DOCUMENTS: "50"
     networks:
       - diagnosis-net
 
@@ -621,6 +626,8 @@ services:
         condition: service_completed_successfully
       fault-injector:
         condition: service_started
+      load-generator:
+        condition: service_started
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
       PG_HOST: timescaledb
@@ -628,6 +635,9 @@ services:
       PG_USER: postgres
       PG_PASSWORD: Abcd1234#
       FAULT_INJECTOR_URL: http://fault-injector:5001
+      # `live` clears the generator's order history before warm-up so every
+      # run starts from the same baseline (issue #33).
+      LOAD_GENERATOR_URL: http://load-generator:5002
     volumes:
       - ./results:/results
     networks:

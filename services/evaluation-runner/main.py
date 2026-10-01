@@ -84,6 +84,19 @@ def run_live(args) -> int:
         return 1
     specs = [spec for spec in runnable for _ in range(args.repeat)]
 
+    # Start from the same baseline every time: `orders` slows as the load
+    # generator's order history grows, and a run on a degraded `orders`
+    # scores real alerts as false positives and hands the ranker an
+    # unrelated anomalous service (issue #33). Done before warm-up so the
+    # detector learns the baseline the faults will actually run against.
+    reset = None
+    if args.no_reset:
+        log.warning("--no-reset: testbed state carries over from earlier runs")
+    else:
+        reset = sources.reset_testbed()
+        if reset is not None:
+            log.info("testbed reset: removed %s order(s)", reset.get("orders_removed"))
+
     # The detector learns a baseline before it can flag a deviation from one.
     # Injecting during warm-up would score the detector on data it was never
     # given a chance to model.
@@ -129,6 +142,18 @@ def run_live(args) -> int:
         f"Detector under test: `{args.detector_label}` (as deployed).",
         f"{len(events)} anomaly event(s) observed in total.",
     ]
+    if reset is not None:
+        notes.append(
+            f"Testbed reset before warm-up: {reset.get('orders_removed')} accumulated "
+            "order(s) cleared from orders-db, so `orders` started at its baseline latency."
+        )
+    else:
+        notes.append(
+            "Testbed was **not** reset before this run "
+            + ("(`--no-reset`)" if args.no_reset else "(the load generator could not be reached)")
+            + ". `orders` latency depends on how much order history had accumulated, "
+              "so this run is not directly comparable with reset runs."
+        )
     if unsupported:
         missing = sorted({spec.fault_type for spec in unsupported})
         notes.append(
@@ -327,6 +352,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "or the next scenario is muted as a continuation")
     live.add_argument("--quiet-seconds", type=int, default=300,
                        help="fault-free observation used as the false-positive denominator")
+    live.add_argument("--no-reset", action="store_true",
+                       help="skip clearing the load generator's order history before the "
+                            "run; results then depend on how long the testbed has been up")
     live.add_argument("--detector-label", default="ewma",
                        help="detector the deployed service is running, for the report")
     live.set_defaults(func=run_live)

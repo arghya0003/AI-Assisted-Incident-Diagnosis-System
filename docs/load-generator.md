@@ -36,8 +36,9 @@ following the whole call graph rather than one endpoint:
 | history | `GET /orders` | → orders → orders-db |
 
 Checkout runs on `ORDER_PROBABILITY` of journeys (default 0.15) because it is the
-expensive one and writes an `orders-db` row nothing cleans up. Setting it to 0 removes
-payment and shipping from the traffic entirely.
+expensive one and writes an `orders-db` document. Setting it to 0 removes payment and
+shipping from the traffic entirely. Those documents are bounded — see
+[Bounded order history](#bounded-order-history-issue-33) below.
 
 ## Configuration
 
@@ -50,6 +51,9 @@ payment and shipping from the traffic entirely.
 | `REQUEST_TIMEOUT_SECONDS` | `10` | A throttled service can exceed this — that's the point |
 | `CATALOGUE_REFRESH_SECONDS` | `300` | Item ids are read from the running catalogue, never hardcoded |
 | `SHOP_USER` / `SHOP_PASSWORD` | `user` / `password` | Seeded Sock Shop customer (the `user-db` image ships it with an address and a card, which `POST /orders` needs) |
+| `ORDERS_DB_URI` | `mongodb://orders-db:27017` | Where checkout's orders land (`data.customerOrder`) |
+| `ORDERS_MAX_DOCUMENTS` | `50` | Order-history ceiling the pruner holds; 0 disables pruning |
+| `ORDERS_PRUNE_INTERVAL_SECONDS` | `60` | How often the pruner checks the ceiling |
 
 ## Open loop, deliberately
 Pacing is a shared rate limiter that hands out one request slot every `1/TARGET_RPS`
@@ -95,6 +99,41 @@ scenario as `params.offered_rps_at_inject`, so a run against an idle testbed is 
 missed. `POST /faults` also returns a `warning` when the testbed is nearly idle
 (< 1 req/s) or the generator can't be reached — a warning, not a refusal, so a deliberate
 idle-baseline run is still possible.
+
+## Bounded order history (issue #33)
+Every checkout adds an order for the one seeded customer, and every journey's
+`GET /orders` returns that customer's whole history. Unbounded, `orders` latency grew with
+the document count: 2,152 documents after about a day took `orders` p95 from ~45 ms to
+2.3 s, after which it stopped answering; after a reset it climbed back to 120 ms within
+70 minutes (282 documents). Every evaluation run measured a sicker testbed than the last —
+real `orders` alerts scored as false positives, and a slow `orders` landed in the ranker's
+candidate set next to the injected service.
+
+The generator now owns the data it creates:
+
+- **Pruning.** A background thread deletes the oldest orders above
+  `ORDERS_MAX_DOCUMENTS` (50) every `ORDERS_PRUNE_INTERVAL_SECONDS` (60 s). Checkout and
+  history still exercise the full path; the history just stops growing.
+- **`POST /reset`.** Clears every order and zeroes the `/stats` lifetime counters (the
+  60 s `recent_rps` window is kept, since the fault injector reads it). Both evaluation
+  harnesses call it before a run — `evaluation-runner live` before warm-up, so the
+  detector learns the baseline the faults run against, and `eval_live.py` before its
+  first scenario. Each reports whether the reset happened; pass `--no-reset` to skip it.
+
+```bash
+curl -s -X POST localhost:5002/reset
+# {"orders_removed": 2152, "orders_db_documents": 0, "reset_at": 1790872441.4}
+```
+
+`GET /stats` now includes the document count (values below illustrative), so the size of the history is recorded as
+the testbed variable it is:
+
+```json
+"orders_db": {"documents": 47, "max_documents": 50, "pruned": 312,
+              "last_prune_error": null, "last_reset": {"removed": 2152, "at": 1790872441.4}}
+```
+
+`documents: null` means orders-db could not be reached; `last_prune_error` says why.
 
 ## Verified on the live stack
 

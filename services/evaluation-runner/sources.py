@@ -32,6 +32,7 @@ PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 
 FAULT_INJECTOR_URL = os.environ.get("FAULT_INJECTOR_URL", "http://fault-injector:5001")
 DIAGNOSIS_URL = os.environ.get("DIAGNOSIS_URL", "http://diagnosis-service:8000")
+LOAD_GENERATOR_URL = os.environ.get("LOAD_GENERATOR_URL", "http://load-generator:5002")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 ANOMALY_TOPIC = "anomalies.detected"
 
@@ -48,6 +49,23 @@ def connect_postgres():
         except psycopg2.OperationalError as exc:
             log.warning("timescaledb not reachable yet (%s), retrying in 3s", exc)
             time.sleep(3)
+
+
+def reset_testbed() -> dict | None:
+    """Clear the order history the load generator has built up (issue #33).
+
+    `orders` latency tracks that history, so without this a run is measured
+    against a testbed whose health depends on how long it has been up.
+    Returns the generator's answer, or None when the reset could not be done -
+    the caller records that in the report rather than aborting the run.
+    """
+    try:
+        response = requests.post(f"{LOAD_GENERATOR_URL}/reset", timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:
+        log.warning("could not reset the testbed via %s (%s)", LOAD_GENERATOR_URL, exc)
+        return None
 
 
 def supported_fault_types() -> set[str] | None:
