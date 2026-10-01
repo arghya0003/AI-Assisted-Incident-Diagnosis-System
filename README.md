@@ -20,8 +20,24 @@ docker compose up -d
 Ports are listed below. The approval console is <http://localhost:3000>.
 
 **On an existing TimescaleDB volume**, Postgres does not re-run `timescaledb/init/*.sql`, so a
-stack that has been up since an earlier phase is missing newer tables. Apply the ones you need and
-restart the service that owns them; see the per-table instructions further down.
+stack that has been up since an earlier phase is missing newer tables. The symptom is a service that
+looks healthy but stores nothing — most visibly an approval console with no incidents in it. Apply
+the migration and restart the service that owns the table:
+
+```bash
+# M4's incidents and audit log (the approval console)
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1   -f /docker-entrypoint-initdb.d/008_incidents.sql
+docker compose restart orchestrator
+```
+
+Each script is safe to re-run. `GET /health` on the owning service reports
+`"status": "degraded"` with the remedy in `detail` when its tables are missing, so you can check
+rather than guess. M3's tables have their own instructions in
+[services/diagnosis-service/README.md](services/diagnosis-service/README.md).
+
+On Git Bash for Windows, prefix the command with `MSYS_NO_PATHCONV=1` and use
+`//docker-entrypoint-initdb.d/...`, or the path is rewritten to a Windows one and psql reports
+"No such file or directory".
 
 ### The API key, and why everyone needs their own
 

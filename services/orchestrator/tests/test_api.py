@@ -41,7 +41,30 @@ def _open_incident(store, diagnosis, orch, action="rollback_deploy:dep-1"):
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["service"] == "orchestrator"
+    body = response.json()
+    assert body["service"] == "orchestrator"
+    assert body["status"] == "ok" and body["database"] == "ok"
+    assert "detail" not in body, "nothing to explain when the database is fine"
+
+
+def test_health_is_degraded_and_explains_itself_when_the_schema_is_missing(override_dependencies):
+    """Issue #30: this used to report "status": "ok" beside "database": "schema_missing", which
+    reads as healthy. With no tables every incident is dropped and the console stays empty."""
+    store, _, _ = override_dependencies
+    store.schema_missing = True
+    response = client.get("/health")
+    assert response.status_code == 200, "compose health-checks this endpoint; a 503 would block startup"
+    body = response.json()
+    assert body["status"] == "degraded" and body["database"] == "schema_missing"
+    assert "008_incidents.sql" in body["detail"], "the remedy must name the migration"
+
+
+def test_health_is_degraded_when_the_database_is_unreachable(override_dependencies):
+    store, _, _ = override_dependencies
+    store.unavailable = True
+    body = client.get("/health").json()
+    assert body["status"] == "degraded" and body["database"] == "unreachable"
+    assert "timescaledb" in body["detail"]
 
 
 def test_actions_lists_the_fixed_vocabulary():

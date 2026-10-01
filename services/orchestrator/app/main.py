@@ -54,6 +54,10 @@ async def lifespan(_app: FastAPI):
         "starting orchestrator %s diagnosis_service=%s approval_timeout=%.0fs",
         SERVICE_VERSION, settings.diagnosis_service_url, settings.approval_timeout_seconds,
     )
+    database = store.status()
+    if database != "ok":
+        # Loud, at the top of the logs, rather than discovered from an empty console an hour later.
+        log.error("database is %s - %s", database, SCHEMA_REMEDY if database == "schema_missing" else UNREACHABLE_REMEDY)
     _threads.append(kafka_consumer.start(orchestrator, settings))
     _threads.append(sweeper.start(orchestrator, settings))
     try:
@@ -71,6 +75,18 @@ app = FastAPI(
     version=SERVICE_VERSION,
     description="M4: incident lifecycle, human-in-the-loop approval, and the safety architecture.",
     lifespan=lifespan,
+)
+
+# Postgres runs timescaledb/init/*.sql only on a fresh volume, so a stack that has been up since
+# an earlier phase never created these tables, and nothing said so (issue #30).
+SCHEMA_REMEDY = (
+    "the orchestrator's tables do not exist: no incident can be stored, so the approval console "
+    "will stay empty. Postgres runs timescaledb/init/*.sql only on a fresh volume. Apply it with: "
+    "docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1 "
+    "-f /docker-entrypoint-initdb.d/008_incidents.sql && docker compose restart orchestrator"
+)
+UNREACHABLE_REMEDY = (
+    "TimescaleDB is not reachable: check that the timescaledb container is running and healthy."
 )
 
 ERROR_RESPONSES = {
@@ -99,12 +115,26 @@ def _not_found(incident_id: str) -> HTTPException:
 
 @app.get("/health")
 def health(incidents: IncidentStore = Depends(get_store)) -> dict[str, str]:
-    return {
-        "status": "ok",
+    """Deliberately 200 even when the database is unusable: docker-compose.yml health-checks this
+    endpoint, and a non-2xx would mark the container unhealthy and block anything waiting on
+    `condition: service_healthy` - for a problem no restart can fix.
+
+    `status` still changes, because the previous version reported `"status": "ok"` next to
+    `"database": "schema_missing"`, and the natural reading of that is a healthy service. It is not:
+    with no tables, every incident is dropped and the approval console stays empty with no
+    explanation (issue #30). `detail` carries the remediation, so whoever reads the health response
+    does not have to find the migration themselves.
+    """
+    database = incidents.status()
+    body = {
+        "status": "ok" if database == "ok" else "degraded",
         "service": "orchestrator",
         "version": SERVICE_VERSION,
-        "database": incidents.status(),
+        "database": database,
     }
+    if database != "ok":
+        body["detail"] = SCHEMA_REMEDY if database == "schema_missing" else UNREACHABLE_REMEDY
+    return body
 
 
 @app.get("/actions")
