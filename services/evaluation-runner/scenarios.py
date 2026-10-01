@@ -1,17 +1,13 @@
 """
 The labelled fault suite the evaluation runs against.
 
-`default` holds the three fault types the injector can physically produce
-today. `full` is the six-class suite the project plan calls for; the four
-extra scenarios need fault types that do not exist in
-`services/fault-injector` yet, so they live in their own suite rather than
-silently dragging `default`'s detection rate down with scenarios that fail
-to inject. The runner asks the injector what it supports before a run and
-reports anything it cannot produce separately (see
-`sources.supported_fault_types`).
-
-When the injector gains the four new types, `default` becomes `full` and
-this note goes away. See docs/phase9-detection.md for the gap.
+`default` holds the three original fault types. `full` is the six-class
+suite the project plan calls for; the four extra fault types landed in
+`services/fault-injector` with issue #35, and stay in their own suite until a
+full run has scored them, so `default`'s history stays comparable. The runner
+asks the injector what it supports before a run and reports anything it
+cannot produce separately (see `sources.supported_fault_types`), so an older
+injector image still runs `full` safely.
 """
 
 from __future__ import annotations
@@ -36,7 +32,8 @@ MAX_DURATION_S = 300
 REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "bad_deploy_latency": ("cpu_limit",),
     "service_crash": (),
-    "db_pool_saturation": ("connections",),
+    # A table lock now (issue #35); there is no severity knob to record.
+    "db_pool_saturation": (),
     "dependency_timeout": ("dependency",),
     "config_error": ("dependency",),
     "memory_exhaustion": ("limit_mb",),
@@ -83,12 +80,14 @@ DEFAULT_SUITE: list[ScenarioSpec] = [
     ScenarioSpec("service_crash", "payment", 60),
     ScenarioSpec("service_crash", "user", 60),
     ScenarioSpec("service_crash", "shipping", 60),
-    # Must exceed catalogue-db's max_connections=151 to actually saturate the
-    # pool. At 100 the fault provably did nothing — catalogue's p95 never moved.
-    ScenarioSpec("db_pool_saturation", "catalogue", 90, {"connections": 155}),
+    # Holds a write lock on catalogue's `sock` table (issue #35). Holding 155
+    # server connections did nothing: catalogue reuses two pooled connections
+    # and never asks for a new one. Expect a cliff, not a ramp - catalogue
+    # stalls outright while the lock is held.
+    ScenarioSpec("db_pool_saturation", "catalogue", 90),
 ]
 
-# The three classes the plan names and the injector cannot yet produce.
+# The four classes added to the injector in issue #35.
 #
 # `service` is the detection ground truth in every case — the service whose
 # metrics are expected to move — while `dependency` records where the fault
@@ -100,10 +99,12 @@ MISSING_CLASS_SCENARIOS: list[ScenarioSpec] = [
     # catalogue's queries hang instead of failing fast. Latency first, errors
     # only once its own timeouts fire.
     ScenarioSpec("dependency_timeout", "catalogue", 90, {"dependency": "catalogue-db"}),
-    # front-end resolving `catalogue` to loopback: the service stays up and
-    # keeps reporting, unlike a crash, so it exercises the error-rate path
-    # rather than the staleness path.
-    ScenarioSpec("config_error", "front-end", 90, {"dependency": "catalogue"}),
+    # front-end resolving `carts` to loopback: the service stays up and
+    # answers 500s, unlike a crash, so it exercises the error-rate path rather
+    # than the staleness path. Not `catalogue`: a refused connection there
+    # crashes front-end outright, so it crash-loops and reads as an outage
+    # (measured in #35).
+    ScenarioSpec("config_error", "front-end", 90, {"dependency": "carts"}),
     # carts is a JVM with a heap well above 64MB, so the limit lands below
     # its working set and the kernel OOM-kills it — a memory-caused outage
     # rather than an arbitrary stop.

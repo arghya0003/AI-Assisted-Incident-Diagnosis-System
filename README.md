@@ -94,6 +94,13 @@ crashed service as down). Ground truth recorded in `fault_scenarios`, in CONTRAC
 eval-hooks shape, ready for M2's evaluation runner whenever it exists. Integration
 testing/CI not started yet. See `docs/phase8-fault-injection.md`.
 
+**Update (issue #35):** the injector now produces all seven fault classes. It adds
+`dependency_timeout` (paused dependency), `config_error` (dependency resolved to loopback),
+`memory_exhaustion` (OOM via cgroup limit) and `resource_exhaustion` (gradual CPU ramp).
+`db_pool_saturation` now holds a table lock: the held connections it used before never
+reached catalogue, which reuses two pooled connections. Each was verified on the live stack,
+and faults interrupted by an injector restart are undone at startup.
+
 ## Testbed layout
 
 `testbed/` is gitignored — it's an upstream clone kept for reference only (nothing builds
