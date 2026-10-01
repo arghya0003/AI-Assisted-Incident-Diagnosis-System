@@ -20,6 +20,7 @@ jobs:
         service:
           - anomaly-detector
           - evaluation-runner
+          - fault-injector
           - load-generator
           - diagnosis-service
           - orchestrator

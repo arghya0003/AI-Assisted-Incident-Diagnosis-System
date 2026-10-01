@@ -285,8 +285,11 @@ authority on these values, not any runner's own clock: the injector writes
 `t_inject` at the moment the fault actually starts, and scoring latency against
 anything else would silently bias every number in the report.
 
-`fault_type` is currently one of `bad_deploy_latency`, `service_crash`,
-`db_pool_saturation` — the three the injector can physically produce.
+`fault_type` is one of `bad_deploy_latency`, `service_crash`, `db_pool_saturation`,
+`dependency_timeout`, `config_error`, `memory_exhaustion`, `resource_exhaustion`: the
+seven the injector can physically produce (`GET /fault-types`). For `dependency_timeout`
+and `config_error`, `ground_truth_service` is the service that visibly degrades, and
+`params.dependency` is where the fault was actually applied.
 
 ## Service dependency graph (input to M3)
 
