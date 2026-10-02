@@ -106,7 +106,8 @@ def load_scenarios(conn, scenario_ids: list[str] | None = None,
     the injector records the timestamp at the moment the fault actually
     started, and using anything else would quietly bias every latency number.
     """
-    query = "SELECT scenario_id, fault_type, ground_truth_service, t_inject, t_recovered, status FROM fault_scenarios"
+    query = ("SELECT scenario_id, fault_type, ground_truth_service, t_inject, "
+             "t_recovered, status, params FROM fault_scenarios")
     params: list = []
     if scenario_ids:
         query += " WHERE scenario_id = ANY(%s)"
@@ -128,6 +129,7 @@ def load_scenarios(conn, scenario_ids: list[str] | None = None,
             t_inject=parse_ts(r["t_inject"]),
             t_recovered=parse_ts(r["t_recovered"]) if r["t_recovered"] else None,
             status=r["status"],
+            params=r["params"] or {},
         )
         for r in rows
     ]
@@ -274,6 +276,28 @@ def find_anomaly_for_scenario(conn, service: str, start: datetime, end: datetime
     return row[0] if row else None
 
 
+def find_any_anomaly_in_window(conn, start: datetime, end: datetime) -> str | None:
+    """The first anomaly in the fault window, whatever service it names.
+
+    `find_anomaly_for_scenario` only considers anomalies that already name the
+    injected service, which isolates ranking from grouping - a sound definition,
+    but it quietly excludes the hard cases, the ones where the detector surfaced
+    a downstream symptom instead. Scoring both and reporting the gap is more
+    honest than reporting either alone and calling it "root-cause accuracy".
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT anomaly_id FROM anomalies
+            WHERE t_detected BETWEEN %s AND %s
+            ORDER BY t_detected ASC LIMIT 1
+            """,
+            (start, end),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def request_diagnosis(anomaly_id: str, timeout: int = 120) -> bool:
     """Ask M3's pipeline to diagnose one anomaly.
 
@@ -351,6 +375,10 @@ def resolve_evidence_ids(conn, evidence_ids: list[str]) -> set[str]:
         "SELECT evidence_id FROM evidence WHERE evidence_id = ANY(%s)",
         "SELECT anomaly_id FROM anomalies WHERE anomaly_id = ANY(%s)",
         "SELECT deploy_id FROM deploys WHERE deploy_id = ANY(%s)",
+        # M3's past-postmortem corpus. `incidents` here is that table, not M4's
+        # `orchestrator_incidents` - the two names collide and only this one
+        # holds the ids a hypothesis cites.
+        "SELECT incident_id FROM incidents WHERE incident_id = ANY(%s)",
     )
     for query in queries:
         try:

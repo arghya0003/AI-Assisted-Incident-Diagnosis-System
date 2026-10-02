@@ -34,6 +34,13 @@ EVIDENCE_KINDS: dict[str, str] = {
     "ev:": "evidence",
     "anom-": "anomaly",
     "dep-": "deploy",
+    # Past postmortems from M3's retrieval corpus. None appear in stored
+    # hypotheses yet because retrieval is inert without Ollama - but the corpus
+    # holds 61 rows, so the first machine with embeddings working would have
+    # started citing them and every one would have scored as a dangling
+    # reference. Validity would have fallen for a reason unrelated to the
+    # citations being wrong.
+    "incident-": "incident",
 }
 
 
@@ -52,7 +59,8 @@ class HypothesisRow:
 class AttributionResult:
     scenario_id: str
     fault_type: str
-    ground_truth_service: str
+    ground_truth_service: str  # what a correct diagnosis names
+    symptom_service: str  # what visibly degraded; the same, except for dependency faults
     anomaly_id: str | None
     ranked: list[str] = field(default_factory=list)
     reciprocal_rank: float = 0.0
@@ -161,10 +169,19 @@ def score_attribution(
     """
     from scoring import reciprocal_rank  # local: keeps this module import-light
 
+    # The service a diagnosis should name, which differs from the one that
+    # degrades for the dependency-shaped classes: pausing `catalogue-db` is
+    # recorded as a `catalogue` fault, and scoring a ranking against `catalogue`
+    # would mark the correct answer wrong and the symptom right. Detection still
+    # scores against ground_truth_service; only attribution moves. M3's
+    # scripts/eval_live.py made the same change in #44, so until this matched
+    # the two harnesses reported different accuracy for the same run.
+    target = getattr(scenario, "root_cause_service", scenario.ground_truth_service)
     result = AttributionResult(
         scenario_id=scenario.scenario_id,
         fault_type=scenario.fault_type,
-        ground_truth_service=scenario.ground_truth_service,
+        ground_truth_service=target,
+        symptom_service=scenario.ground_truth_service,
         anomaly_id=anomaly_id,
     )
     if anomaly_id is None:
@@ -175,7 +192,7 @@ def score_attribution(
         return result
 
     result.ranked, result.inferred_services = ranked_services(hypotheses)
-    result.reciprocal_rank = reciprocal_rank(result.ranked, scenario.ground_truth_service)
+    result.reciprocal_rank = reciprocal_rank(result.ranked, target)
 
     cited = cited_evidence_ids(hypotheses)
     result.evidence_total = len(cited)

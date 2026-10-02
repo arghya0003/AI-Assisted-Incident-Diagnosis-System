@@ -49,6 +49,28 @@ class Scenario:
     t_inject: datetime
     t_recovered: datetime | None = None
     status: str = "recovered"
+    # The injector's own record of how the fault was parameterised. Carried so
+    # `root_cause_service` below can read `dependency`; nothing else needs it.
+    params: dict = field(default_factory=dict)
+
+    @property
+    def root_cause_service(self) -> str:
+        """The service a diagnosis should name, which is not always the one that degrades.
+
+        `dependency_timeout` and `config_error` break a *dependency* and record
+        `ground_truth_service` as the service that visibly fails. Pausing
+        `catalogue-db` is labelled `catalogue`, so scoring a ranking against
+        `ground_truth_service` would mark the correct answer wrong and the
+        symptom right.
+
+        Detection still scores against `ground_truth_service`: the detector is
+        supposed to see `catalogue` degrade, and `catalogue-db` emits no
+        request-level telemetry to detect anything on. Only attribution moves.
+        """
+        dependency = (self.params or {}).get("dependency")
+        if dependency and dependency != self.ground_truth_service:
+            return dependency
+        return self.ground_truth_service
 
 
 @dataclass(frozen=True)
