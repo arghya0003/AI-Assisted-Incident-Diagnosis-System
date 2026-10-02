@@ -77,8 +77,10 @@ def render_headline(
     lines.append("")
     lines.append(
         "Root-cause accuracy, ranking quality and evidence validity score M3's "
-        "ranker, which is not wired up yet. The harness computes them as soon as "
-        "a ranker is supplied; they are shown as not measured rather than as zero."
+        "ranker, and a `live` run does not ask it anything - the fault is already "
+        "over by the time a diagnosis would be useful to score. Run "
+        "`evaluation-runner attribute` against the same window for those three; "
+        "they are shown here as not measured rather than as zero."
     )
     return "\n".join(lines)
 

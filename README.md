@@ -322,9 +322,24 @@ detectors against 8/18 for the static one. Both runs are kept in
 [docs/phase9-detection.md](docs/phase9-detection.md) — the difference between them is the
 most useful thing the harness has produced.
 
-**The false-positive rate is not settled.** The live run measured 0.00/hour over 11.9
-quiet minutes; a replay of the same window measured 9.34/hour because it includes the
-stack's cold start. Neither is defensible yet. See below.
+**The false-positive rate is now measured, and it misses its target: 5.72/hour**
+(2026-10-02, 6 alerts across 63.0 minutes of genuinely quiet observation, testbed reset
+first, no machine sleep in the window — the three conditions that invalidated every earlier
+attempt). Target is under 1/hour.
+
+The breakdown matters more than the figure. **Four of the six were `orders`** reporting a
+real degradation: p95 climbed from 41ms to 105ms, held for about 30 minutes and recovered
+to 48ms unaided. Those are correct detections of an incident nobody injected — false only
+against the label "no fault was running". The other two were single `latency_p99_ms` tail
+excursions on `front-end` and `payment`. Excluding the `orders` degradation entirely gives
+about 1.9/hour, so **the target is missed on either reading** — but by a factor of two
+rather than six, and the difference is a property of the testbed rather than of the
+detector.
+
+It also says #33 is not finished. The load generator's pruner is holding the order count
+at ~54, so the mechanism identified there is fixed, yet `orders` still degrades on a
+roughly half-hour cycle and recovers by itself. There is a second mechanism, and it is the
+single biggest obstacle left to a clean false-positive number.
 
 ### Not done yet
 - **The false-positive rate is uncharacterised.** Three measurements of the same day
