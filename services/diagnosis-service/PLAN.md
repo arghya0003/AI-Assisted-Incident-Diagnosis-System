@@ -1050,6 +1050,20 @@ retrieved top 3 for `anom-fx-07` reproduced the Phase 5 similarities exactly (0.
 so rounding the stored vectors to six decimals costs nothing. Retrieval at request time still needs
 Ollama to embed the query - that is inherent, and now visible rather than silent.
 
+**The same ablation on a second model (2026-10-02).** Repeated with generation on Gemini
+(`gemini-flash-latest`): `full` 6/8 and MRR 0.81, `llm_only` 4/8 and 0.62, `deterministic` 6/8 and
+0.81. The `deterministic` baseline moved between the two runs despite calling no model, so the
+scenario set got harder and the absolute numbers are not comparable across runs - only each run
+against itself. Doing that, the two agree: `full` equals `deterministic` exactly in both, so the LLM
+adds no ranking accuracy across a 3.8B local model, a free 120B MoE and a frontier model; and
+`llm_only` loses by exactly 2 scenarios and 0.19 MRR in both, so the scaffolding is worth about two
+scenarios in nine regardless of the model. One counter-example matters more than the averages: on a
+payment crash `llm_only` was right where both scored modes named `orders`, which entered as a
+downstream candidate and won on deploy proximity because of a routine background deploy - issue #7
+costing measurable accuracy. Two blind spots confirmed by repetition: no mode ever named the paused
+`catalogue-db` for `dependency_timeout`, and `config_error` went undetected in both runs. Full
+tables in `README.md`.
+
 **The plan's ablation, on real injected faults (2026-10-01, issue #22).** Nine scenarios across all
 seven fault classes, three modes, 24 scored runs: `full` 7/8 top-1 and MRR 0.88, `llm_only` 5/8 and
 0.69, `deterministic` 7/8 and 0.88. Evidence validity 100% throughout; detection median 33.9 s,
