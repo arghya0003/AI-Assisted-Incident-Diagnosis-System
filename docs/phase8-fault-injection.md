@@ -12,7 +12,12 @@ than injecting fake data points. The point of this harness is to produce a genui
 that the *actual* monitoring pipeline (Prometheus → Kafka → TimescaleDB, Phases 2-4) has
 to detect on its own - faking the metrics would make the whole exercise circular.
 
-## Three scenario types
+## Seven scenario types
+
+The first three were built in Phase 8; the last four, and the current `db_pool_saturation`
+mechanism, came with issue #35. See
+[the issue #35 section](#issue-35-four-new-fault-classes-and-a-db_pool_saturation-that-lands)
+for how each was verified.
 
 - **`bad_deploy_latency`** — records a real deploy via `deploy-emitter` (Phase 5), then
   CPU-throttles the target container via cgroups (`docker update`-equivalent, using the
@@ -22,10 +27,20 @@ to detect on its own - faking the metrics would make the whole exercise circular
   with the deploy log M3 will eventually correlate against.
 - **`service_crash`** — stops the container, waits, restarts it. Hard outage / dependency-
   cascade trigger.
-- **`db_pool_saturation`** — opens N real, held MySQL connections directly against
-  `catalogue-db` to consume its connection budget. **Only supports `service=catalogue`**
-  (MySQL) - `carts`/`orders`/`user` are Mongo-backed and would need a separate
-  pymongo-based implementation, not built yet. Documented gap, not silently missing.
+- **`db_pool_saturation`** — holds `LOCK TABLES sock WRITE` on `catalogue-db` so every
+  catalogue query blocks and its connection pool stays checked out. **Only supports
+  `service=catalogue`** (MySQL) - `carts`/`orders`/`user` are Mongo-backed and would need a
+  separate implementation, not built yet. Documented gap, not silently missing.
+- **`dependency_timeout`** — `docker pause`s the service's dependency (default: its edge in
+  the dependency graph), so callers' connections are accepted and never answered.
+- **`config_error`** — adds `127.0.0.1 <dependency>` to the service's `/etc/hosts`, so the
+  dependency refuses connections while the service stays up and answers errors.
+- **`memory_exhaustion`** — lowers the container's memory limit (swap capped too) below its
+  working set, so the kernel OOM-kills it and `restart: always` brings it back into the same
+  limit until the fault ends.
+- **`resource_exhaustion`** — tightens the CPU quota in geometric steps, from
+  `start_cpu_limit` (0.05) to `cpu_limit` (0.002). It is the one gradual fault, where every
+  other one is a step change (issue #34).
 
 Every scenario is recorded in `fault_scenarios` (new table,
 `timescaledb/init/003_fault_scenarios.sql`) in CONTRACTS.md's eval-hooks shape
@@ -47,12 +62,9 @@ independently reported `payment:80 -> down`** - the fault was severe enough that
 monitoring stack itself noticed, unprompted. Container confirmed `running` again and
 scenario marked `recovered` after ~16s.
 
-**`db_pool_saturation`** against `catalogue-db` (30 connections, 15s): `SHOW STATUS LIKE
-'Threads_connected'` showed 32 active connections during the fault (30 held + catalogue's
-own), dropping back to 2 after release. Real MySQL connections, not a mock. Noted honestly:
-with `max_connections=151` on this image, 30 held connections doesn't fully exhaust the
-pool - added a `MAX_CONNECTIONS=100` safety cap so nobody accidentally starves the whole
-container, but genuinely maxing it out would need `connections` closer to 150.
+**`db_pool_saturation`**, original mechanism (30 held connections, 15s): the connections
+were real, but catalogue never noticed. See the issue #35 section below for why, and for
+the replacement.
 
 ## Prerequisite: traffic has to be running (issue #6)
 The measurements above were taken under a manual `curl` loop. Without traffic the same
@@ -92,14 +104,83 @@ Two consequences for the harness:
 
 ## API
 
-- `POST /faults` `{fault_type, service, duration_s?, cpu_limit?, connections?}` → starts a
-  scenario in the background, returns immediately with `scenario_id` and `status: running`
-  (plus `warning` if the testbed looks idle).
-- `GET /faults?limit=` → scenario history with outcomes.
-- `GET /fault-types` → the three supported types.
+- `POST /faults` `{fault_type, service, duration_s?, ...}` → starts a scenario in the
+  background, returns immediately with `scenario_id` and `status: running` (plus `warning`
+  if the testbed looks idle). Per-type parameters:
 
-Safety caps: `duration_s` clamped to 300s, `connections` clamped to 100 - a forgotten or
-malformed request can't run forever or starve a container outright.
+  | `fault_type` | Parameters (default) |
+  | --- | --- |
+  | `bad_deploy_latency` | `cpu_limit` (0.002) |
+  | `service_crash` | — |
+  | `db_pool_saturation` | — (`service` must be `catalogue`; a `connections` value is ignored) |
+  | `dependency_timeout`, `config_error` | `dependency` (the service's edge in the graph; `front-end` → `carts`) |
+  | `memory_exhaustion` | `limit_mb` (64, floor 48) |
+  | `resource_exhaustion` | `cpu_limit` (0.002), `start_cpu_limit` (0.05), `steps` (6) |
+
+- `GET /faults?limit=` → scenario history with outcomes.
+- `GET /fault-types` → the seven supported types.
+
+Safety caps: `duration_s` clamped to 300s; `dependency` limited to Sock Shop containers
+(never timescaledb, kafka or the injector itself); `limit_mb` floored at 48 so a JVM can
+still start once the fault ends.
+
+## Issue #35: four new fault classes, and a `db_pool_saturation` that lands
+
+Each fault below was injected on the live stack under 5 req/s of standing load and probed
+through `edge-router` every ~4s. Times are from the probe, not estimates.
+
+| Fault | Target | During the fault | After |
+| --- | --- | --- | --- |
+| `db_pool_saturation` (table lock, 40s) | catalogue | `/catalogue` hung past the 12s client timeout for the whole window; queries waiting on `sock` grew to 26 | 10 ms within a second of `UNLOCK` |
+| `dependency_timeout` (30s) | catalogue, with catalogue-db paused | `/catalogue` hung past 12s | 10 ms immediately after unpause |
+| `config_error` (30s) | front-end → carts | `/cart` answered **500 in ~10 ms** throughout; front-end did **not** restart | 200 immediately |
+| `memory_exhaustion` (64 MB, 40s) | carts | OOM-killed repeatedly (`OOMKilled=true`), `/cart` 500s | serving ~18s after the limit was lifted (JVM start) |
+| `resource_exhaustion` (90s, 6 steps) | user | `user` `latency_p95_ms` in 15s buckets: 4.9 → 56 → 161 → 215 → 267 → 296 → **328 ms**, a ramp rather than a step | CPU quota back to `-1` |
+
+**Why the old `db_pool_saturation` did nothing.** Catalogue keeps two pooled connections to
+`catalogue-db` and reuses them, so filling the server's 151 `max_connections` never
+touched it: catalogue never asks for connection 152 (p95 stayed at 4.8 ms through a full
+90s fault). Locking the table catalogue reads saturates catalogue's *own* pool, which is
+what the class is named for. It must be `LOCK TABLES ... WRITE`. `SELECT ... FOR UPDATE`
+takes row locks, and InnoDB serves plain reads from an MVCC snapshot without waiting on
+them. Expect a cliff, not a ramp: catalogue stalls outright while the lock is held.
+
+**The lock's safety net, tested.** The risk is an orphaned lock, not a deadlock. This
+server has `lock_wait_timeout` = 1 year and `wait_timeout` = 8 hours, and nothing breaks a
+table-level stall. So the locking session sets `wait_timeout = duration + 30s` before
+locking, unlocks in a `finally`, and refuses to start while another root session is idle
+in `socksdb` or anything is waiting on a table lock. Both paths were tested:
+- With the injector frozen (`docker compose pause`) during a 20s lock, MySQL dropped the
+  session and catalogue recovered about 48s after the lock was taken (duration plus
+  grace), with no UNLOCK ever sent.
+- With an idle root session open, the injector refused and marked the scenario failed,
+  naming the session.
+
+**`config_error` must not target front-end → catalogue.** Front-end (Node 4.8) crashes on a
+refused connection to `catalogue` and crash-loops for the whole fault, which makes it an
+outage rather than a config error. Against `carts` it stays up and answers 500s, so that
+is the default. Node 4 resolves the hostname on every request, so the change takes effect
+immediately; no keep-alive connection outlives it. The injected line carries a marker and
+is re-applied every 2s, because Docker regenerates `/etc/hosts` when a container restarts.
+Without that, a crash would shed the fault early while the scenario still claimed it was
+running.
+
+**`memory_exhaustion` restores "unlimited" as host memory.** A `docker update` cannot
+remove a memory limit: `0` means "unchanged" and `-1` is rejected ("Minimum memory limit
+allowed is 6MB"). An originally unlimited container comes back with a limit equal to the
+host's total memory and unlimited swap. That is the same ceiling in practice, but
+`docker inspect` shows a number instead of `0` afterwards. If the container is in restart
+backoff when the fault ends, the injector restarts it, so recovery doesn't wait out
+Docker's doubling delay.
+
+**Interrupted faults are undone at startup.** Every fault cleans up in a `finally`, but
+that only runs if the injector lives to the end of the fault. On startup, any scenario
+still `running` is undone (unpause, un-throttle, restore memory or hosts, restart a stopped
+container) and marked `failed` with the reason. Tested by killing the injector 5s into a
+120s `dependency_timeout`: on restart it unpaused `catalogue-db` and catalogue served
+normally. One snag: while a dependency is paused, `docker compose up fault-injector`
+refuses to start, because compose walks the dependency chain. Use
+`docker start incident-diagnosis-system-fault-injector-1`, or unpause by hand.
 
 ## Runbook: one fault, end to end
 

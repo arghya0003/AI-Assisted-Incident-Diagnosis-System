@@ -8,6 +8,19 @@ import type { ActionVocabulary, AuditEntry, FeedMessage, Incident, IncidentState
 
 type Tab = 'incidents' | 'audit'
 
+/** The orchestrator's own explanation where it sends one, so a missing migration reads as a
+ *  missing migration rather than as "failed to fetch". */
+function describeError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  try {
+    const parsed = JSON.parse(message) as { detail?: string }
+    if (parsed.detail) return parsed.detail
+  } catch {
+    // Not JSON - a network failure or an nginx error page. Show it as-is.
+  }
+  return message || 'the orchestrator could not be reached'
+}
+
 export default function App() {
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -16,12 +29,19 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('incidents')
   const [globalAudit, setGlobalAudit] = useState<AuditEntry[]>([])
   const [chainStatus, setChainStatus] = useState<boolean | null>(null)
+  // Why this exists: the console used to swallow API failures, so an orchestrator with no tables
+  // rendered an empty incident list that looked exactly like a quiet system (issue #30). An empty
+  // list and a broken backend must not look the same.
+  const [apiError, setApiError] = useState<string | null>(null)
 
   const refreshIncidents = useCallback(() => {
     api
       .listIncidents()
-      .then(setIncidents)
-      .catch(() => {})
+      .then((list) => {
+        setIncidents(list)
+        setApiError(null)
+      })
+      .catch((err: unknown) => setApiError(describeError(err)))
   }, [])
 
   useEffect(() => {
@@ -92,6 +112,15 @@ export default function App() {
           </span>
         </div>
       </header>
+
+      {apiError && (
+        <div
+          role="alert"
+          className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200"
+        >
+          <span className="font-semibold">The incident list could not be loaded.</span> {apiError}
+        </div>
+      )}
 
       {tab === 'incidents' ? (
         <div className="flex flex-1 overflow-hidden">

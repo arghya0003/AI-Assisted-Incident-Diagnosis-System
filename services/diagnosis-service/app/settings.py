@@ -8,6 +8,15 @@ import os
 from dataclasses import dataclass
 
 OPENROUTER_DEFAULT_URL = "https://openrouter.ai/api/v1"
+# Gemini speaks the same OpenAI-shaped request on this path, including
+# `response_format: json_schema`, so one client covers both providers.
+GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+# An alias rather than a pinned version, deliberately. Every pinned flash version returned HTTP 503
+# "experiencing high demand" while the alias answered, and gemini-2.5-flash is already refused for
+# new keys ("no longer available to new users"), so pinning trades one availability problem for a
+# worse one. Reproducibility is preserved a different way: the model that answered is recorded on
+# every stored analysis and returned in X-Model-Version.
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
 # Free, 262k context, supports strict json_schema and a seed for reproducible runs. Verified
 # against the real prompt before being made the default.
 OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
@@ -42,8 +51,12 @@ def _list_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 def _default_model() -> str:
     """The default model depends on the provider, so LLM_MODEL rarely needs setting by hand."""
-    provider = os.environ.get("LLM_PROVIDER") or "openrouter"
-    return OPENROUTER_DEFAULT_MODEL if provider == "openrouter" else "phi4-mini"
+    provider = os.environ.get("LLM_PROVIDER") or "gemini"
+    return {
+        "gemini": GEMINI_DEFAULT_MODEL,
+        "openrouter": OPENROUTER_DEFAULT_MODEL,
+        "ollama": "phi4-mini",
+    }[provider]
 
 
 def _choice_env(name: str, default: str, choices: tuple[str, ...]) -> str:
@@ -64,6 +77,8 @@ class Settings:
     llm_provider: str
     openrouter_url: str
     openrouter_api_key: str
+    gemini_url: str
+    gemini_api_key: str
     llm_fallback_models: tuple[str, ...]
     llm_reasoning_effort: str
     llm_model: str
@@ -101,14 +116,23 @@ class Settings:
             ollama_url=os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434"),
             # OpenRouter is the default: the deployed system is online anyway, and no other machine
             # on the team has Ollama, so every integration run used to answer deterministic_fallback.
-            llm_provider=_choice_env("LLM_PROVIDER", "openrouter", ("openrouter", "ollama")),
+            # Gemini is the default: OpenRouter's free tier is 50 requests a day and twice spent
+            # it mid-evaluation, after which every answer silently came from the scorer.
+            llm_provider=_choice_env("LLM_PROVIDER", "gemini", ("gemini", "openrouter", "ollama")),
             openrouter_url=os.environ.get("OPENROUTER_URL", OPENROUTER_DEFAULT_URL),
             # From the gitignored .env at the repo root, passed through docker-compose.yml.
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-            # Tried in order when a model is unreachable (free endpoints rate-limit often). Never
-            # used to paper over a model writing an invalid answer - that is retried on the same
-            # model, so every result stays attributable.
-            llm_fallback_models=_list_env("LLM_FALLBACK_MODELS", ("qwen/qwen3.8-27b:free",)),
+            gemini_url=os.environ.get("GEMINI_URL", GEMINI_DEFAULT_URL),
+            gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+            # Tried in order when a model is unreachable, and each entry may name its provider as
+            # "provider:model" so the chain can cross vendors - which matters, because Gemini
+            # returns transient 503s under load and OpenRouter exhausts a daily quota, and those
+            # two failures are unlikely to coincide. An entry without a provider uses the primary's.
+            # Never used to paper over a model writing an invalid answer: that is retried on the
+            # same model, so every result stays attributable.
+            llm_fallback_models=_list_env(
+                "LLM_FALLBACK_MODELS", ("openrouter:nvidia/nemotron-3-super-120b-a12b:free",)
+            ),
             # nemotron spent 569 of 719 output tokens reasoning on a single hypothesis; "low" keeps
             # the budget for the answer. Empty disables the parameter for models without reasoning.
             llm_reasoning_effort=_choice_env("LLM_REASONING_EFFORT", "low", ("", "low", "medium", "high")),

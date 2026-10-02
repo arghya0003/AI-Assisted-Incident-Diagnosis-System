@@ -20,8 +20,24 @@ docker compose up -d
 Ports are listed below. The approval console is <http://localhost:3000>.
 
 **On an existing TimescaleDB volume**, Postgres does not re-run `timescaledb/init/*.sql`, so a
-stack that has been up since an earlier phase is missing newer tables. Apply the ones you need and
-restart the service that owns them; see the per-table instructions further down.
+stack that has been up since an earlier phase is missing newer tables. The symptom is a service that
+looks healthy but stores nothing — most visibly an approval console with no incidents in it. Apply
+the migration and restart the service that owns the table:
+
+```bash
+# M4's incidents and audit log (the approval console)
+docker compose exec -T timescaledb psql -U postgres -d metrics -v ON_ERROR_STOP=1   -f /docker-entrypoint-initdb.d/008_incidents.sql
+docker compose restart orchestrator
+```
+
+Each script is safe to re-run. `GET /health` on the owning service reports
+`"status": "degraded"` with the remedy in `detail` when its tables are missing, so you can check
+rather than guess. M3's tables have their own instructions in
+[services/diagnosis-service/README.md](services/diagnosis-service/README.md).
+
+On Git Bash for Windows, prefix the command with `MSYS_NO_PATHCONV=1` and use
+`//docker-entrypoint-initdb.d/...`, or the path is rewritten to a Windows one and psql reports
+"No such file or directory".
 
 ### The API key, and why everyone needs their own
 
@@ -125,6 +141,13 @@ latency hit 7.47s during a throttle test; Prometheus itself independently report
 crashed service as down). Ground truth recorded in `fault_scenarios`, in CONTRACTS.md's
 eval-hooks shape, ready for M2's evaluation runner whenever it exists. Integration
 testing/CI not started yet. See `docs/phase8-fault-injection.md`.
+
+**Update (issue #35):** the injector now produces all seven fault classes. It adds
+`dependency_timeout` (paused dependency), `config_error` (dependency resolved to loopback),
+`memory_exhaustion` (OOM via cgroup limit) and `resource_exhaustion` (gradual CPU ramp).
+`db_pool_saturation` now holds a table lock: the held connections it used before never
+reached catalogue, which reuses two pooled connections. Each was verified on the live stack,
+and faults interrupted by an injector restart are undone at startup.
 
 ## Testbed layout
 
@@ -402,9 +425,11 @@ asks an LLM to explain the ranking, validates the reply, and stores the run.
 `GET /candidates/{id}` shows the deterministic ranking behind any answer,
 `GET /hypotheses/{id}` lists stored runs, `GET /stats` the guardrail counters.
 
-**Generation goes to OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`, falling back to
-`qwen/qwen3.8-27b:free`), with the key in the gitignored `.env` at the repo root as
-`OPENROUTER_API_KEY`. Without a key the service still answers, always from the deterministic
+**Generation goes to Gemini** (`gemini-flash-latest`), falling back across vendors to OpenRouter
+(`nvidia/nemotron-3-super-120b-a12b:free`). Keys live in the gitignored `.env` at the repo root as
+`GEMINI_API_KEY` and `OPENROUTER_API_KEY`. The chain crosses providers on purpose: Gemini returns
+transient 503s under load while OpenRouter exhausts a 50-a-day free quota, and those two are
+unlikely to fail together. Without any key the service still answers, always from the deterministic
 ranking. `LLM_PROVIDER=ollama` switches generation back to a local `phi4-mini`, which is how the
 phi4-mini results below can be reproduced.
 
@@ -504,15 +529,24 @@ anomaly; `/analyze` ranked payment first, answered by the LLM (3 attempts, 21.5 
 guardrail rejections), with the cause "the payment service stopped reporting liveness
 metrics, indicating a possible crash or unreachability".
 
-**Measured on real injected faults, not only fixtures** (2026-09-28,
-`scripts/eval_live.py`, issues #21 and #22). Two runs of five injected scenarios, 3 detected each:
-top-1 1/3 then 2/3, MRR 0.50 then 0.67, **evidence validity 100%** in both. Live accuracy sits
-below fixture accuracy for a reason worth stating: the anomaly usually names a symptom one or two
-hops from the broken service — a catalogue crash arrived as front-end errors, a payment latency
-fault as carts latency — where fixtures nearly always name the culprit or its caller. Detection is
-also nondeterministic: both runs missed two of five faults, but not the same two. Run 2's mode
-comparison is void, since the free-tier quota was exhausted and every `full` run fell back to the
-scorer.
+**The ablation, on real injected faults** (2026-10-01, `scripts/eval_live.py`, issue #22). Nine
+scenarios across all seven fault classes, 8 detected, 24 scored runs:
+
+| Mode | top-1 | MRR | evidence validity | p50 latency |
+| --- | --- | --- | --- | --- |
+| `full` | **7/8** | **0.88** | 100% | 20.0 s |
+| `llm_only` | 5/8 | 0.69 | 100% | 22.5 s |
+| `deterministic` | **7/8** | **0.88** | 100% | **0.20 s** |
+
+Median detection delay 33.9 s, inside the plan's 60 s target. **Retrieval and scoring beat the model
+on its own**, and the two `llm_only` misses share one shape: given the facts with no graph, scores or
+past incidents, it blamed the caller `front-end` where `full` named the crashed service. front-end
+appears in nearly every cascade, and nothing weighs it down. **The LLM still adds no ranking
+accuracy** — `full` and `deterministic` agree scenario for scenario at about 100 times the latency.
+One class is systematically wrong: `dependency_timeout` pauses `catalogue-db` and every mode answered
+`catalogue`. Earlier live runs on 2026-09-28 scored 1/3 and 2/3; those were depressed by a stale
+injector image, uncleaned `orders` history (issue #33) and a fallback model that never answered, not
+by the problem being harder than fixtures.
 
 **M2's `liveness` signal solved the crash case.** A crashed service used to be invisible to
 scoring — it stops reporting, so it was never anomalous and never ranked. The staleness
