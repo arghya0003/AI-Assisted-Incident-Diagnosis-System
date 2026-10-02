@@ -45,7 +45,7 @@ import time
 from collections import Counter, deque
 
 import requests
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify
 from pymongo import MongoClient
 
 import orders_store
@@ -355,6 +355,21 @@ def get_stats():
                 "last_reset": _orders_stats["last_reset"],
             },
         })
+
+
+@app.get("/metrics")
+def get_metrics():
+    """Order-history size and pruning, for Prometheus (issue #33).
+
+    Scraped by the `testbed-state` job, not alongside the Sock Shop services:
+    this is the state of the testbed, and metrics-bridge publishes it under
+    `orders-db` rather than treating the generator as a service under test.
+    """
+    documents = orders_db_documents()
+    with _stats_lock:
+        pruned = _orders_stats["pruned"]
+    return Response(orders_store.prometheus_text(documents, ORDERS_MAX_DOCUMENTS, pruned),
+                    mimetype="text/plain; version=0.0.4")
 
 
 def main() -> None:

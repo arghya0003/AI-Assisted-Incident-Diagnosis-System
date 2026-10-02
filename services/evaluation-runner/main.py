@@ -38,8 +38,9 @@ log = logging.getLogger("evaluation-runner")
 
 # request_rate tracks ordinary traffic rather than health, and the detector
 # skips it too. Replay must apply the same exclusion or it would score a
-# different input than the live pipeline sees.
-IGNORED_METRICS = {"request_rate"}
+# different input than the live pipeline sees. document_count and prune_rate
+# are orders-db's order history (issue #33): testbed state, skipped live too.
+IGNORED_METRICS = {"request_rate", "document_count", "prune_rate"}
 
 
 def now_utc() -> datetime:

@@ -56,3 +56,37 @@ def reset(collection) -> int:
     deleted = collection.delete_many({}).deleted_count
     log.info("reset orders-db: removed %d order(s)", deleted)
     return deleted
+
+
+def prometheus_text(documents: int | None, max_documents: int, pruned_total: int) -> str:
+    """The order history as Prometheus text, for `GET /metrics`.
+
+    `/stats` already reported the document count, but only as a reading of
+    right now: nothing stored it, so `orders` latency could not be lined up
+    against it after the fact (issue #33, reopened). Scraped by Prometheus,
+    it reaches TimescaleDB through metrics-bridge like every other metric.
+
+    The pruned counter is there because the open question is churn, not
+    size: the count sits at the ceiling while the pruner keeps deleting, so
+    the count alone cannot tell the two apart. It restarts at 0 on `/reset`,
+    which Prometheus's rate() reads as an ordinary counter reset.
+
+    `documents` is None when orders-db is unreachable, and the sample is then
+    left out rather than reported as 0 - an empty history and an unreachable
+    database are different states, and 0 would look like the first one.
+    """
+    lines = [
+        "# HELP orders_db_max_documents Ceiling the pruner holds the order history under; 0 means pruning is off.",
+        "# TYPE orders_db_max_documents gauge",
+        f"orders_db_max_documents {max_documents}",
+        "# HELP orders_db_pruned_total Orders the pruner has deleted since start or the last reset.",
+        "# TYPE orders_db_pruned_total counter",
+        f"orders_db_pruned_total {pruned_total}",
+    ]
+    if documents is not None:
+        lines += [
+            "# HELP orders_db_documents Orders in orders-db, all of which GET /orders returns.",
+            "# TYPE orders_db_documents gauge",
+            f"orders_db_documents {documents}",
+        ]
+    return "\n".join(lines) + "\n"
