@@ -539,8 +539,13 @@ scenarios across all seven fault classes, 8 detected, 24 scored runs:
 | `llm_only` | 5/8 | 0.69 | 100% | 22.5 s |
 | `deterministic` | **7/8** | **0.88** | 100% | **0.20 s** |
 
-Median detection delay 33.9 s, inside the plan's 60 s target. **Retrieval and scoring beat the model
-on its own**, and the two `llm_only` misses share one shape: given the facts with no graph, scores or
+Median detection delay 33.9 s, inside the plan's 60 s target. **Repeated on a second model**
+(Gemini `gemini-flash-latest`, 2026-10-02): `full` 6/8 · MRR 0.81, `llm_only` 4/8 · 0.62,
+`deterministic` 6/8 · 0.81. The `deterministic` baseline moved between runs despite calling no model,
+so the scenario set got harder and absolute numbers are not comparable across runs — but each run
+agrees with itself: `full` equals `deterministic` exactly in both, and `llm_only` loses by exactly 2
+scenarios and 0.19 MRR in both. The scaffolding is worth about two scenarios in nine regardless of
+which model is behind it. **Retrieval and scoring beat the model on its own**, and the two `llm_only` misses share one shape: given the facts with no graph, scores or
 past incidents, it blamed the caller `front-end` where `full` named the crashed service. front-end
 appears in nearly every cascade, and nothing weighs it down. **The LLM still adds no ranking
 accuracy** — `full` and `deterministic` agree scenario for scenario at about 100 times the latency.

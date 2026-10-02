@@ -48,6 +48,22 @@ METRIC_QUERIES = {
     "memory_bytes": 'process_resident_memory_bytes{{instance="{instance}"}}',
 }
 
+# The Prometheus jobs whose targets are services under test. METRIC_QUERIES
+# runs once per target in these and nowhere else, so a target that only
+# reports testbed state (the load generator) is never read as a service.
+SERVICE_JOBS = {j for j in os.environ.get("SERVICE_JOBS", "sock-shop-services").split(",") if j}
+
+# Testbed state, published under the component it describes rather than the
+# target that reports it (issue #33): orders latency rose for ~30 minutes with
+# the order history held at its ceiling, and neither the size of that history
+# nor the pruner's churn against it was recorded anywhere to line up against.
+# rate() over 5m because the pruner deletes in one batch a minute; a 1m window
+# would read that as alternating spikes and zeroes.
+TESTBED_QUERIES = {
+    ("orders-db", "document_count"): "orders_db_documents",
+    ("orders-db", "prune_rate"): "rate(orders_db_pruned_total[5m])",
+}
+
 
 def connect_kafka() -> KafkaProducer:
     while True:
@@ -66,7 +82,8 @@ def list_live_instances() -> list[str]:
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/targets", timeout=5)
     resp.raise_for_status()
     targets = resp.json()["data"]["activeTargets"]
-    return [t["labels"]["instance"] for t in targets if t["health"] == "up"]
+    return [t["labels"]["instance"] for t in targets
+            if t["health"] == "up" and t["labels"].get("job") in SERVICE_JOBS]
 
 
 def query_instant(promql: str) -> float | None:
@@ -127,6 +144,25 @@ def run():
                 }
                 producer.send(TOPIC, key=service, value=record)
                 published += 1
+
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        for (service, metric_name), promql in TESTBED_QUERIES.items():
+            try:
+                value = query_instant(promql)
+            except requests.RequestException as exc:
+                log.warning("query failed for %s/%s: %s", service, metric_name, exc)
+                continue
+            if value is None:
+                continue
+            record = {
+                "service": service,
+                "metric": metric_name,
+                "value": value,
+                "timestamp": timestamp,
+                "labels": {"source": "load-generator"},
+            }
+            producer.send(TOPIC, key=service, value=record)
+            published += 1
 
         producer.flush()
         log.info("published %d samples for %d instances", published, len(instances))

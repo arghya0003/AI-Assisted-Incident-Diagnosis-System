@@ -57,7 +57,14 @@ STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_SECONDS", "30"))
 
 # Metrics with no meaningful "too high" reading. request_rate moves with
 # ordinary traffic, so alerting on it produces noise, not incidents.
-IGNORED_METRICS = {m for m in os.environ.get("IGNORED_METRICS", "request_rate").split(",") if m}
+# document_count and prune_rate describe the testbed's own data (orders-db's
+# order history, issue #33), not a service's health: a reset drops the count
+# to 0 by design, and they are recorded to be correlated, not alerted on.
+# Skipped before staleness.observe too, so a load-generator restart can't
+# read as orders-db going silent.
+IGNORED_METRICS = {
+    m for m in os.environ.get("IGNORED_METRICS", "request_rate,document_count,prune_rate").split(",") if m
+}
 
 PG_HOST = os.environ.get("PG_HOST", "timescaledb")
 PG_PORT = os.environ.get("PG_PORT", "5432")

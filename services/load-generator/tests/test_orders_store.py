@@ -70,3 +70,30 @@ def test_reset_clears_every_order():
     collection = FakeCollection(range(2152))
     assert orders_store.reset(collection) == 2152
     assert orders_store.count(collection) == 0
+
+
+def samples(text):
+    """{name: value} for every sample line in Prometheus text format."""
+    return {line.split()[0]: float(line.split()[1])
+            for line in text.splitlines() if line and not line.startswith("#")}
+
+
+def test_metrics_report_the_history_size_ceiling_and_pruning():
+    text = orders_store.prometheus_text(documents=47, max_documents=50, pruned_total=312)
+    assert samples(text) == {
+        "orders_db_documents": 47,
+        "orders_db_max_documents": 50,
+        "orders_db_pruned_total": 312,
+    }
+    assert "# TYPE orders_db_pruned_total counter" in text
+    assert text.endswith("\n")
+
+
+def test_unreachable_orders_db_omits_the_count_rather_than_reporting_zero():
+    text = orders_store.prometheus_text(documents=None, max_documents=50, pruned_total=0)
+    assert "orders_db_documents" not in samples(text)
+    assert samples(text)["orders_db_max_documents"] == 50
+
+
+def test_an_empty_history_is_still_reported():
+    assert samples(orders_store.prometheus_text(0, 50, 0))["orders_db_documents"] == 0

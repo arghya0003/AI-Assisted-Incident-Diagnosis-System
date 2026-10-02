@@ -821,3 +821,77 @@ differed, all of them environmental:
 With current images, a reset testbed and a working fallback chain, live top-1 is **7/8** — better
 than the 18/27 measured on fixtures, not worse. The earlier numbers are left in place above with
 this correction, because the mistake is more instructive than the numbers were.
+
+## The same ablation on a second model — 2026-10-02
+
+Repeat of the nine-scenario ablation with generation on Gemini (`gemini-flash-latest`) instead of
+OpenRouter's `nvidia/nemotron-3-super-120b-a12b:free`. The pipeline, the scenarios and the scoring
+are identical; only the model differs.
+
+| Mode | nemotron: top-1 / MRR | Gemini: top-1 / MRR |
+| --- | --- | --- |
+| `full` | 7/8 · 0.88 | 6/8 · 0.81 |
+| `llm_only` | 5/8 · 0.69 | 4/8 · 0.62 |
+| `deterministic` | **7/8 · 0.88** | **6/8 · 0.81** |
+
+Evidence validity 100% in both. 8 of 9 detected in both. Gemini p50 23.8 s against nemotron's 20.0 s.
+
+### Read the columns, not the rows
+
+**`deterministic` moved between the runs, and it never calls a model.** 7/8 to 6/8 on a mode whose
+answer is pure arithmetic means the scenario set itself got harder - different anomalies, different
+candidate contamination - so the absolute numbers are **not comparable across runs**. Concluding
+"Gemini ranks worse than nemotron" from this table would be wrong, and it is the obvious mistake to
+make with it.
+
+What is comparable is each run against itself, and there the two runs agree closely:
+
+- **`full` equals `deterministic` exactly, in both runs.** Same total, same scenarios right and
+  wrong. The LLM adds no ranking accuracy. That now holds across a 3.8B local model, a free 120B
+  mixture-of-experts and a frontier model, which makes it a property of the pipeline rather than a
+  limitation of weak models.
+- **`llm_only` loses by exactly 2 scenarios and 0.19 MRR in both runs** (5/8 against 7/8, 4/8
+  against 6/8). The scaffolding is worth about two scenarios in nine, independent of the model
+  behind it.
+- **The same failure shape recurs.** `llm_only` blamed a caller rather than the failing service four
+  times across the two runs: `front-end` for a catalogue crash (both runs), `orders` for a carts
+  memory exhaustion, `orders` for a user CPU ramp. Without the graph and the scores, the service
+  that appears in most of the event wins.
+
+### The counter-example, which is more useful than the averages
+
+On `service_crash` on payment, `llm_only` was **right** and both scored modes were **wrong**:
+
+| Mode | rank 1 | |
+| --- | --- | --- |
+| `full` | orders | rr 0.50 |
+| `llm_only` | **payment** | rr 1.00 |
+| `deterministic` | orders | rr 0.50 |
+
+The anomaly named `front-end` and `payment` (`latency_p99_ms`, `liveness`). `orders` was not in it -
+it entered as a downstream candidate and won on deploy proximity, the heaviest weight at 0.40,
+because `deploy-emitter` had published a routine deploy for it. The model, having no deploy scores,
+simply named the service that had stopped reporting.
+
+So the structure is not uniformly better: it is better on average and worse when a background deploy
+coincides with a real fault elsewhere. That is issue #7 costing measurable accuracy rather than being
+a theoretical concern, and it is an argument for weighting deploy proximity lower, or for discounting
+a deploy that has no anomaly on its own service.
+
+### Two blind spots, confirmed by repetition rather than assumed
+
+- **A dead datastore is blamed on a service that calls it.** `dependency_timeout` pauses
+  `catalogue-db`; across both runs no mode ever named it. The answers were `catalogue` three times
+  and `carts` twice. The anomaly never mentions the datastore, and nothing distinguishes "catalogue
+  is slow" from "what catalogue depends on is gone". A better model did not help, because this is
+  missing evidence rather than weak reasoning.
+- **`config_error` is undetected, twice.** Pointing a dependency's hostname at loopback makes
+  front-end fail *fast*, so no latency signal appears and `error_rate` did not trip within 150 s.
+  Reproducible, and M2's to look at rather than a ranking problem.
+
+### On latency
+
+The 4.2 s single-request probe did not survive contact with a run: Gemini's p50 was 23.8 s, with one
+`llm_only` call at 110 s. nemotron's worst was 136 s. Both sit uncomfortably close to M4's 150 s
+`DIAGNOSIS_TIMEOUT_SECONDS`, and the tail appears to be free-tier capacity rather than either model,
+since it affects both.

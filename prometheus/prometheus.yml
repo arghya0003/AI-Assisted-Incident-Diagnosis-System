@@ -26,3 +26,15 @@ scrape_configs:
           - shipping:80
         labels:
           project: incident-diagnosis-system
+
+  # Testbed state, not a service under test: the size of orders-db's order
+  # history and how fast the load generator prunes it (issue #33). A separate
+  # job so metrics-bridge can tell it apart - its per-service loop only reads
+  # sock-shop-services, and publishes these under `orders-db` instead.
+  - job_name: testbed-state
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - load-generator:5002
+        labels:
+          project: incident-diagnosis-system
