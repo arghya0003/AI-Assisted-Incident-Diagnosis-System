@@ -135,6 +135,41 @@ the testbed variable it is:
 
 `documents: null` means orders-db could not be reached; `last_prune_error` says why.
 
+### Recorded over time, not only read on demand
+
+The pruner held the count at its ceiling, yet `orders` p95 still rose 2.5× for about 30
+minutes and recovered on its own (issue #33, reopened). `/stats` could not explain it
+afterwards: it reports the count *now*, and nothing stored it. The leading hypothesis is
+churn rather than size, which the count alone can't separate either, since it sits flat at
+50 while the pruner keeps deleting.
+
+So the generator also serves `GET /metrics` in Prometheus format. Prometheus scrapes it
+as its own `testbed-state` job, and metrics-bridge publishes it to `metrics.raw` under the
+component it describes, which puts it in the TimescaleDB `metrics` table next to `orders`
+latency:
+
+| `service` | `metric` | From | Meaning |
+| --- | --- | --- | --- |
+| `orders-db` | `document_count` | `orders_db_documents` | Orders in the history `GET /orders` returns |
+| `orders-db` | `prune_rate` | `rate(orders_db_pruned_total[5m])` | Orders deleted per second by the pruner |
+
+A 5-minute window for `prune_rate` because the pruner deletes in one batch a minute. The
+count is left out, not sent as 0, while orders-db is unreachable. The anomaly detector and
+the evaluation runner both skip these two metrics: they are testbed state recorded so it
+can be correlated, and a `POST /reset` dropping the count to 0 is not an incident.
+
+Size against latency, per minute, for any window:
+
+```sql
+SELECT time_bucket('1 minute', time) AS minute,
+       avg(value) FILTER (WHERE service = 'orders-db' AND metric = 'document_count') AS documents,
+       avg(value) FILTER (WHERE service = 'orders-db' AND metric = 'prune_rate') * 60 AS pruned_per_min,
+       avg(value) FILTER (WHERE service = 'orders' AND metric = 'latency_p95_ms') AS orders_p95_ms
+FROM metrics
+WHERE time > now() - interval '2 hours'
+GROUP BY minute ORDER BY minute;
+```
+
 ## Verified on the live stack
 
 Full stack up (25 containers), generator running 15 minutes at the defaults:

@@ -65,7 +65,7 @@ with conn.cursor() as cur:
         "WHERE t_inject BETWEEN %s AND %s", (start, end))
     fault_windows = merge([[parse_ts(a), parse_ts(b) + GRACE] for a, b in cur.fetchall()])
 
-samples = sources.load_metric_samples(conn, start, end, {"request_rate"})
+samples = sources.load_metric_samples(conn, start, end, {"request_rate", "document_count", "prune_rate"})
 deploys = sources.load_deploys(conn, start, end)
 
 # Periods the stack was actually up, from the samples themselves.
