@@ -114,7 +114,7 @@ def _not_found(incident_id: str) -> HTTPException:
 
 
 @app.get("/health")
-def health(incidents: IncidentStore = Depends(get_store)) -> dict[str, str]:
+def health(incidents: IncidentStore = Depends(get_store)) -> dict[str, object]:
     """Deliberately 200 even when the database is unusable: docker-compose.yml health-checks this
     endpoint, and a non-2xx would mark the container unhealthy and block anything waiting on
     `condition: service_healthy` - for a problem no restart can fix.
@@ -124,13 +124,20 @@ def health(incidents: IncidentStore = Depends(get_store)) -> dict[str, str]:
     with no tables, every incident is dropped and the approval console stays empty with no
     explanation (issue #30). `detail` carries the remediation, so whoever reads the health response
     does not have to find the migration themselves.
+
+    `consumer` is reported for the same reason one step earlier in the chain: the API staying up
+    says nothing about whether anomalies are still being read. A dead consumer thread used to be
+    visible only as an absence of incidents, which also reads as a quiet system rather than a
+    broken one.
     """
     database = incidents.status()
+    consumer = kafka_consumer.STATUS.as_dict()
     body = {
-        "status": "ok" if database == "ok" else "degraded",
+        "status": "ok" if database == "ok" and consumer["state"] != "exited" else "degraded",
         "service": "orchestrator",
         "version": SERVICE_VERSION,
         "database": database,
+        "consumer": consumer,
     }
     if database != "ok":
         body["detail"] = SCHEMA_REMEDY if database == "schema_missing" else UNREACHABLE_REMEDY
