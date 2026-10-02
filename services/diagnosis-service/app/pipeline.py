@@ -88,51 +88,88 @@ def ollama_chat(client: OllamaClient, settings: Settings) -> Chat:
     )
 
 
-def openrouter_chat(client: OpenRouterClient, settings: Settings) -> Chat:
-    """The default generation path, with the fallback models tried in order.
+# Providers that speak the OpenAI chat shape, and therefore share one client.
+HTTP_PROVIDERS = ("gemini", "openrouter")
+# How each spells the thinking budget. Gemini rejects OpenRouter's `reasoning` object outright, so
+# this is not cosmetic: get it wrong and every request to that provider fails with HTTP 400.
+REASONING_STYLE = {"gemini": "openai", "openrouter": "openrouter"}
 
-    Only availability failures move to the next model: a rate limit, an outage, a timeout. A reply
-    that parses but breaks the contract is the model's own behaviour and is retried against the
-    same model by app/llm.py, so every stored answer stays attributable to one model. The model
-    that answered is recorded on the reply, which is what `model_version` stores.
+
+def chat_chain(settings: Settings) -> list[tuple[str, str]]:
+    """The (provider, model) pairs to try, in order, de-duplicated.
+
+    A fallback entry may name its provider as "provider:model" so the chain can cross vendors. That
+    is the point of it: Gemini returns transient 503s under load while OpenRouter exhausts a daily
+    quota, and those two failures are unlikely to coincide. An entry with no provider uses the
+    primary's, which keeps the common case short.
     """
-    models = [settings.llm_model, *(m for m in settings.llm_fallback_models if m != settings.llm_model)]
+    chain = [(settings.llm_provider, settings.llm_model)]
+    for entry in settings.llm_fallback_models:
+        provider, separator, model = entry.partition(":")
+        # A bare model name can itself contain a colon (OpenRouter's ":free" suffix), so only treat
+        # the prefix as a provider when it actually names one.
+        if separator and provider in HTTP_PROVIDERS:
+            pair = (provider, model)
+        else:
+            pair = (settings.llm_provider, entry)
+        if pair not in chain:
+            chain.append(pair)
+    return chain
+
+
+def http_client_for(provider: str, settings: Settings) -> OpenRouterClient:
+    url, key = {
+        "gemini": (settings.gemini_url, settings.gemini_api_key),
+        "openrouter": (settings.openrouter_url, settings.openrouter_api_key),
+    }[provider]
+    return OpenRouterClient(key, url, timeout_seconds=settings.llm_timeout_seconds)
+
+
+def api_chat(settings: Settings, clients: dict[str, OpenRouterClient] | None = None) -> Chat:
+    """Generation over HTTP, trying each (provider, model) in the chain until one answers.
+
+    Only availability failures move on: a rate limit, a transient overload, a timeout. A reply that
+    parses but breaks the contract is the model's own behaviour and is retried against the *same*
+    model by app/llm.py, so every stored answer stays attributable to the model that wrote it. That
+    model is recorded on the reply, which is what `model_version` and X-Model-Version report.
+    """
+    chain = chat_chain(settings)
+    clients = clients or {provider: http_client_for(provider, settings) for provider, _ in set(chain)}
 
     def chat(messages: list[dict[str, str]], schema: dict) -> ChatReply:
         failures = []
-        for position, model in enumerate(models, start=1):
+        for position, (provider, model) in enumerate(chain, start=1):
             try:
-                reply = client.chat(
+                reply = clients[provider].chat(
                     messages,
                     model,
                     schema,
                     temperature=settings.llm_temperature,
                     max_output_tokens=settings.llm_max_output_tokens,
                     reasoning_effort=settings.llm_reasoning_effort or None,
+                    reasoning_style=REASONING_STYLE[provider],
                     timeout_seconds=settings.llm_timeout_seconds,
                 )
             except ProviderUnavailable as exc:
-                failures.append(f"{model}: {exc}")
-                if position < len(models):
-                    log.warning("%s unavailable (%s); trying %s", model, exc, models[position])
+                failures.append(f"{provider}/{model}: {exc}")
+                if position < len(chain):
+                    log.warning("%s/%s unavailable (%s); trying %s/%s", provider, model, exc, *chain[position])
                 continue
             if position > 1:
-                log.info("answered by fallback model %s after %d unavailable", model, position - 1)
+                log.info("answered by fallback %s/%s after %d unavailable", provider, model, position - 1)
             return reply
         raise ProviderUnavailable("; ".join(failures))
 
     return chat
 
 
-def build_chat(settings: Settings, ollama: OllamaClient, openrouter: OpenRouterClient | None = None) -> Chat:
+def build_chat(settings: Settings, ollama: OllamaClient, clients: dict[str, OpenRouterClient] | None = None) -> Chat:
     """The configured generation provider. Ollama stays selectable so the recorded phi4-mini
-    results can be reproduced, and so the system can be demonstrated without an API key."""
+    results can be reproduced, and so the system can be demonstrated without an API key. It is a
+    primary only: its request shape differs, so it is not part of the HTTP fallback chain."""
     if settings.llm_provider == "ollama":
         return ollama_chat(ollama, settings)
-    client = openrouter or OpenRouterClient(
-        settings.openrouter_api_key, settings.openrouter_url, timeout_seconds=settings.llm_timeout_seconds
-    )
-    return openrouter_chat(client, settings)
+    return api_chat(settings, clients)
 
 
 class DiagnosisPipeline:

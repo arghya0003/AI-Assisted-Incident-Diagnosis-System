@@ -177,11 +177,28 @@ A seeded corpus removes the manual step and the silent-empty-corpus trap; it doe
 retrieval work on a machine with no embedding model, where `retrieval_status` is
 `embedding_unavailable` and incident similarity scores 0 for every candidate.
 
-**Generation provider.** `LLM_PROVIDER` is `openrouter` by default, with
-`nvidia/nemotron-3-super-120b-a12b:free` as `LLM_MODEL` and `qwen/qwen3.8-27b:free` as
-`LLM_FALLBACK_MODELS`. The key comes from the gitignored `.env` at the repo root as
-`OPENROUTER_API_KEY`, passed through `docker-compose.yml`; without it the service still starts and
-answers, always from the deterministic ranking, and says so at startup.
+**Generation provider.** `LLM_PROVIDER` is `gemini` by default, with `gemini-flash-latest` as
+`LLM_MODEL` and `openrouter:nvidia/nemotron-3-super-120b-a12b:free` as `LLM_FALLBACK_MODELS`. Keys
+come from the gitignored `.env` at the repo root (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`), passed
+through `docker-compose.yml`; without them the service still starts and answers, always from the
+deterministic ranking, and names the missing keys at startup.
+
+A fallback entry may be written `provider:model` so the chain crosses vendors, which is the point of
+it: Gemini returns transient HTTP 503 "experiencing high demand" under load, OpenRouter exhausts a
+50-request daily quota, and the two are unlikely to fail at the same moment. A bare model name stays
+on the primary's provider, and a `:free` suffix is not mistaken for a provider prefix.
+
+Two things learned while adding Gemini, both the opposite of what its documentation says:
+
+- **It rejects unknown parameters rather than ignoring them.** A body carrying OpenRouter's
+  `reasoning: {effort}` object comes back as HTTP 400, `Unknown name "reasoning"`. Gemini takes
+  OpenAI's `reasoning_effort` string instead, so the thinking budget is spelled per provider
+  (`REASONING_STYLE` in `app/pipeline.py`). Getting this wrong fails every request to that provider,
+  which is how it was found - the first live run fell through to OpenRouter on a 400.
+- **Pinned model versions were less available than the alias.** `gemini-3.8-flash`, `3.7`, `3.6` all
+  returned 503 while `gemini-flash-latest` answered, and `gemini-2.5-flash` is already refused for
+  new keys. Hence the alias, with reproducibility preserved by recording the model that answered on
+  every stored analysis rather than by pinning a version that may vanish.
 
 The fallback chain is for **availability only** — a rate limit, an outage, a timeout. A reply that
 arrives and breaks the contract is the model's own behaviour and is retried against the *same*

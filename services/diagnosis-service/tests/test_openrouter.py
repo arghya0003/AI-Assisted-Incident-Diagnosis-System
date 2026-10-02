@@ -8,7 +8,7 @@ import pytest
 
 from app.hypotheses import CandidateOptions
 from app.openrouter import NoKey, OpenRouterClient
-from app.pipeline import build_chat, openrouter_chat
+from app.pipeline import api_chat, build_chat, chat_chain
 from app.prompts import response_schema
 from app.providers import ProviderUnavailable
 from app.settings import Settings
@@ -121,14 +121,36 @@ def test_reasoning_effort_is_sent_only_when_set():
     assert "reasoning" not in calls[1]
 
 
+def test_the_thinking_budget_is_spelled_the_way_each_provider_expects():
+    """Not cosmetic. Gemini rejects OpenRouter's `reasoning` object with HTTP 400 'Unknown name
+    "reasoning"', despite its documentation saying unknown parameters are ignored - so sending the
+    wrong spelling makes every request to that provider fail."""
+    client, calls = client_returning(httpx.Response(200, json=reply_body()), httpx.Response(200, json=reply_body()))
+    client.chat(MESSAGES, "m", SCHEMA, temperature=0.1, max_output_tokens=100,
+                reasoning_effort="low", reasoning_style="openai")
+    assert calls[0]["reasoning_effort"] == "low" and "reasoning" not in calls[0]
+    client.chat(MESSAGES, "m", SCHEMA, temperature=0.1, max_output_tokens=100,
+                reasoning_effort="low", reasoning_style="openrouter")
+    assert calls[1]["reasoning"] == {"effort": "low"} and "reasoning_effort" not in calls[1]
+
+
+def test_each_provider_in_the_chain_gets_its_own_spelling():
+    gemini, gemini_calls = client_returning(httpx.Response(200, json=reply_body(model="gemini-flash-latest")))
+    settings = settings_with(llm_provider="gemini", llm_model="gemini-flash-latest",
+                             llm_fallback_models=(), llm_reasoning_effort="low")
+    api_chat(settings, {"gemini": gemini})(MESSAGES, SCHEMA)
+    assert gemini_calls[0]["reasoning_effort"] == "low", "gemini must get the OpenAI spelling"
+
+
 # ---------------------------------------------------------------- the fallback chain
 
 
 def test_an_unavailable_model_falls_through_to_the_next():
     """A rate-limited primary must move to the fallback immediately, not burn its retries first."""
     client, calls = client_returning(429, httpx.Response(200, json=reply_body(model="backup/model")))
-    settings = settings_with(llm_model="primary/model", llm_fallback_models=("backup/model",))
-    reply = openrouter_chat(client, settings)(MESSAGES, SCHEMA)
+    settings = settings_with(llm_provider="openrouter", llm_model="primary/model",
+                             llm_fallback_models=("backup/model",))
+    reply = api_chat(settings, {"openrouter": client})(MESSAGES, SCHEMA)
     assert reply.model == "backup/model", "the answer must be attributed to the model that produced it"
     assert [c["model"] for c in calls] == ["primary/model", "backup/model"], "one request per model"
 
@@ -149,24 +171,62 @@ def test_server_errors_are_retried_then_reported():
 
 def test_every_model_unavailable_reports_all_of_them():
     client, _ = client_returning(429)
-    settings = settings_with(llm_model="primary/model", llm_fallback_models=("backup/model",))
+    settings = settings_with(llm_provider="openrouter", llm_model="primary/model",
+                             llm_fallback_models=("backup/model",))
     with pytest.raises(ProviderUnavailable) as exc:
-        openrouter_chat(client, settings)(MESSAGES, SCHEMA)
+        api_chat(settings, {"openrouter": client})(MESSAGES, SCHEMA)
     assert "primary/model" in str(exc.value) and "backup/model" in str(exc.value)
 
 
 def test_the_primary_is_not_repeated_when_it_is_also_listed_as_a_fallback():
     client, calls = client_returning(429)
-    settings = settings_with(llm_model="same/model", llm_fallback_models=("same/model",))
+    settings = settings_with(llm_provider="openrouter", llm_model="same/model",
+                             llm_fallback_models=("same/model",))
     with pytest.raises(ProviderUnavailable):
-        openrouter_chat(client, settings)(MESSAGES, SCHEMA)
+        api_chat(settings, {"openrouter": client})(MESSAGES, SCHEMA)
     assert {c["model"] for c in calls} == {"same/model"}
     assert len(calls) == 1, "a rate-limited model is tried once, and a duplicate entry adds nothing"
 
 
 def test_build_chat_honours_the_configured_provider():
     ollama_only = settings_with(llm_provider="ollama")
-    assert build_chat(ollama_only, ollama=_FakeOllama(), openrouter=None) is not None
+    assert build_chat(ollama_only, ollama=_FakeOllama(), clients=None) is not None
+
+
+# ---------------------------------------------------------------- the cross-vendor chain
+
+
+def test_a_fallback_entry_may_name_another_provider():
+    """The point of the chain: Gemini returns transient 503s under load while OpenRouter exhausts a
+    daily quota, so a chain that cannot cross vendors is barely a fallback at all."""
+    settings = settings_with(llm_provider="gemini", llm_model="gemini-flash-latest",
+                             llm_fallback_models=("openrouter:nvidia/nemotron:free",))
+    assert chat_chain(settings) == [("gemini", "gemini-flash-latest"),
+                                    ("openrouter", "nvidia/nemotron:free")]
+
+
+def test_an_entry_without_a_provider_stays_on_the_primary():
+    settings = settings_with(llm_provider="openrouter", llm_model="a/model",
+                             llm_fallback_models=("b/model",))
+    assert chat_chain(settings) == [("openrouter", "a/model"), ("openrouter", "b/model")]
+
+
+def test_a_colon_in_a_model_name_is_not_mistaken_for_a_provider():
+    """OpenRouter's free models end in ":free", so splitting on the first colon unconditionally
+    would read "qwen/qwen3.8-27b" as a provider name and lose the model."""
+    settings = settings_with(llm_provider="openrouter", llm_model="a/model",
+                             llm_fallback_models=("qwen/qwen3.8-27b:free",))
+    assert chat_chain(settings) == [("openrouter", "a/model"), ("openrouter", "qwen/qwen3.8-27b:free")]
+
+
+def test_the_chain_crosses_vendors_when_the_primary_is_overloaded():
+    gemini, gemini_calls = client_returning(503)
+    openrouter, _ = client_returning(httpx.Response(200, json=reply_body(model="nvidia/nemotron:free")))
+    settings = settings_with(llm_provider="gemini", llm_model="gemini-flash-latest",
+                             llm_fallback_models=("openrouter:nvidia/nemotron:free",))
+    reply = api_chat(settings, {"gemini": gemini, "openrouter": openrouter})(MESSAGES, SCHEMA)
+    assert reply.model == "nvidia/nemotron:free"
+    assert len(gemini_calls) == 3, "a 503 is transient, so it is retried on the model before moving on"
 
 
 class _FakeOllama:
