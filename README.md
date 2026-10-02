@@ -293,6 +293,29 @@ CUSUM and 3-sigma each detect **6/7**; a static threshold manages **4/7**. Under
 `orders` sits at about 240ms while `user` sits at about 5ms, so no single fixed threshold
 can serve both — which is exactly what a per-(service, metric) learned baseline buys.
 
+**That result depends on how hard the fault is, so it was swept** (issue #34,
+`evaluation-runner sweep`). Five magnitudes of `bad_deploy_latency` on `catalogue`, each
+resetting the testbed first and each replayed through every detector:
+
+| measured p95 impact | `ewma` | `static` | `zscore` | `cusum` |
+| --- | --- | --- | --- | --- |
+| 0.0 ms | 1/1 | **0/1** | 1/1 | 1/1 |
+| 59.6 ms | 1/1 | **0/1** | 1/1 | 1/1 |
+| 533.9 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+| 801.4 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+| 804.6 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+
+**The crossover is 534 ms** — and the static detector's configured threshold is 500 ms, so
+the experiment independently recovered a number that was set in configuration. Below it a
+learned baseline catches faults a fixed threshold does not; above it the choice of detector
+stops mattering. That is the honest form of the claim, and it is a more useful finding than
+either single run: *a learned baseline earns its place on subtle regressions.*
+
+Two caveats travel with it. At the 0 ms rung the adaptive detectors fired on
+`latency_p99_ms`, not p95 — a gentle throttle lifts the tail first — so the x-axis
+understates what they actually saw at that end. And each rung is one scenario, so the
+direction is clear across five rungs but no rung carries an error bar.
+
 **Before the load generator (2026-09-13), for comparison:** 4/7 (57%), median 36.5s, two
 scenarios unobservable; replay over 18 scenarios gave 12/18 for the three adaptive
 detectors against 8/18 for the static one. Both runs are kept in
