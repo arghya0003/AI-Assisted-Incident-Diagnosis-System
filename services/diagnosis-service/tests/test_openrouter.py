@@ -81,6 +81,26 @@ def test_a_missing_key_says_so_rather_than_failing_as_a_401():
         call(client)
 
 
+def test_a_missing_key_names_the_provider_that_needs_it():
+    """One client class serves several providers, so a hardcoded variable name sends someone to set
+    the wrong one. A missing GEMINI_API_KEY reported "OPENROUTER_API_KEY is not set", which is how
+    this was found."""
+    client = OpenRouterClient("", transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+                              key_name="GEMINI_API_KEY")
+    with pytest.raises(NoKey, match="GEMINI_API_KEY is not set"):
+        call(client)
+
+
+def test_each_provider_in_the_chain_names_its_own_key():
+    settings = settings_with(llm_provider="gemini", gemini_api_key="", openrouter_api_key="",
+                             llm_model="gemini-flash-latest",
+                             llm_fallback_models=("openrouter:nvidia/nemotron:free",))
+    with pytest.raises(ProviderUnavailable) as exc:
+        api_chat(settings)(MESSAGES, SCHEMA)
+    message = str(exc.value)
+    assert "GEMINI_API_KEY is not set" in message and "OPENROUTER_API_KEY is not set" in message
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 429])
 def test_client_errors_are_not_retried(status):
     """A bad key, a data policy that blocks free models, or no matching endpoint: retrying cannot
