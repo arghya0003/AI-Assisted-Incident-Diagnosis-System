@@ -65,6 +65,7 @@ class OpenRouterClient:
         temperature: float,
         max_output_tokens: int,
         reasoning_effort: str | None = None,
+        reasoning_style: str = "openrouter",
         timeout_seconds: float | None = None,
     ) -> ChatReply:
         if not self._api_key:
@@ -82,7 +83,15 @@ class OpenRouterClient:
         if reasoning_effort:
             # Measured on nemotron: 569 of 719 output tokens were reasoning for a single
             # hypothesis. Left uncapped it crowds out the answer inside max_tokens.
-            body["reasoning"] = {"effort": reasoning_effort}
+            #
+            # The two providers spell this differently, and Gemini's compatibility layer *rejects*
+            # what it does not know rather than ignoring it, despite documenting the opposite: a
+            # body carrying OpenRouter's `reasoning` object comes back as HTTP 400, 'Unknown name
+            # "reasoning": Cannot find field'. It accepts OpenAI's `reasoning_effort` string.
+            if reasoning_style == "openai":
+                body["reasoning_effort"] = reasoning_effort
+            else:
+                body["reasoning"] = {"effort": reasoning_effort}
         payload = self._post("/chat/completions", body, timeout_seconds)
 
         choices = payload.get("choices")

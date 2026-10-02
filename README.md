@@ -387,9 +387,11 @@ asks an LLM to explain the ranking, validates the reply, and stores the run.
 `GET /candidates/{id}` shows the deterministic ranking behind any answer,
 `GET /hypotheses/{id}` lists stored runs, `GET /stats` the guardrail counters.
 
-**Generation goes to OpenRouter** (`nvidia/nemotron-3-super-120b-a12b:free`, falling back to
-`qwen/qwen3.8-27b:free`), with the key in the gitignored `.env` at the repo root as
-`OPENROUTER_API_KEY`. Without a key the service still answers, always from the deterministic
+**Generation goes to Gemini** (`gemini-flash-latest`), falling back across vendors to OpenRouter
+(`nvidia/nemotron-3-super-120b-a12b:free`). Keys live in the gitignored `.env` at the repo root as
+`GEMINI_API_KEY` and `OPENROUTER_API_KEY`. The chain crosses providers on purpose: Gemini returns
+transient 503s under load while OpenRouter exhausts a 50-a-day free quota, and those two are
+unlikely to fail together. Without any key the service still answers, always from the deterministic
 ranking. `LLM_PROVIDER=ollama` switches generation back to a local `phi4-mini`, which is how the
 phi4-mini results below can be reproduced.
 

@@ -20,8 +20,15 @@ from app.guardrail import GuardrailStats
 from app.llm import Chat
 from app.models import AnalyzeRequest, AnalyzeResponse, CandidateReport, PipelineMode, StoredAnalysis
 from app.ollama import OllamaClient
-from app.openrouter import OpenRouterClient
-from app.pipeline import DiagnosisPipeline, PipelineConfig, build_chat, ollama_embed
+from app.pipeline import (
+    HTTP_PROVIDERS,
+    DiagnosisPipeline,
+    PipelineConfig,
+    build_chat,
+    chat_chain,
+    http_client_for,
+    ollama_embed,
+)
 from app.retrieval import Embed
 from app.scoring import ScoringConfig
 from app.seed import seed_corpus_if_empty
@@ -40,9 +47,10 @@ scoring_config = ScoringConfig.from_settings(settings)
 pipeline_config = PipelineConfig.from_settings(settings)
 store = PostgresAnomalyStore(settings)
 ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeout_seconds)
-openrouter = OpenRouterClient(
-    settings.openrouter_api_key, settings.openrouter_url, timeout_seconds=settings.llm_timeout_seconds
-)
+# One client per HTTP provider in the chain, built once: the chain may cross vendors, so a Gemini
+# overload falls through to OpenRouter rather than to the deterministic scorer.
+api_clients = {provider: http_client_for(provider, settings) for provider, _ in set(chat_chain(settings))
+               if provider in HTTP_PROVIDERS}
 guardrail_stats = GuardrailStats()
 CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_config, pipeline_config)
 
@@ -50,23 +58,29 @@ CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_confi
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     log.info(
-        "starting diagnosis-service %s mode=%s provider=%s llm=%s fallbacks=%s embed=%s via %s "
+        "starting diagnosis-service %s mode=%s provider=%s chain=%s embed=%s via %s "
         "num_ctx=%d max_out=%d fingerprint=%s",
         SERVICE_VERSION,
         settings.pipeline_mode,
         settings.llm_provider,
-        settings.llm_model,
-        ",".join(settings.llm_fallback_models) or "none",
+        " -> ".join(f"{p}/{m}" for p, m in chat_chain(settings)),
         settings.embed_model,
         settings.ollama_url,
         settings.llm_context_tokens,
         settings.llm_max_output_tokens,
         CONFIG_FINGERPRINT,
     )
-    if settings.llm_provider == "openrouter" and not settings.openrouter_api_key:
+    missing = sorted({
+        f"{provider.upper()}_API_KEY"
+        for provider, _ in chat_chain(settings)
+        if provider in HTTP_PROVIDERS and not getattr(settings, f"{provider}_api_key")
+    })
+    if missing:
         log.warning(
-            "OPENROUTER_API_KEY is not set: every /analyze will fall back to the deterministic "
-            "ranking. Put the key in the gitignored .env at the repo root."
+            "%s not set: those links in the generation chain cannot be used, and if none remain "
+            "every /analyze falls back to the deterministic ranking. Keys belong in the gitignored "
+            ".env at the repo root (see .env.example).",
+            ", ".join(missing),
         )
     seed_corpus_if_empty(store, settings.embed_model)
     log.info(
@@ -103,7 +117,7 @@ def get_embedder() -> Embed:
 
 
 def get_chat() -> Chat:
-    return build_chat(settings, ollama, openrouter)
+    return build_chat(settings, ollama, api_clients)
 
 
 def _pipeline(anomalies: AnomalyStore, embed: Embed, chat: Chat) -> DiagnosisPipeline:
