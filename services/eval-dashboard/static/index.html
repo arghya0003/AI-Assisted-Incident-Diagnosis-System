@@ -617,9 +617,7 @@ async function loadHistory() {
           el("td", {}, el("code", { text: r.fault_type })),
           el("td", {}, el("b", { text: r.ground_truth_service })),
           el("td", { text: fmtTime(r.t_inject) }),
-          el("td", { class: "num" }, r.anomaly_id
-            ? el("span", { text: fmtSecs(r.detect_seconds) })
-            : el("span", { class: "pill bad", text: "missed" })),
+          el("td", { class: "num" }, detectionCell(r)),
           el("td", {}, r.top_service
             ? el("span", { class: "pill " + (hit ? "good" : "warn"),
                 text: (hit ? "✓ " : "≠ ") + r.top_service })
@@ -629,6 +627,24 @@ async function loadHistory() {
         ]);
       })));
   } catch (e) { t.innerHTML = '<tr><td class="empty">' + e.message + "</td></tr>"; }
+}
+
+// Whether the detector saw it - which only means anything if a fault ran.
+//
+// A scenario the injector refused (wrong service, bad parameter) never changed
+// a metric, so there was nothing to detect and calling it "missed" blames the
+// detector for the harness's own rejection. The evaluation runner is careful
+// about exactly this - `partition_by_support` keeps unrunnable scenarios out of
+// the denominator - and a console that contradicts the report is worse than one
+// that says less.
+function detectionCell(r) {
+  if (r.anomaly_id) return el("span", { text: fmtSecs(r.detect_seconds) });
+  if (r.status === "failed") {
+    return el("span", { class: "pill idle", title: "the injector refused this scenario, so no fault ran",
+      text: "never ran" });
+  }
+  if (r.status === "running") return el("span", { class: "sub", text: "in progress" });
+  return el("span", { class: "pill bad", text: "missed" });
 }
 
 // The remedy the system proposed, and how far it got through the approval chain.

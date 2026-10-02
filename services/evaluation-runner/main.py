@@ -265,34 +265,43 @@ def run_attribute(args) -> int:
         log.error("no fault scenarios recorded since %s; run `live` first", since.isoformat())
         return 1
 
+    def score(scenario, anomaly_id):
+        """Diagnose one anomaly and score the ranking against the injected cause."""
+        if anomaly_id is None:
+            return attribution.score_attribution(scenario, [], None)
+        hypotheses = sources.load_hypotheses(conn, anomaly_id)
+        if not hypotheses and not args.no_analyze:
+            log.info("asking the diagnosis service about %s", anomaly_id)
+            if sources.request_diagnosis(anomaly_id, timeout=args.timeout):
+                hypotheses = sources.load_hypotheses(conn, anomaly_id)
+        cited = attribution.cited_evidence_ids(hypotheses)
+        resolved = sources.resolve_evidence_ids(conn, cited) if cited else set()
+        return attribution.score_attribution(scenario, hypotheses, anomaly_id, resolved)
+
     results: list[attribution.AttributionResult] = []
+    unfiltered: list[attribution.AttributionResult] = []
     for scenario in scenarios:
         start, end = scoring.fault_window(scenario)
         anomaly_id = sources.find_anomaly_for_scenario(
             conn, scenario.ground_truth_service, start, end
         )
         if anomaly_id is None:
-            log.info("%s (%s): no anomaly in the fault window",
+            log.info("%s (%s): no anomaly naming the injected service in the window",
                      scenario.scenario_id, scenario.ground_truth_service)
-            results.append(attribution.score_attribution(scenario, [], None))
-            continue
+        results.append(score(scenario, anomaly_id))
 
-        hypotheses = sources.load_hypotheses(conn, anomaly_id)
-        if not hypotheses and not args.no_analyze:
-            log.info("asking the diagnosis service about %s", anomaly_id)
-            if sources.request_diagnosis(anomaly_id, timeout=args.timeout):
-                hypotheses = sources.load_hypotheses(conn, anomaly_id)
-        elif hypotheses:
-            log.info("reusing %d stored hypotheses for %s", len(hypotheses), anomaly_id)
-
-        cited = attribution.cited_evidence_ids(hypotheses)
-        resolved = sources.resolve_evidence_ids(conn, cited) if cited else set()
-        results.append(
-            attribution.score_attribution(scenario, hypotheses, anomaly_id, resolved)
-        )
+        # The same window without the service filter. The headline number only
+        # considers anomalies that already name the injected service, which
+        # isolates ranking from grouping but silently drops the hard cases -
+        # the ones where the detector surfaced a downstream symptom. Reporting
+        # the gap is more honest than reporting one number as "root-cause
+        # accuracy" without saying which anomalies it was allowed to see.
+        any_id = sources.find_any_anomaly_in_window(conn, start, end)
+        unfiltered.append(score(scenario, any_id) if any_id != anomaly_id
+                          else results[-1])
 
     markdown = reporting.build_attribution_report(
-        generated_at=now_utc(), results=results, since=since
+        generated_at=now_utc(), results=results, since=since, unfiltered=unfiltered
     )
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -367,8 +376,14 @@ def run_sweep(args) -> int:
             conn, subject, sweeping.SWEEP_METRIC,
             first.t_inject - timedelta(seconds=args.warmup_seconds), first.t_inject,
         )
+        # The fault's own window, NOT through to the end of the rung. The gap
+        # after a fault is 150s of recovered traffic against 90s of fault, so
+        # measuring to rung_end puts the median in the healthy part: a first run
+        # reported 248ms for a fault that actually reached 917ms, and ranked a
+        # weaker fault above a stronger one because the dilution differed.
         point.fault_p95_ms = sources.measure_p95(
-            conn, subject, sweeping.SWEEP_METRIC, first.t_inject, rung_end,
+            conn, subject, sweeping.SWEEP_METRIC,
+            first.t_inject, first.t_recovered or rung_end,
         )
 
         samples = sources.load_metric_samples(

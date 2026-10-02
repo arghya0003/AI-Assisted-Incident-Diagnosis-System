@@ -316,15 +316,53 @@ CUSUM and 3-sigma each detect **6/7**; a static threshold manages **4/7**. Under
 `orders` sits at about 240ms while `user` sits at about 5ms, so no single fixed threshold
 can serve both — which is exactly what a per-(service, metric) learned baseline buys.
 
+**That result depends on how hard the fault is, so it was swept** (issue #34,
+`evaluation-runner sweep`). Five magnitudes of `bad_deploy_latency` on `catalogue`, each
+resetting the testbed first and each replayed through every detector:
+
+| measured p95 impact | `ewma` | `static` | `zscore` | `cusum` |
+| --- | --- | --- | --- | --- |
+| 0.0 ms | 1/1 | **0/1** | 1/1 | 1/1 |
+| 59.6 ms | 1/1 | **0/1** | 1/1 | 1/1 |
+| 533.9 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+| 801.4 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+| 804.6 ms | 1/1 | 1/1 | 1/1 | 1/1 |
+
+**The crossover is 534 ms** — and the static detector's configured threshold is 500 ms, so
+the experiment independently recovered a number that was set in configuration. Below it a
+learned baseline catches faults a fixed threshold does not; above it the choice of detector
+stops mattering. That is the honest form of the claim, and it is a more useful finding than
+either single run: *a learned baseline earns its place on subtle regressions.*
+
+Two caveats travel with it. At the 0 ms rung the adaptive detectors fired on
+`latency_p99_ms`, not p95 — a gentle throttle lifts the tail first — so the x-axis
+understates what they actually saw at that end. And each rung is one scenario, so the
+direction is clear across five rungs but no rung carries an error bar.
+
 **Before the load generator (2026-09-13), for comparison:** 4/7 (57%), median 36.5s, two
 scenarios unobservable; replay over 18 scenarios gave 12/18 for the three adaptive
 detectors against 8/18 for the static one. Both runs are kept in
 [docs/phase9-detection.md](docs/phase9-detection.md) — the difference between them is the
 most useful thing the harness has produced.
 
-**The false-positive rate is not settled.** The live run measured 0.00/hour over 11.9
-quiet minutes; a replay of the same window measured 9.34/hour because it includes the
-stack's cold start. Neither is defensible yet. See below.
+**The false-positive rate is now measured, and it misses its target: 5.72/hour**
+(2026-10-02, 6 alerts across 63.0 minutes of genuinely quiet observation, testbed reset
+first, no machine sleep in the window — the three conditions that invalidated every earlier
+attempt). Target is under 1/hour.
+
+The breakdown matters more than the figure. **Four of the six were `orders`** reporting a
+real degradation: p95 climbed from 41ms to 105ms, held for about 30 minutes and recovered
+to 48ms unaided. Those are correct detections of an incident nobody injected — false only
+against the label "no fault was running". The other two were single `latency_p99_ms` tail
+excursions on `front-end` and `payment`. Excluding the `orders` degradation entirely gives
+about 1.9/hour, so **the target is missed on either reading** — but by a factor of two
+rather than six, and the difference is a property of the testbed rather than of the
+detector.
+
+It also says #33 is not finished. The load generator's pruner is holding the order count
+at ~54, so the mechanism identified there is fixed, yet `orders` still degrades on a
+roughly half-hour cycle and recovers by itself. There is a second mechanism, and it is the
+single biggest obstacle left to a clean false-positive number.
 
 ### Not done yet
 - **The false-positive rate is uncharacterised.** Three measurements of the same day

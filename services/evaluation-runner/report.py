@@ -77,8 +77,10 @@ def render_headline(
     lines.append("")
     lines.append(
         "Root-cause accuracy, ranking quality and evidence validity score M3's "
-        "ranker, which is not wired up yet. The harness computes them as soon as "
-        "a ranker is supplied; they are shown as not measured rather than as zero."
+        "ranker, and a `live` run does not ask it anything - the fault is already "
+        "over by the time a diagnosis would be useful to score. Run "
+        "`evaluation-runner attribute` against the same window for those three; "
+        "they are shown here as not measured rather than as zero."
     )
     return "\n".join(lines)
 
@@ -226,7 +228,8 @@ def write_csv(results: list[ScenarioResult], path: Path) -> None:
             ])
 
 
-def build_attribution_report(generated_at: datetime, results: list, since: datetime) -> str:
+def build_attribution_report(generated_at: datetime, results: list, since: datetime,
+                             unfiltered: list | None = None) -> str:
     """Render the attribution metrics: MRR, top-k, evidence validity.
 
     Separate from `build_report` because it answers a different question about
@@ -261,14 +264,44 @@ def build_attribution_report(generated_at: datetime, results: list, since: datet
         "| --- | --- | --- | --- |",
     ]
     for label, value, key, formatter in (
-        ("Root-cause accuracy (Top-1)", top1, None, fmt_pct),
-        ("Root-cause accuracy (Top-3)", top3, "top3", fmt_pct),
-        ("Ranking quality (MRR)", mrr, "mrr", lambda v: fmt(v, "", 2)),
+        ("Root-cause accuracy (Top-1)*", top1, None, fmt_pct),
+        ("Root-cause accuracy (Top-3)*", top3, "top3", fmt_pct),
+        ("Ranking quality (MRR)*", mrr, "mrr", lambda v: fmt(v, "", 2)),
         ("Evidence validity", validity, "evidence", fmt_pct),
     ):
         target = TARGETS[key][0] if key else "—"
         result = verdict(key, value) if key else "—"
         lines += [f"| {label} | {formatter(value)} | {target} | {result} |"]
+
+    lines += [
+        "",
+        r"\* Scored only over anomalies that already name the injected service — which "
+        "isolates the ranker from the grouper, but excludes the cases where the detector "
+        "surfaced a downstream symptom instead. Those are the hard ones, so this is an "
+        "upper bound, not an unconditional accuracy.",
+    ]
+
+    if unfiltered is not None:
+        u_rankings = rankings_for_scoring(unfiltered)
+        u_mrr = mean_reciprocal_rank(u_rankings)
+        u_top1 = top_k_accuracy(u_rankings, 1)
+        u_top3 = top_k_accuracy(u_rankings, 3)
+        lines += [
+            "",
+            "### The same scenarios without that filter",
+            "",
+            "| Metric | Naming the injected service | Any anomaly in the window |",
+            "| --- | --- | --- |",
+            f"| Top-1 | {fmt_pct(top1)} | {fmt_pct(u_top1)} |",
+            f"| Top-3 | {fmt_pct(top3)} | {fmt_pct(u_top3)} |",
+            f"| MRR | {fmt(mrr, '', 2)} | {fmt(u_mrr, '', 2)} |",
+            f"| Scenarios scored | {len([r for r in results if r.scored])} | "
+            f"{len([r for r in unfiltered if r.scored])} |",
+            "",
+            "The right-hand column takes the first anomaly in each fault window whatever it "
+            "names, so it includes the cascades. The gap between the columns is how much of "
+            "the headline depends on the grouper having named the right service first.",
+        ]
 
     lines += [
         "",

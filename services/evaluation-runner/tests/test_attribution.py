@@ -176,3 +176,75 @@ def test_metrics_over_a_mixed_set_ignore_the_unscorable():
 def test_empty_result_set_reports_not_measured_rather_than_zero():
     assert mean_reciprocal_rank(rankings_for_scoring([])) is None
     assert evidence_validity([]) is None
+
+
+# ------------------------------------------- issue #45: the three carried-over items
+
+def dependency_scenario(service="catalogue", dependency="catalogue-db",
+                        fault_type="dependency_timeout", sid="sc-dep"):
+    return Scenario(
+        scenario_id=sid,
+        fault_type=fault_type,
+        ground_truth_service=service,
+        t_inject=BASE,
+        t_recovered=None,
+        status="recovered",
+        params={"dependency": dependency, "duration_s": 90},
+    )
+
+
+def test_a_dependency_fault_is_scored_against_the_service_that_broke():
+    """Pausing catalogue-db is labelled `catalogue`; naming catalogue-db is correct.
+
+    Scoring against ground_truth_service would mark the right answer wrong and
+    the symptom right (issue #45, item 1).
+    """
+    scenario = dependency_scenario()
+    assert scenario.root_cause_service == "catalogue-db"
+    result = score_attribution(
+        scenario, [hyp(1, "catalogue-db"), hyp(2, "catalogue")], anomaly_id="anom-1",
+    )
+    assert result.reciprocal_rank == 1.0
+    assert result.ground_truth_service == "catalogue-db"
+    assert result.symptom_service == "catalogue", "detection still scores the symptom"
+
+
+def test_naming_only_the_symptom_is_not_a_correct_diagnosis():
+    result = score_attribution(
+        dependency_scenario(), [hyp(1, "catalogue"), hyp(2, "catalogue-db")],
+        anomaly_id="anom-1",
+    )
+    assert result.reciprocal_rank == 0.5
+
+
+def test_an_ordinary_fault_is_unaffected_by_the_dependency_rule():
+    """Only the dependency-shaped classes carry one, and only then does it differ."""
+    plain = scenario("catalogue")
+    assert plain.root_cause_service == "catalogue"
+    same = Scenario(
+        scenario_id="s", fault_type="bad_deploy_latency", ground_truth_service="catalogue",
+        t_inject=BASE, params={"dependency": "catalogue"},
+    )
+    assert same.root_cause_service == "catalogue", (
+        "a dependency equal to the service must not change the target"
+    )
+
+
+def test_incident_citations_resolve(monkeypatch):
+    """M3's hypotheses cite past postmortems once retrieval works (issue #45, item 3)."""
+    assert classify_evidence_id("incident-0014") == "incident"
+    result = score_attribution(
+        scenario(), [hyp(1, "catalogue", evidence=("anom-1", "incident-0014"))],
+        anomaly_id="anom-1", resolved_ids={"anom-1", "incident-0014"},
+    )
+    assert result.evidence_validity == 1.0
+
+
+def test_an_unknown_citation_shape_is_still_caught():
+    """Adding `incident-` must not turn the metric into a rubber stamp."""
+    assert classify_evidence_id("made-up-0001") is None
+    result = score_attribution(
+        scenario(), [hyp(1, "catalogue", evidence=("made-up-0001",))],
+        anomaly_id="anom-1", resolved_ids=set(),
+    )
+    assert result.evidence_validity == 0.0
