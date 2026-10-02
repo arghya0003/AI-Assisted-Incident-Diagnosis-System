@@ -25,27 +25,9 @@ stack is running under Compose on the same machine. Override with `PG_HOST`,
 `FAULT_INJECTOR_URL`, `ORCHESTRATOR_URL`, `DIAGNOSIS_URL`, `LOAD_GENERATOR_URL`
 and `PORT`.
 
-To run it inside Compose instead, add this to `docker-compose.yml` — it is not
-there yet, because `docker-compose.yml` is shared and this service is new:
-
-```yaml
-  eval-dashboard:
-    build: ./services/eval-dashboard
-    restart: unless-stopped
-    environment:
-      PG_HOST: timescaledb
-      FAULT_INJECTOR_URL: http://fault-injector:5001
-      ORCHESTRATOR_URL: http://orchestrator:8090
-      DIAGNOSIS_URL: http://diagnosis-service:8000
-      LOAD_GENERATOR_URL: http://load-generator:5002
-    ports:
-      - "5010:5010"
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    networks:
-      - diagnosis-net
-```
+It also runs in Compose as `eval-dashboard`, which is how everyone else gets it:
+`docker compose up -d` brings it up with the rest of the stack on the same port.
+Run it on the host only when you want to edit it without rebuilding.
 
 ## Two decisions worth knowing
 

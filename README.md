@@ -182,6 +182,7 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 8000 | `diagnosis-service` — `POST /analyze`, `/docs` |
 | 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
 | 3000 | `orchestrator-ui` — the HITL approval console |
+| 5010 | `eval-dashboard` — inject a fault, decide on an incident, read the history and the detection rate |
 | 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
 | 9090 | Prometheus · 29092 Kafka (host-side) |
 

@@ -616,6 +616,34 @@ services:
   # `live` injects the labelled fault suite and scores what the deployed
   # detector actually published. `replay` re-runs several detectors over the
   # same recorded window for the ablation table. Reports land in ./results.
+  # One operator console over the services below: inject a labelled fault,
+  # act on an incident awaiting a human, and read the history of both with the
+  # detection rate. It proxies the injector and the orchestrator server-side
+  # because neither sets CORS headers, so a browser cannot call them from a
+  # page served anywhere else; that also keeps the database password out of
+  # the browser. It decides nothing - the approve/reject calls go to the
+  # orchestrator, which keeps the state machine and the audit chain.
+  eval-dashboard:
+    build:
+      context: services/eval-dashboard
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      PG_HOST: timescaledb
+      PG_DB: metrics
+      PG_USER: postgres
+      PG_PASSWORD: Abcd1234#
+      FAULT_INJECTOR_URL: http://fault-injector:5001
+      ORCHESTRATOR_URL: http://orchestrator:8090
+      DIAGNOSIS_URL: http://diagnosis-service:8000
+      LOAD_GENERATOR_URL: http://load-generator:5002
+    ports:
+      - "5010:5010"
+    networks:
+      - diagnosis-net
+
   evaluation-runner:
     build:
       context: .
