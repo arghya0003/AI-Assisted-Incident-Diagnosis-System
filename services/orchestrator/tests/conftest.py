@@ -26,6 +26,7 @@ class FakeIncidentStore:
         self.rejections: list[dict] = []
         self.evidence: dict = {}  # source_id -> ResolvedEvidence, for resolve_evidence
         self.unavailable = False
+        self.schema_missing = False
 
     def _check(self):
         from app.db import DatabaseUnavailable
@@ -194,6 +195,10 @@ class FakeIncidentStore:
         return self._append_audit(incident_id, event_type, actor, detail)
 
     def status(self):
+        # schema_missing is its own state: the database answers, but the tables do not exist, so
+        # every incident is silently dropped (issue #30).
+        if self.schema_missing:
+            return "schema_missing"
         return "unreachable" if self.unavailable else "ok"
 
 
