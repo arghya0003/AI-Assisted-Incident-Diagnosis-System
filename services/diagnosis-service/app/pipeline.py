@@ -122,7 +122,9 @@ def http_client_for(provider: str, settings: Settings) -> OpenRouterClient:
         "gemini": (settings.gemini_url, settings.gemini_api_key),
         "openrouter": (settings.openrouter_url, settings.openrouter_api_key),
     }[provider]
-    return OpenRouterClient(key, url, timeout_seconds=settings.llm_timeout_seconds)
+    return OpenRouterClient(
+        key, url, timeout_seconds=settings.llm_timeout_seconds, key_name=f"{provider.upper()}_API_KEY"
+    )
 
 
 def api_chat(settings: Settings, clients: dict[str, OpenRouterClient] | None = None) -> Chat:

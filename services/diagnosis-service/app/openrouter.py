@@ -50,8 +50,13 @@ class OpenRouterClient:
         backoff_seconds: float = 2.0,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        key_name: str = "OPENROUTER_API_KEY",
     ):
         self._api_key = api_key
+        # Which environment variable supplies this client's key. One client class serves several
+        # providers, so a hardcoded name sends someone to set the wrong variable - which is exactly
+        # what happened: a missing GEMINI_API_KEY reported "OPENROUTER_API_KEY is not set".
+        self._key_name = key_name
         self._client = httpx.Client(base_url=base_url, timeout=timeout_seconds, transport=transport)
         self._attempts = attempts
         self._backoff_seconds = backoff_seconds
@@ -69,7 +74,8 @@ class OpenRouterClient:
         timeout_seconds: float | None = None,
     ) -> ChatReply:
         if not self._api_key:
-            raise NoKey("OPENROUTER_API_KEY is not set; put it in the gitignored .env at the repo root")
+            raise NoKey(f"{self._key_name} is not set; put it in the gitignored .env at the repo root "
+                        "(see .env.example)")
         body: dict = {
             "model": model,
             "messages": messages,

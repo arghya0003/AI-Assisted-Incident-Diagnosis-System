@@ -42,6 +42,17 @@ def _float_env(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _key_env(name: str) -> str:
+    """An API key with the surrounding whitespace removed.
+
+    Not fussiness: a key pasted into .env with a trailing space becomes an illegal HTTP header
+    value, and httpx raises LocalProtocolError rather than anything that reads like "your key has a
+    space in it". docker compose happens to strip it while `docker run -e` does not, so the same
+    file worked in one place and failed in another. Stripping here makes the paste forgiving.
+    """
+    return os.environ.get(name, "").strip()
+
+
 def _list_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.environ.get(name)
     if raw is None:
@@ -121,9 +132,9 @@ class Settings:
             llm_provider=_choice_env("LLM_PROVIDER", "gemini", ("gemini", "openrouter", "ollama")),
             openrouter_url=os.environ.get("OPENROUTER_URL", OPENROUTER_DEFAULT_URL),
             # From the gitignored .env at the repo root, passed through docker-compose.yml.
-            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            openrouter_api_key=_key_env("OPENROUTER_API_KEY"),
             gemini_url=os.environ.get("GEMINI_URL", GEMINI_DEFAULT_URL),
-            gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+            gemini_api_key=_key_env("GEMINI_API_KEY"),
             # Tried in order when a model is unreachable, and each entry may name its provider as
             # "provider:model" so the chain can cross vendors - which matters, because Gemini
             # returns transient 503s under load and OpenRouter exhausts a daily quota, and those
