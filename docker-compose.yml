@@ -605,18 +605,9 @@ services:
       - diagnosis-net
 
   # ---------------------------------------------------------------
-  # Phase 9 - Evaluation runner (M2)
+  # M2 - Evaluation dashboard
   # ---------------------------------------------------------------
-  # One-shot tool, not a long-running service, so it sits behind a profile
-  # and never starts with `docker compose up`. Run it explicitly:
-  #
-  #   docker compose run --rm evaluation-runner live
-  #   docker compose run --rm evaluation-runner replay --since-minutes 120
-  #
-  # `live` injects the labelled fault suite and scores what the deployed
-  # detector actually published. `replay` re-runs several detectors over the
-  # same recorded window for the ablation table. Reports land in ./results.
-  # One operator console over the services below: inject a labelled fault,
+  # One operator console over the services above: inject a labelled fault,
   # act on an incident awaiting a human, and read the history of both with the
   # detection rate. It proxies the injector and the orchestrator server-side
   # because neither sets CORS headers, so a browser cannot call them from a
@@ -644,6 +635,18 @@ services:
     networks:
       - diagnosis-net
 
+  # ---------------------------------------------------------------
+  # Phase 9 - Evaluation runner (M2)
+  # ---------------------------------------------------------------
+  # One-shot tool, not a long-running service, so it sits behind a profile
+  # and never starts with `docker compose up`. Run it explicitly:
+  #
+  #   docker compose run --rm evaluation-runner live
+  #   docker compose run --rm evaluation-runner replay --since-minutes 120
+  #
+  # `live` injects the labelled fault suite and scores what the deployed
+  # detector actually published. `replay` re-runs several detectors over the
+  # same recorded window for the ablation table. Reports land in ./results.
   evaluation-runner:
     build:
       context: .
