@@ -398,9 +398,18 @@ Two honest caveats:
   plausible engineer-written values. Picking absurd ones would have made the comparison
   meaningless.
 
-## The false-positive rate is not yet characterised
+## The false-positive rate
 
-Three numbers exist for the same detector on the same day, and they disagree:
+**Settled at 0.95/hour** (2026-10-05): 1 alert across 63.0 minutes of quiet observation,
+with the testbed reset first and no machine sleep in the window. Target is under 1/hour.
+
+Getting there took four attempts, and the three that failed each failed differently — which
+is the part worth keeping, because each one looked like a measurement at the time. The
+history below is the record of that.
+
+### Why the earlier numbers disagreed
+
+Three numbers existed for the same detector on the same day, and they disagree:
 
 | Source | Measured | What it covers |
 | --- | --- | --- |

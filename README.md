@@ -183,6 +183,30 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
 | 3000 | `orchestrator-ui` — the HITL approval console |
 | 5010 | `eval-dashboard` — inject a fault, decide on an incident, read the history and the detection rate |
+
+## Terminal shortcuts
+
+```powershell
+.\scripts\install-shortcuts.ps1     # once, from anywhere you cloned this
+```
+
+Then `InciWeb` opens the console, `SockShopWeb` the application under test, and
+`InciDemo` every demo tab in presenting order. `InciHelp` lists the rest.
+
+Two of them do more than open a page, because the same things keep going wrong:
+
+- **`InciUp`** builds before it starts. Container images do not track this
+  repository, and three separate defects here were a merged fix that was not in
+  the running image - each time the symptom looked like a different bug.
+- **`InciStatus`** reports the offered request rate (a fault with no traffic
+  moves no metric and nothing can detect it), whether the orchestrator's Kafka
+  consumer is consuming (that thread can die while the API stays healthy, so
+  incidents silently stop opening), and whether a Gemini key is present (without
+  one, every diagnosis quietly comes from the deterministic ranker).
+
+PowerShell only. The installer writes to the profile of whichever shell runs it,
+which matters because VS Code often launches PowerShell 7 while the standalone
+app is Windows PowerShell 5.1, and they read different profiles.
 | 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
 | 9090 | Prometheus · 29092 Kafka (host-side) |
 
@@ -346,33 +370,40 @@ detectors against 8/18 for the static one. Both runs are kept in
 [docs/phase9-detection.md](docs/phase9-detection.md) — the difference between them is the
 most useful thing the harness has produced.
 
-**The false-positive rate is now measured, and it misses its target: 5.72/hour**
-(2026-10-02, 6 alerts across 63.0 minutes of genuinely quiet observation, testbed reset
-first, no machine sleep in the window — the three conditions that invalidated every earlier
-attempt). Target is under 1/hour.
+**The false-positive rate is 0.95/hour, and meets its target** (2026-10-05, 1 alert across
+63.0 minutes of quiet observation, testbed reset first, no machine sleep in the window —
+the three conditions that invalidated every earlier attempt). Target is under 1/hour.
 
-The breakdown matters more than the figure. **Four of the six were `orders`** reporting a
-real degradation: p95 climbed from 41ms to 105ms, held for about 30 minutes and recovered
-to 48ms unaided. Those are correct detections of an incident nobody injected — false only
-against the label "no fault was running". The other two were single `latency_p99_ms` tail
-excursions on `front-end` and `payment`. Excluding the `orders` degradation entirely gives
-about 1.9/hour, so **the target is missed on either reading** — but by a factor of two
-rather than six, and the difference is a property of the testbed rather than of the
-detector.
+**It was 5.72/hour three days earlier**, and the difference is worth more than the number.
+That measurement was honest: 6 alerts in 63 quiet minutes, of which four were `orders`
+reporting a genuine degradation — p95 climbing 41ms to 105ms and holding for half an hour.
+Both readings were correct for the build they ran on. Two fixes landed between them, and
+neither was a change to the detector:
 
-It also says #33 is not finished. The load generator's pruner is holding the order count
-at ~54, so the mechanism identified there is fixed, yet `orders` still degrades on a
-roughly half-hour cycle and recovers by itself. There is a second mechanism, and it is the
-single biggest obstacle left to a clean false-positive number.
+- The load generator's pruner now bounds the order history, so `orders` no longer degrades
+  on its own (#33, #39). Measured over two hours with the count held at ~52 documents,
+  `orders` p95 stayed flat at 42-52ms with no alerts, where the earlier cycle repeated
+  roughly every half hour. The 2026-10-02 measurement predates that pruner.
+- The detector stopped alerting on the testbed's own instrumentation. M1 added
+  `orders-db`'s `document_count` and `prune_rate` as metrics and added both to the
+  detector's ignore list in the same commit — but only half of that commit was running,
+  because the detector image predated it. For an hour, **13 of 19 alerts** were the
+  pruner's own batch-delete rate being read as a service degrading.
+
+The second one is the more useful lesson, and it is recorded here rather than quietly
+fixed: a merged change that is not in the running image fails in a way that looks like a
+different bug entirely. Three separate defects during this evaluation had that same cause.
 
 ### Not done yet
-- **The false-positive rate is uncharacterised.** Three measurements of the same day
-  disagree (0.00, 5.64 and 9.34 per hour) depending on whether a restart falls inside the
-  window. Needs an hour or more of quiet observation with no restart in it.
-- **The testbed now degrades on its own.** Under steady load `orders` latency climbs from
-  107ms to 288ms over 45 minutes at constant traffic, and the detector raised 8 alerts in
-  55 minutes with no fault injected. That is a real degradation rather than detector error,
-  it is the slow-drift class the injector cannot produce, and it is the natural experiment
+- ~~The false-positive rate is uncharacterised.~~ Measured at **0.95/hour** over a clean
+  63-minute window (2026-10-05); see above for why the earlier 5.72/hour reading was equally
+  honest on the build it ran on.
+- ~~The testbed degrades on its own.~~ `orders` latency tracked the order history the load
+  generator never pruned; bounding it (#33, #39) removed the degradation, and two hours at a
+  held document count showed p95 flat at 42-52ms. What remains unexplained is the recovery
+  in the original observation: with nothing pruning, the count only grew, so latency
+  returning to 48ms unaided does not fit a pure count-drives-latency model. It is the
+  natural experiment
   for separating CUSUM from EWMA — which tie on every injected fault so far.
 - **`db_pool_saturation` still misses, and traffic did not fix it.** At 2.2 req/s
   catalogue's p95 stayed at exactly 4.8ms through the whole fault window: it reuses an
