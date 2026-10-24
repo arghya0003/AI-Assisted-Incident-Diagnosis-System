@@ -47,7 +47,9 @@ The columns that answer "was it resolved, and what was the fix":
 | Column | Meaning |
 | --- | --- |
 | `cause_source` | `injected_fault` if a labelled fault explains it (same window the evaluation runner scores with), else `unattributed` |
-| `diagnosis_correct` | rank-1 service = injected service; blank when there is no ground truth |
+| `ground_truth_service` / `root_cause_service` | the service that visibly degraded / the one a diagnosis should name. They differ only for `dependency_timeout` and `config_error`, which break a dependency: pausing `catalogue-db` is `catalogue` / `catalogue-db` |
+| `diagnosed_service` | the rank-1 hypothesis — from the incident's copy when the orchestrator opened one (what the approver saw), otherwise the diagnosis-service's latest stored run. The CSV does not say which. A filled `incident_id` usually means the incident's, but not while it is still `ANALYZING` and has no hypotheses yet |
+| `diagnosis_correct` | `diagnosed_service` = `root_cause_service`; blank when there is no ground truth |
 | `proposed_action` | what the diagnosis proposed |
 | `fix` | the action a human **approved** — empty otherwise. Never executed: the executor is stubbed by design |
 | `fix_status` | how far it got: `approved by X - logged, not executed`, `rejected by X`, `awaiting approval`, `expired without a decision`, … |

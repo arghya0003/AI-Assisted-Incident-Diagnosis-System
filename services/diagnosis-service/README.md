@@ -909,6 +909,13 @@ citable by nobody). Anomalies nobody injected or decided on are skipped: their o
 this service's own earlier answer, and feeding the model its own unchecked guesses as history would
 reinforce whatever it already gets wrong. On 2026-10-24 that left **40 of 2,497 rows** usable.
 
+An injected fault's root cause is the dataset's `root_cause_service`, not `ground_truth_service`:
+`dependency_timeout` and `config_error` break a dependency and record the service that degrades, so
+a paused `catalogue-db` would otherwise reach the prompt as "root cause catalogue" and be citable
+under the symptom (found in review of #57). Rows written before that column existed carry no record
+of what a dependency fault broke, so for those two classes they are skipped rather than guessed;
+their stored correctness verdict is dropped too, since it was scored against the symptom.
+
 **Leakage.** A past outcome is used only if its label was known *before the current anomaly's
 onset*, and never the anomaly itself. The dataset holds the answers: while a fault is running its
 first anomaly is already in the file labelled with the injected service, so without this rule a
