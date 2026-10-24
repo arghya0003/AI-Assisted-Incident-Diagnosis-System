@@ -183,6 +183,30 @@ results/                    Evaluation output (gitignored — regenerate, don't 
 | 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
 | 3000 | `orchestrator-ui` — the HITL approval console |
 | 5010 | `eval-dashboard` — inject a fault, decide on an incident, read the history and the detection rate |
+
+## Terminal shortcuts
+
+```powershell
+.\scripts\install-shortcuts.ps1     # once, from anywhere you cloned this
+```
+
+Then `InciWeb` opens the console, `SockShopWeb` the application under test, and
+`InciDemo` every demo tab in presenting order. `InciHelp` lists the rest.
+
+Two of them do more than open a page, because the same things keep going wrong:
+
+- **`InciUp`** builds before it starts. Container images do not track this
+  repository, and three separate defects here were a merged fix that was not in
+  the running image - each time the symptom looked like a different bug.
+- **`InciStatus`** reports the offered request rate (a fault with no traffic
+  moves no metric and nothing can detect it), whether the orchestrator's Kafka
+  consumer is consuming (that thread can die while the API stays healthy, so
+  incidents silently stop opening), and whether a Gemini key is present (without
+  one, every diagnosis quietly comes from the deterministic ranker).
+
+PowerShell only. The installer writes to the profile of whichever shell runs it,
+which matters because VS Code often launches PowerShell 7 while the standalone
+app is Windows PowerShell 5.1, and they read different profiles.
 | 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
 | 9090 | Prometheus · 29092 Kafka (host-side) |
 
