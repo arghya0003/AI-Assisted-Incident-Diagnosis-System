@@ -10,4 +10,8 @@ SIMILAR PAST INCIDENTS
 These happened before, in other situations. They are not facts about the current anomaly.
 $incidents
 
+PAST OUTCOMES IN THIS SYSTEM
+Earlier anomalies in this same system whose root cause was later confirmed, and what was concluded about them at the time. They are not facts about the current anomaly.
+$history
+
 Return 1 to 3 hypotheses as JSON.

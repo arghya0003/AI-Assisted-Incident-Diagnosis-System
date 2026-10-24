@@ -21,9 +21,10 @@ from app.db import AnomalyStore
 from app.deterministic import deterministic_diagnosis
 from app.graph import DependencyGraph
 from app.guardrail import GuardrailResult, GuardrailStats, Rejection, Source, allowed_ids, apply_guardrail
+from app.history import HistoryStore, PastOutcome
 from app.hypotheses import Diagnosis, rollback_window_minutes
 from app.llm import Chat, LLMDiagnoser, LLMOutcome
-from app.models import AnalyzeResponse, AnsweredBy, CandidateReport, PipelineMode
+from app.models import AnalyzeResponse, AnomalyEvent, AnsweredBy, CandidateReport, PipelineMode
 from app.ollama import OllamaClient
 from app.openrouter import OpenRouterClient
 from app.providers import ChatReply, ProviderUnavailable
@@ -44,6 +45,9 @@ class PipelineConfig:
     retrieval_mode: str
     retrieval_top_k: int
     llm_max_attempts: int
+    # Past outcomes in the full and no_graph prompts (app/history.py); 0 is off. Part of the config
+    # fingerprint through dataclasses.asdict, so a cached answer never crosses the on/off line.
+    history_top_k: int = 0
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "PipelineConfig":
@@ -55,6 +59,7 @@ class PipelineConfig:
             retrieval_mode=settings.retrieval_mode,
             retrieval_top_k=settings.retrieval_top_k,
             llm_max_attempts=settings.llm_max_attempts,
+            history_top_k=settings.history_top_k if settings.history_path else 0,
         )
 
 
@@ -71,6 +76,8 @@ class PipelineResult:
     latency_ms: int
     # Hypotheses the evidence guardrail dropped while producing this result.
     guardrail_rejections: list[Rejection] = field(default_factory=list)
+    # The past outcomes placed in the prompt, by anomaly id; empty when history was off or none matched.
+    past_outcomes: list[str] = field(default_factory=list)
 
 
 def ollama_embed(client: OllamaClient, settings: Settings) -> Embed:
@@ -184,6 +191,7 @@ class DiagnosisPipeline:
         scoring: ScoringConfig,
         config: PipelineConfig,
         stats: GuardrailStats | None = None,
+        history: HistoryStore | None = None,
     ):
         self._store = store
         self._embed = embed
@@ -192,6 +200,13 @@ class DiagnosisPipeline:
         self._scoring = scoring
         self._config = config
         self._stats = stats
+        self._history = history
+
+    def past_outcomes(self, anomaly: AnomalyEvent) -> list[PastOutcome]:
+        """Confirmed outcomes known before this anomaly began; never its own (app/history.py)."""
+        if self._history is None or self._config.history_top_k <= 0:
+            return []
+        return self._history.select(anomaly, self._config.history_top_k)
 
     def scoring_inputs(self, anomaly_id: str) -> ScoringInputs | None:
         return self._store.scoring_inputs(
@@ -224,6 +239,7 @@ class DiagnosisPipeline:
         if mode == "deterministic":
             return self._deterministic(report, None, None, None, started, [], mode, "deterministic")
 
+        past = self.past_outcomes(inputs.anomaly)
         try:
             prompt = build_prompt(
                 inputs.anomaly,
@@ -232,22 +248,28 @@ class DiagnosisPipeline:
                 response_reserve_tokens=self._config.response_reserve_tokens,
                 max_candidates=self._config.max_prompt_candidates,
                 min_candidates=self._config.min_prompt_candidates,
+                history=past,
             )
         except PromptTooLarge as exc:
             return self._deterministic(report, None, None, str(exc), started, [], mode, "deterministic_fallback")
+        # What actually reached the model, which a budget truncation can make less than `past`.
+        shown = [] if "dropped past outcomes" in prompt.truncations else [p.anomaly_id for p in past]
 
         outcome = LLMDiagnoser(self._chat, self._config.llm_max_attempts).diagnose(prompt)
         if outcome.diagnosis is None:
             reason = _no_valid_reply(outcome)
-            return self._deterministic(report, prompt, outcome, reason, started, [], mode, "deterministic_fallback")
+            result = self._deterministic(report, prompt, outcome, reason, started, [], mode, "deterministic_fallback")
+            return dataclasses.replace(result, past_outcomes=shown)
 
         guarded = self._guard(outcome.diagnosis, report.anomaly_id, report, prompt, "llm")
         if not guarded.diagnosis.services:
             reason = f"the evidence guardrail rejected all {guarded.checked} LLM hypotheses"
-            return self._deterministic(
+            result = self._deterministic(
                 report, prompt, outcome, reason, started, guarded.rejections, mode, "deterministic_fallback"
             )
+            return dataclasses.replace(result, past_outcomes=shown)
         return PipelineResult(
+            past_outcomes=shown,
             response=guarded.diagnosis.response,
             services=guarded.diagnosis.services,
             mode="llm",

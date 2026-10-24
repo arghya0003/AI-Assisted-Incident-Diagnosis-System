@@ -520,6 +520,9 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      # Written by eval-dashboard; read-only here so this service can never alter the dataset.
+      - ./results:/data:ro
     environment:
       PG_HOST: timescaledb
       PG_DB: metrics
@@ -542,6 +545,11 @@ services:
       # committed corpus vectors were produced with it.
       OLLAMA_URL: http://host.docker.internal:11434
       EMBED_MODEL: nomic-embed-text
+      # Past outcomes for the LLM prompt: eval-dashboard's anomaly dataset, read-only. Only rows
+      # whose cause was confirmed before the anomaly began are used (app/history.py).
+      # HISTORY_TOP_K=0 turns it off, for an ablation with and without.
+      HISTORY_PATH: /data/anomaly_dataset.csv
+      HISTORY_TOP_K: ${HISTORY_TOP_K:-3}
       LLM_CONTEXT_TOKENS: "8192"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
