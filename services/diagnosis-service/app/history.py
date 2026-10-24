@@ -48,6 +48,10 @@ SERVICE_WEIGHT = 0.6
 METRIC_WEIGHT = 0.3
 DETECTOR_WEIGHT = 0.1
 
+# Fault classes that break a dependency rather than the service they are recorded against. Mirrors
+# the injector's `dependency` parameter (services/fault-injector/params.py); see injected_root_cause().
+DEPENDENCY_FAULT_TYPES = ("dependency_timeout", "config_error")
+
 
 @dataclass(frozen=True)
 class PastOutcome:
@@ -81,11 +85,35 @@ def _list(value: str) -> tuple[str, ...]:
     return tuple(part for part in (value or "").split(";") if part)
 
 
+def injected_root_cause(row: dict[str, str]) -> str | None:
+    """The service an injected fault actually broke, or None when this row cannot say.
+
+    Not `ground_truth_service`. For `dependency_timeout` and `config_error` the injector breaks a
+    dependency and records the service that visibly degrades: pausing `catalogue-db` is a `catalogue`
+    fault in that column. Taking it as the root cause would tell the model "root cause catalogue" and
+    make the past case citable under the symptom. The dashboard resolves the split into
+    `root_cause_service` (services/eval-dashboard/recent.py, `root_cause_service()`).
+
+    Rows written before that column existed are still on disk - the dataset keeps rows the database
+    lost - and for the dependency classes they carry no record of what broke. Those are skipped
+    rather than guessed: guessing `ground_truth_service` is the exact mislabel this exists to stop.
+    For every other class the two columns agree, so an old row is still usable.
+    """
+    if "root_cause_service" in row:
+        return row["root_cause_service"] or None
+    if row.get("fault_type") in DEPENDENCY_FAULT_TYPES:
+        return None
+    return row.get("ground_truth_service") or None
+
+
 def parse_row(row: dict[str, str]) -> PastOutcome | None:
     """One dataset row -> a labelled outcome, or None when nothing confirmed its cause."""
     onset = _time(row.get("t_onset", "")) or _time(row.get("t_detected", ""))
     if not row.get("anomaly_id") or onset is None:
         return None
+    # An old row's verdict on a dependency fault was scored against the symptom, so it may be
+    # inverted; drop the verdict rather than show the model a right answer marked "(wrong)".
+    stale_verdict = "root_cause_service" not in row and row.get("fault_type") in DEPENDENCY_FAULT_TYPES
     common = {
         "anomaly_id": row["anomaly_id"],
         "t_onset": onset,
@@ -94,14 +122,15 @@ def parse_row(row: dict[str, str]) -> PastOutcome | None:
         "detector": row.get("detector", ""),
         "fault_type": row.get("fault_type", ""),
         "diagnosed": row.get("diagnosed_service", ""),
-        "diagnosis_correct": row.get("diagnosis_correct", ""),
+        "diagnosis_correct": "" if stale_verdict else row.get("diagnosis_correct", ""),
         "fix": row.get("fix", ""),
         "group": row.get("scenario_id") or row["anomaly_id"],
     }
 
     resolved_at = _time(row.get("resolved_at", ""))
-    if row.get("cause_source") == "injected_fault" and row.get("ground_truth_service") and resolved_at:
-        return PastOutcome(label="injected", known_at=resolved_at, root_cause=row["ground_truth_service"], **common)
+    root = injected_root_cause(row) if row.get("cause_source") == "injected_fault" else None
+    if root and resolved_at:
+        return PastOutcome(label="injected", known_at=resolved_at, root_cause=root, **common)
 
     decided_at = _time(row.get("decided_at", ""))
     if decided_at is None:

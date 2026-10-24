@@ -80,6 +80,49 @@ def test_an_unverified_row_is_skipped_so_the_model_never_learns_from_its_own_gue
                          incident_state="EXPIRED")) is None
 
 
+# A paused catalogue-db, recorded by the injector as a catalogue fault (#57 review).
+DEPENDENCY = {"fault_type": "dependency_timeout", "ground_truth_service": "catalogue"}
+
+
+def test_a_dependency_fault_names_the_dependency_that_broke_not_the_symptom():
+    past = outcome(**DEPENDENCY, root_cause_service="catalogue-db",
+                   diagnosed_service="catalogue-db", diagnosis_correct="yes")
+    assert (past.label, past.root_cause, past.diagnosis_correct) == ("injected", "catalogue-db", "yes")
+
+
+def test_an_old_row_on_a_dependency_fault_is_skipped_rather_than_mislabelled():
+    # Written before root_cause_service existed: nothing on it says catalogue-db broke, and
+    # guessing ground_truth_service would label the symptom as the cause.
+    assert parse_row(row(**DEPENDENCY)) is None
+
+
+def test_an_old_dependency_row_still_counts_for_its_decision_without_its_stale_verdict():
+    past = outcome(**DEPENDENCY, diagnosis_correct="no", decision="approved",
+                   fix_service="catalogue-db", decided_at=iso(50))
+    # The approval is a human label and stands; the verdict was scored against the symptom.
+    assert (past.label, past.root_cause, past.diagnosis_correct) == ("approved", "catalogue-db", "")
+
+
+def test_an_old_row_on_any_other_fault_is_still_usable():
+    # For every class but the dependency ones the two columns agree.
+    assert outcome().root_cause == "catalogue"
+
+
+def test_a_new_row_with_no_root_cause_recorded_is_not_a_label():
+    assert parse_row(row(root_cause_service="")) is None
+
+
+def test_a_dependency_outcome_is_citable_under_the_dependency_not_the_symptom():
+    past = select([outcome(**DEPENDENCY, root_cause_service="catalogue-db")], ANOMALY, 3)
+    prompt, _ = prompt_with(past)
+    options = {o.service: o for o in prompt.options}
+    assert "anom-past-1" in options["catalogue-db"].citable_ids
+    assert "anom-past-1" not in options["catalogue"].citable_ids
+    text = prompt.messages[1]["content"]
+    assert "root cause catalogue-db, confirmed by a labelled dependency timeout fault" in text
+    assert "root cause catalogue," not in text
+
+
 def test_a_naive_timestamp_is_read_as_utc_rather_than_breaking_comparisons():
     past = outcome(resolved_at=iso(58).replace("+00:00", ""))
     assert past.known_at.utcoffset() == timedelta(0)
