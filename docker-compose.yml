@@ -630,6 +630,12 @@ services:
       ORCHESTRATOR_URL: http://orchestrator:8090
       DIAGNOSIS_URL: http://diagnosis-service:8000
       LOAD_GENERATOR_URL: http://load-generator:5002
+      # Every detected anomaly, with its cause, fix and resolution, rewritten every
+      # 30 s. Lands in ./results on the host (gitignored) and survives a volume wipe.
+      DATASET_PATH: /data/anomaly_dataset.csv
+      DATASET_INTERVAL_SECONDS: "30"
+    volumes:
+      - ./results:/data
     ports:
       - "5010:5010"
     networks:
