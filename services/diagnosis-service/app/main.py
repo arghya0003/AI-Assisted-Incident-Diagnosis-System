@@ -17,6 +17,7 @@ from app.analyses import config_fingerprint, model_version_for, new_analysis_id,
 from app.db import AnomalyStore, DatabaseUnavailable, PostgresAnomalyStore
 from app.graph import load_graph
 from app.guardrail import GuardrailStats
+from app.history import HistoryStore
 from app.llm import Chat
 from app.models import AnalyzeRequest, AnalyzeResponse, CandidateReport, PipelineMode, StoredAnalysis
 from app.ollama import OllamaClient
@@ -52,6 +53,9 @@ ollama = OllamaClient(settings.ollama_url, timeout_seconds=settings.ollama_timeo
 api_clients = {provider: http_client_for(provider, settings) for provider, _ in set(chat_chain(settings))
                if provider in HTTP_PROVIDERS}
 guardrail_stats = GuardrailStats()
+# The anomaly dataset, for past outcomes in the prompt (app/history.py). Read lazily per request and
+# re-read only when the file changes, so a missing file at startup is not fatal.
+history = HistoryStore(settings.history_path or None)
 CONFIG_FINGERPRINT = config_fingerprint(SERVICE_VERSION, settings, scoring_config, pipeline_config)
 
 
@@ -92,6 +96,7 @@ async def lifespan(_app: FastAPI):
         settings.retrieval_top_k,
         settings.llm_max_attempts,
     )
+    log.info("past outcomes: top_k=%d, dataset %s", pipeline_config.history_top_k, history.status())
     yield
 
 
@@ -121,7 +126,7 @@ def get_chat() -> Chat:
 
 
 def _pipeline(anomalies: AnomalyStore, embed: Embed, chat: Chat) -> DiagnosisPipeline:
-    return DiagnosisPipeline(anomalies, embed, chat, graph, scoring_config, pipeline_config, guardrail_stats)
+    return DiagnosisPipeline(anomalies, embed, chat, graph, scoring_config, pipeline_config, guardrail_stats, history)
 
 
 def _unavailable(anomaly_id: str, exc: DatabaseUnavailable) -> HTTPException:
@@ -174,6 +179,9 @@ def health(anomalies: AnomalyStore = Depends(get_store)) -> dict[str, object]:
         "database": anomalies.status(),
         "corpus_incidents": corpus_incidents,
         "retrieval": "ready" if corpus_incidents else "empty_corpus: run scripts/test_in_docker.sh --ingest",
+        # The anomaly dataset behind past outcomes. Like the corpus, an empty or missing one does
+        # not stop /analyze - the prompt simply has none - so it has to be visible here instead.
+        "history": {"top_k": pipeline_config.history_top_k, **history.status()},
     }
 
 
@@ -223,6 +231,9 @@ def analyze(
         log.error("analysis %s for %s was not stored: %s", analysis.analysis_id, request.anomaly_id, exc)
 
     _describe(response, analysis, cache="miss", persisted=persisted)
+    # Which past outcomes the prompt carried, so an evaluation can tell a run with history from one
+    # without. Not reported on a cache hit, where the stored run does not record it.
+    response.headers["X-Past-Outcomes"] = ",".join(result.past_outcomes)
     log.info(
         "analyze anomaly_id=%s mode=%s answered_by=%s attempts=%d latency_ms=%d hypotheses=%d guardrail_rejected=%d%s",
         request.anomaly_id,
@@ -234,6 +245,8 @@ def analyze(
         analysis.guardrail_rejected,
         f" fallback_reason={result.fallback_reason}" if result.fallback_reason else "",
     )
+    if result.past_outcomes:
+        log.info("analyze anomaly_id=%s past outcomes in the prompt: %s", request.anomaly_id, result.past_outcomes)
     return result.response
 
 

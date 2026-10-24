@@ -19,11 +19,17 @@ from __future__ import annotations
 import decimal
 import logging
 import os
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
+
+import recent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("eval-dashboard")
@@ -59,6 +65,11 @@ GRACE_SECONDS = 90
 # A fault whose recovery was never recorded (injector died mid-run) would
 # otherwise have an open-ended window swallowing every later anomaly.
 MAX_WINDOW_MINUTES = 10
+
+# The anomaly dataset (see recent.py). Under Compose this is bind-mounted to
+# ./results on the host, which is gitignored like every other evaluation output.
+DATASET_PATH = Path(os.environ.get("DATASET_PATH", "results/anomaly_dataset.csv"))
+DATASET_INTERVAL_SECONDS = float(os.environ.get("DATASET_INTERVAL_SECONDS", "30"))
 
 
 def connect():
@@ -401,7 +412,82 @@ def fault_rate():
         return jsonify({"error": f"database query failed: {exc}"}), 502
 
 
+# ------------------------------------------------- tab 0: recent anomalies
+
+def recent_rows(hours: int | None, limit: int | None) -> list[dict]:
+    rows = query(recent.RECENT_SQL, {
+        "hours": hours,
+        "limit": limit,
+        "grace": GRACE_SECONDS,
+        "max_window": MAX_WINDOW_MINUTES,
+    })
+    now = datetime.now(timezone.utc)
+    return [recent.summarise(r, now) for r in rows]
+
+
+@app.get("/api/recent")
+def recent_anomalies():
+    """Every detected anomaly, newest first, with its cause, fix and resolution.
+
+    One row per anomaly rather than per injected fault - the history tab's
+    unit - because the question here is "is anything still wrong, and what
+    happened to what was", and an anomaly nobody injected matters as much to
+    that as one somebody did.
+    """
+    try:
+        rows = recent_rows(int(request.args.get("hours", 24)),
+                           min(int(request.args.get("limit", 100)), 1000))
+    except psycopg2.Error as exc:
+        return jsonify({"error": f"database query failed: {exc}"}), 502
+    return jsonify(rows)
+
+
+_export_lock = threading.Lock()
+
+
+def export_dataset() -> int:
+    """Every anomaly the database still has, merged into the CSV on disk."""
+    with _export_lock:
+        return recent.write_dataset(DATASET_PATH, recent_rows(hours=None, limit=None))
+
+
+@app.get("/api/dataset.csv")
+def dataset_csv():
+    """The dataset as a download, re-exported first so it is never stale."""
+    try:
+        export_dataset()
+    except (psycopg2.Error, OSError) as exc:
+        if not DATASET_PATH.exists():
+            return jsonify({"error": f"could not export the dataset: {exc}"}), 502
+        # The database or the rename failed, but there is a previous export:
+        # serve it rather than nothing, and say why it may be behind.
+        log.warning("serving the last export of %s: %s", DATASET_PATH, exc)
+    return send_file(DATASET_PATH.resolve(), mimetype="text/csv", as_attachment=True,
+                     download_name="anomaly_dataset.csv", max_age=0)
+
+
+def export_forever() -> None:
+    """Keep the CSV current without anyone having to press anything.
+
+    A failed export is logged and retried on the next tick: the database
+    restarting, or Excel holding the file open on Windows, must not kill the
+    thread - this exporter dying silently would be issue #50 all over again.
+    """
+    while True:
+        try:
+            count = export_dataset()
+            log.debug("dataset: %d rows in %s", count, DATASET_PATH)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            log.warning("dataset export failed, retrying in %.0fs: %s",
+                        DATASET_INTERVAL_SECONDS, exc)
+        time.sleep(DATASET_INTERVAL_SECONDS)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5010))
+    if DATASET_INTERVAL_SECONDS > 0:
+        threading.Thread(target=export_forever, name="dataset-export", daemon=True).start()
+        log.info("anomaly dataset at %s, refreshed every %.0fs",
+                 DATASET_PATH.resolve(), DATASET_INTERVAL_SECONDS)
     log.info("dashboard on http://localhost:%d", port)
     app.run(host="0.0.0.0", port=port)

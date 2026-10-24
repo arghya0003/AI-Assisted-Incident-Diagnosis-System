@@ -3,10 +3,11 @@
 One page for the whole loop: inject a labelled fault, decide what to do about the
 diagnosis, read the history of both, and see the rate at which faults are caught.
 
-Four tabs:
+Five tabs:
 
 | Tab | What it does | Where the data comes from |
 | --- | --- | --- |
+| **Recent** (default) | One row per detected anomaly, newest first, refreshed every 15 s: its cause, the diagnosis, the fix a human agreed to, and whether the problem has ended | `anomalies` joined to `fault_scenarios`, `orchestrator_incidents`, `hypotheses`, `audit_log` and, for silent services, `metrics` — see `recent.py` |
 | **Inject a fault** | Pick a fault class, service and duration, set the class's own parameters, fire it | `POST /faults` on the fault injector |
 | **Decisions** | Approve, reject or request more information on an incident awaiting a human | `GET /incidents`, `POST /incidents/{id}/approve\|reject\|request-info` on the orchestrator |
 | **History** | One row per injected fault: when it started, whether anything detected it and how fast, what the ranker blamed, what a human decided | TimescaleDB — `fault_scenarios` joined to `anomalies`, `hypotheses` and `incidents` |
@@ -28,6 +29,37 @@ and `PORT`.
 It also runs in Compose as `eval-dashboard`, which is how everyone else gets it:
 `docker compose up -d` brings it up with the rest of the stack on the same port.
 Run it on the host only when you want to edit it without rebuilding.
+
+## The anomaly dataset
+
+Every anomaly the detector has raised is kept in `results/anomaly_dataset.csv`
+(gitignored), rewritten every 30 seconds from the same rows the Recent tab shows,
+and downloadable from that tab. `DATASET_PATH` and `DATASET_INTERVAL_SECONDS`
+override the location and the interval; an interval of `0` turns the exporter off.
+
+Rows the database no longer has are **kept**, so the dataset survives
+`docker compose down -v`. A kept row keeps its last-known state, and `snapshot_at`
+says when that was. If the file is open in Excel on Windows the rename is refused;
+the export is retried on the next tick.
+
+The columns that answer "was it resolved, and what was the fix":
+
+| Column | Meaning |
+| --- | --- |
+| `cause_source` | `injected_fault` if a labelled fault explains it (same window the evaluation runner scores with), else `unattributed` |
+| `diagnosis_correct` | rank-1 service = injected service; blank when there is no ground truth |
+| `proposed_action` | what the diagnosis proposed |
+| `fix` | the action a human **approved** — empty otherwise. Never executed: the executor is stubbed by design |
+| `fix_status` | how far it got: `approved by X - logged, not executed`, `rejected by X`, `awaiting approval`, `expired without a decision`, … |
+| `resolution` | `resolved`, `ongoing`, `recurred` (same service alerted again within 10 min) or `unknown` |
+| `resolution_basis` | why: the injector withdrew the fault, a silent service reported again, or — said as *inferred* — no further anomaly for 10 min |
+
+Resolved is not "fixed". Nothing here acts on the testbed, so `fix` is what was
+agreed and `resolution_basis` is what actually ended the problem. The 10-minute
+quiet window is five of the detector's 120 s cooldowns: a service that is still
+broken re-alerts as soon as one ends.
+
+Tests: `python -m pytest -q` (no database needed).
 
 ## Two decisions worth knowing
 

@@ -895,3 +895,41 @@ The 4.2 s single-request probe did not survive contact with a run: Gemini's p50 
 `llm_only` call at 110 s. nemotron's worst was 136 s. Both sit uncomfortably close to M4's 150 s
 `DIAGNOSIS_TIMEOUT_SECONDS`, and the tail appears to be free-tier capacity rather than either model,
 since it affects both.
+
+## Past outcomes from the anomaly dataset — 2026-10-24
+
+The `full` and `no_graph` prompts now carry up to `HISTORY_TOP_K` (default 3) **past outcomes**:
+earlier anomalies in this testbed whose cause was later confirmed, read from the eval-dashboard's
+`results/anomaly_dataset.csv` (mounted read-only at `HISTORY_PATH`). Code: `app/history.py`;
+tests: `tests/test_history.py` (24).
+
+**What counts as confirmed.** An injected fault that has ended (the injector's ground truth), a
+human approval (the approved hypothesis's service) or a human rejection (a negative label, shown but
+citable by nobody). Anomalies nobody injected or decided on are skipped: their only label would be
+this service's own earlier answer, and feeding the model its own unchecked guesses as history would
+reinforce whatever it already gets wrong. On 2026-10-24 that left **40 of 2,497 rows** usable.
+
+**Leakage.** A past outcome is used only if its label was known *before the current anomaly's
+onset*, and never the anomaly itself. The dataset holds the answers: while a fault is running its
+first anomaly is already in the file labelled with the injected service, so without this rule a
+later anomaly from the same fault would be handed its own answer and live accuracy would measure
+the label. Similarity is structural (shared services 0.6, metrics 0.3, same detector 0.1), one per
+fault scenario.
+
+**Binding.** A confirmed outcome is citable only by the candidate it names as the root cause, the
+same per-candidate rule as every other id, so validation rejects a hypothesis about A citing a past
+case about B and the guardrail still drops anything never supplied. The id is a real anomaly id, so
+M4's evidence resolver can open it (unless the database volume has since been wiped; the CSV keeps
+rows the database lost).
+
+**What it does not touch.** The deterministic scorer and the `llm_only` ablation never see history,
+so the baseline is unchanged and "does history help the LLM" stays measurable. Past outcomes are the
+first thing dropped when a prompt is over budget. `HISTORY_TOP_K` is part of the config
+fingerprint, so a cached answer never crosses the on/off line, and every fresh `/analyze` reports
+the outcomes it used in an `X-Past-Outcomes` header. `/health` reports the dataset under `history`.
+
+**Not measured yet.** One live run (catalogue `bad_deploy_latency`, Gemini) carried three past
+outcomes, cited one under the right candidate, kept the correct rank-1 and had no guardrail
+rejections. That shows the wiring, not a benefit. Whether history improves accuracy needs the
+live ablation run with `HISTORY_TOP_K=3` against `HISTORY_TOP_K=0`, and the earlier finding that
+the LLM follows the scorer's ranking says not to assume it will.

@@ -113,6 +113,10 @@ class Settings:
     prompt_max_candidates: int
     prompt_min_candidates: int
     pipeline_mode: str
+    # Past outcomes from the anomaly dataset (app/history.py). Defaulted so code that builds
+    # Settings by hand keeps working; an empty path turns history off.
+    history_path: str = ""
+    history_top_k: int = 3
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -188,6 +192,12 @@ class Settings:
             # Default /analyze pipeline mode; a request can override it with ?mode=. The other modes
             # exist for the evaluation's ablations (PLAN.md, Phase 8).
             pipeline_mode=_choice_env("PIPELINE_MODE", "full", ("full", "llm_only", "no_graph", "deterministic")),
+            # The eval-dashboard's CSV of every anomaly and how it ended, mounted read-only. Unset
+            # (the default outside Compose) means no past outcomes in the prompt.
+            history_path=os.environ.get("HISTORY_PATH", ""),
+            # Past outcomes shown to the LLM; 0 turns history off with the path still set, which is
+            # how an ablation compares with and without it.
+            history_top_k=_int_env("HISTORY_TOP_K", 3),
         )
 
 
