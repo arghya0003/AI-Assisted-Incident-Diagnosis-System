@@ -12,9 +12,10 @@ import logging
 import math
 import string
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.history import PastOutcome
 from app.hypotheses import MAX_HYPOTHESES, STALENESS_DETECTOR, CandidateOptions, candidate_options
 from app.models import (
     LIVENESS_METRIC,
@@ -90,13 +91,17 @@ def build_prompt(
     response_reserve_tokens: int,
     max_candidates: int = 5,
     min_candidates: int = 3,
+    history: list[PastOutcome] | None = None,
 ) -> Prompt:
-    """Render the prompt, dropping detail in a fixed order until it fits the budget: deploy config
-    diffs first, then candidates beyond the minimum. Every truncation is logged and recorded on the
-    prompt. (Similar-incident bodies, the plan's first truncation, are never included at all.)"""
+    """Render the prompt, dropping detail in a fixed order until it fits the budget: past outcomes
+    first, then deploy config diffs, then candidates beyond the minimum. Every truncation is logged
+    and recorded on the prompt. (Similar-incident bodies, the plan's first truncation, are never
+    included at all.) Past outcomes go first because they are the newest and least-measured input;
+    everything after them is what the recorded results were produced with."""
     budget = context_tokens - response_reserve_tokens
-    options = {"candidates": max_candidates, "config_diffs": True}
+    options = {"candidates": max_candidates, "config_diffs": True, "history": list(history or [])}
     reductions = [
+        ("dropped past outcomes", {"history": []}),
         ("dropped deploy config diffs", {"config_diffs": False}),
         (f"kept only the top {min_candidates} candidates", {"candidates": min_candidates}),
     ]
@@ -105,6 +110,8 @@ def build_prompt(
     for description, change in reductions:
         if prompt.estimated_tokens <= budget:
             break
+        if "history" in change and not options["history"]:
+            continue  # nothing to drop
         log.warning(
             "prompt for %s is ~%d tokens, over the %d-token budget: %s",
             anomaly.anomaly_id,
@@ -129,20 +136,40 @@ def build_prompt(
     )
 
 
-def render_prompt(anomaly: AnomalyEvent, report: CandidateReport, candidates: int, config_diffs: bool) -> Prompt:
+def render_prompt(
+    anomaly: AnomalyEvent,
+    report: CandidateReport,
+    candidates: int,
+    config_diffs: bool,
+    history: list[PastOutcome] | None = None,
+) -> Prompt:
     evidence = {item.evidence_id: item for item in report.evidence}
     shown = report.candidates[:candidates]
-    options = [candidate_options(report, candidate) for candidate in shown]
+    history = history or []
+    # A confirmed past outcome is citable by the candidate it names as the root cause, and only by
+    # that one - the same per-candidate binding every other id has, so a hypothesis about A cannot
+    # lean on a past case that was about B. A rejection confirms no cause, so nobody cites it.
+    confirmed = {
+        candidate.service: [past.anomaly_id for past in history if past.root_cause == candidate.service]
+        for candidate in shown
+    }
+    options = [
+        dataclasses.replace(option, citable_ids=list(dict.fromkeys(option.citable_ids + confirmed[option.service])))
+        for option in (candidate_options(report, candidate) for candidate in shown)
+    ]
     related = [
         item for item in report.evidence if item.category == "anomaly" and item.source_id != anomaly.anomaly_id
     ]
     user = USER_TEMPLATE.substitute(
         anomaly=_anomaly_block(anomaly, related),
         candidates="\n".join(
-            _candidate_block(rank, candidate, option, evidence, report.anomaly_id, config_diffs)
+            _candidate_block(
+                rank, candidate, option, evidence, report.anomaly_id, config_diffs, confirmed[candidate.service]
+            )
             for rank, (candidate, option) in enumerate(zip(shown, options), start=1)
         ),
         incidents=_incident_block(report.similar_incidents),
+        history=_history_block(history, anomaly.t_onset),
     )
     return Prompt(
         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
@@ -361,6 +388,7 @@ def _candidate_block(
     evidence: dict[str, Evidence],
     anomaly_id: str,
     config_diffs: bool,
+    past_outcomes: list[str] | None = None,
 ) -> str:
     items = [evidence[evidence_id] for evidence_id in candidate.evidence_ids]
     lines = [f"{rank}. {candidate.service} ({candidate.kind}), score {candidate.score:.2f}"]
@@ -390,6 +418,7 @@ def _candidate_block(
         if item.category == "similar_incident"
     ]
     lines.append(f"   similar past incidents with the root cause here: {', '.join(incidents) or 'none'}")
+    lines.append(f"   past outcomes in this system with the root cause here: {', '.join(past_outcomes or []) or 'none'}")
     lines.append(f"   may cite: {', '.join(option.citable_ids)}")
     lines.append(f"   may propose: {', '.join(option.actions)}")
     return "\n".join(lines)
@@ -409,6 +438,43 @@ def _incident_block(incidents: list[SimilarIncident]) -> str:
             f"fault type: {incident.fault_type or 'unknown'}; similarity {incident.similarity:.2f})"
         )
     return "\n".join(lines)
+
+
+def _history_block(history: list[PastOutcome], onset: datetime) -> str:
+    """One line per past outcome: what it looked like, how its cause was confirmed, and what this
+    service concluded at the time - including when that was wrong, which is the most useful thing
+    history can say. Fault types are spelled with spaces: `bad_deploy_latency` would otherwise read
+    as a deploy claim, and a cause mentioning a deploy on a candidate without one fails validation."""
+    if not history:
+        return "none"
+    lines = []
+    for past in history:
+        what = f"{', '.join(past.metrics)} on {', '.join(past.services)}, {_age(onset - past.t_onset)} earlier"
+        if past.label == "rejected":
+            verdict = f"an operator rejected the diagnosis of {past.diagnosed}"
+            if past.reason:
+                verdict += f" ({_truncate(past.reason, 80)})"
+        else:
+            how = (
+                f"a labelled {past.fault_type.replace('_', ' ')} fault"
+                if past.label == "injected"
+                else "an operator's approval"
+            )
+            verdict = f"root cause {past.root_cause}, confirmed by {how}"
+            if past.diagnosed:
+                verdict += f"; this service had blamed {past.diagnosed}"
+                if past.diagnosis_correct:
+                    verdict += " (correct)" if past.diagnosis_correct == "yes" else " (wrong)"
+        lines.append(f"{past.anomaly_id}: {what}; {verdict} (similarity {past.similarity:.2f})")
+    return "\n".join(lines)
+
+
+def _age(delta: timedelta) -> str:
+    minutes = delta.total_seconds() / 60
+    if minutes < 120:
+        return f"{minutes:.0f} min"
+    hours = minutes / 60
+    return f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.0f} d"
 
 
 def _truncate(text: str, limit: int) -> str:
