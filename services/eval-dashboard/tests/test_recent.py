@@ -210,3 +210,60 @@ def test_dataset_header_is_the_column_list_and_no_temp_file_is_left(tmp_path):
     recent.write_dataset(path, [])
     assert path.read_text(encoding="utf-8").splitlines()[0] == ",".join(recent.COLUMNS)
     assert not (tmp_path / "anomaly_dataset.csv.tmp").exists()
+
+
+# ------------------------------------- the dependency-shaped faults (#45, item 1)
+
+DEPENDENCY = {"scenario_id": "sc-dep", "fault_type": "dependency_timeout",
+              "ground_truth_service": "catalogue", "t_inject": ago(30.5),
+              "fault_params": {"dependency": "catalogue-db", "duration_s": 90}}
+
+
+def test_root_cause_is_the_dependency_when_one_was_broken():
+    assert recent.root_cause_service(anomaly(**DEPENDENCY)) == "catalogue-db"
+
+
+def test_root_cause_is_the_service_itself_for_an_ordinary_fault():
+    assert recent.root_cause_service(anomaly(**INJECTED)) == "catalogue"
+
+
+def test_a_dependency_equal_to_the_service_does_not_change_the_target():
+    row = anomaly(**{**DEPENDENCY, "fault_params": {"dependency": "catalogue"}})
+    assert recent.root_cause_service(row) == "catalogue"
+
+
+def test_naming_the_broken_dependency_is_correct():
+    """The whole point: pausing catalogue-db is recorded as a `catalogue` fault,
+    so scoring against ground_truth_service marks the right answer wrong."""
+    row = anomaly(**DEPENDENCY, incident_hypotheses=[
+        {"rank": 1, "service": "catalogue-db", "cause": "frozen dependency",
+         "confidence": 0.8, "proposed_action": "no_action"}],
+        decision="approved", decided_hypothesis_rank=1)
+    out = recent.summarise(row, NOW)
+    assert out["diagnosis_correct"] == "yes"
+
+
+def test_naming_only_the_symptom_is_not_correct():
+    row = anomaly(**DEPENDENCY, incident_hypotheses=[
+        {"rank": 1, "service": "catalogue", "cause": "slow",
+         "confidence": 0.8, "proposed_action": "no_action"}],
+        decision="approved", decided_hypothesis_rank=1)
+    assert recent.summarise(row, NOW)["diagnosis_correct"] == "no"
+
+
+def test_both_services_are_recorded_so_the_verdict_is_explicable():
+    """A reader seeing ground_truth_service=catalogue next to
+    diagnosed_service=catalogue-db and diagnosis_correct=yes would otherwise
+    think the column contradicted the verdict."""
+    row = anomaly(**DEPENDENCY, incident_hypotheses=[
+        {"rank": 1, "service": "catalogue-db", "cause": "frozen",
+         "confidence": 0.8, "proposed_action": "no_action"}],
+        decision="approved", decided_hypothesis_rank=1)
+    out = recent.summarise(row, NOW)
+    assert out["ground_truth_service"] == "catalogue"
+    assert out["root_cause_service"] == "catalogue-db"
+
+
+def test_an_ordinary_fault_records_the_same_service_in_both_columns():
+    out = recent.summarise(anomaly(**INJECTED), NOW)
+    assert out["ground_truth_service"] == out["root_cause_service"] == "catalogue"

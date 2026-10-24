@@ -47,7 +47,11 @@ METRICS_RETENTION_HOURS = 24
 # rows already on disk are rewritten into the new shape on the next export.
 COLUMNS = [
     "anomaly_id", "t_detected", "t_onset", "detector", "services", "metrics", "severity",
-    "cause_source", "scenario_id", "fault_type", "ground_truth_service", "t_inject",
+    "cause_source", "scenario_id", "fault_type", "ground_truth_service",
+    # The service a diagnosis should name. The same as ground_truth_service
+    # except for dependency_timeout and config_error, where the injector breaks
+    # a dependency and ground_truth_service is the service that visibly fails.
+    "root_cause_service", "t_inject",
     "detect_seconds",
     "diagnosed_service", "diagnosed_cause", "confidence", "diagnosis_correct",
     "proposed_action", "answered_by", "model_version",
@@ -65,7 +69,7 @@ RECENT_SQL = """
 SELECT
     a.anomaly_id, a.detector, a.services, a.metrics, a.severity, a.t_onset, a.t_detected,
     s.scenario_id, s.fault_type, s.ground_truth_service, s.t_inject, s.t_recovered,
-    s.status AS fault_status,
+    s.status AS fault_status, s.params AS fault_params,
     oi.incident_id, oi.state AS incident_state, oi.decision, oi.decided_by, oi.decided_at,
     oi.decision_reason, oi.decided_hypothesis_rank, oi.hypotheses AS incident_hypotheses,
     oi.answered_by AS incident_answered_by, oi.model_version AS incident_model_version,
@@ -78,7 +82,7 @@ SELECT
 FROM anomalies a
 LEFT JOIN LATERAL (
     SELECT s.scenario_id, s.fault_type, s.ground_truth_service, s.t_inject,
-           s.t_recovered, s.status
+           s.t_recovered, s.status, s.params
     FROM fault_scenarios s
     WHERE s.ground_truth_service = ANY(a.services)
       AND a.t_detected BETWEEN s.t_inject AND
@@ -258,13 +262,43 @@ def _iso(value) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else ("" if value is None else str(value))
 
 
+def root_cause_service(row: dict) -> str | None:
+    """The service a diagnosis should name, which is not always the one that degrades.
+
+    `dependency_timeout` and `config_error` break a *dependency* and record
+    `ground_truth_service` as the service that visibly fails, so pausing
+    `catalogue-db` is recorded as a `catalogue` fault. Scoring a diagnosis
+    against `ground_truth_service` would mark the correct answer wrong and the
+    symptom right.
+
+    Detection is unaffected - the detector is supposed to see `catalogue`
+    degrade, and `catalogue-db` emits no request-level telemetry to detect
+    anything on. Only the correctness verdict moves. `attribution.py` makes the
+    same split (`Scenario.root_cause_service`), as does
+    diagnosis-service/scripts/eval_live.py since #44; this is the third place
+    the rule is needed, and the first where getting it wrong reaches the model.
+    """
+    truth = row.get("ground_truth_service")
+    params = row.get("fault_params") or {}
+    dependency = params.get("dependency") if isinstance(params, dict) else None
+    if dependency and dependency != truth:
+        return dependency
+    return truth
+
+
 def summarise(row: dict, now: datetime) -> dict:
     """One raw query row -> one dataset row, every value a string."""
     diag = diagnosis(row)
     status, resolved_at, basis = resolution(row, now)
     fix_action, fix_status = fix(row, diag)
 
-    truth = row.get("ground_truth_service")
+    # The service that visibly degraded, and the one a diagnosis should name.
+    # They differ only for the dependency-shaped faults, and both are recorded:
+    # a reader seeing ground_truth_service=catalogue, diagnosed_service=
+    # catalogue-db and diagnosis_correct=yes would otherwise think the column
+    # contradicted the verdict.
+    symptom = row.get("ground_truth_service")
+    truth = root_cause_service(row)
     correct = "" if not truth or not diag.get("service") else ("yes" if diag["service"] == truth else "no")
     detect = ""
     if row.get("t_inject"):
@@ -282,7 +316,8 @@ def summarise(row: dict, now: datetime) -> dict:
         "cause_source": "injected_fault" if row.get("scenario_id") else "unattributed",
         "scenario_id": row.get("scenario_id") or "",
         "fault_type": row.get("fault_type") or "",
-        "ground_truth_service": truth or "",
+        "ground_truth_service": symptom or "",
+        "root_cause_service": truth or "",
         "t_inject": _iso(row.get("t_inject")),
         "detect_seconds": detect,
         "diagnosed_service": diag.get("service") or "",
