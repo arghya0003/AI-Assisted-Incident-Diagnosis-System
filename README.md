@@ -374,16 +374,17 @@ most useful thing the harness has produced.
 63.0 minutes of quiet observation, testbed reset first, no machine sleep in the window —
 the three conditions that invalidated every earlier attempt). Target is under 1/hour.
 
-**It was 5.72/hour three days earlier**, and the difference is worth more than the number.
-That measurement was honest: 6 alerts in 63 quiet minutes, of which four were `orders`
-reporting a genuine degradation — p95 climbing 41ms to 105ms and holding for half an hour.
-Both readings were correct for the build they ran on. Two fixes landed between them, and
-neither was a change to the detector:
+**It was 5.72/hour three days earlier, and that gap is only partly explained.** That
+measurement was honest: 6 alerts in 63 quiet minutes, of which four were `orders` reporting
+a genuine degradation — p95 climbing 41ms to 105ms and holding for half an hour. Neither
+explanation below is a change to the detector, and the first does not account for those
+four alerts:
 
-- The load generator's pruner now bounds the order history, so `orders` no longer degrades
-  on its own (#33, #39). Measured over two hours with the count held at ~52 documents,
-  `orders` p95 stayed flat at 42-52ms with no alerts, where the earlier cycle repeated
-  roughly every half hour. The 2026-10-02 measurement predates that pruner.
+- **The cause of the 2026-10-02 `orders` degradation is not established.** The load
+  generator's pruner (#33, #39) had merged the day before and was already running, so an
+  unbounded order history does not explain that window. A separate two-hour run with the
+  count held at ~52 documents kept `orders` p95 flat at 42-52ms with no alerts. That shows
+  `orders` can stay flat; it does not show why it failed to on 2026-10-02.
 - The detector stopped alerting on the testbed's own instrumentation. M1 added
   `orders-db`'s `document_count` and `prune_rate` as metrics and added both to the
   detector's ignore list in the same commit — but only half of that commit was running,
@@ -394,13 +395,24 @@ The second one is the more useful lesson, and it is recorded here rather than qu
 fixed: a merged change that is not in the running image fails in a way that looks like a
 different bug entirely. Three separate defects during this evaluation had that same cause.
 
+**How far these numbers go.** 0.95/hour is one window containing one alert, so it passes
+narrowly: a second alert in the same window would have been 1.90/hour. The plan's five
+metrics have also never been measured together. Detection latency (27.6 s) comes from the
+11-scenario suite of 2026-10-02, which reports the three ranker metrics as not measured.
+Top-3 100%, MRR 1.00 and evidence validity 100% come from an earlier `attribute` report the
+same day over 16 scenarios, on the deterministic ranker rather than the LLM, and top-1 falls
+to 94% once cascades are included. `attribute` has not been run on the window with all six
+fault classes. Quote each figure with its own run, not as one combined result.
+
 ### Not done yet
-- ~~The false-positive rate is uncharacterised.~~ Measured at **0.95/hour** over a clean
-  63-minute window (2026-10-05); see above for why the earlier 5.72/hour reading was equally
-  honest on the build it ran on.
-- ~~The testbed degrades on its own.~~ `orders` latency tracked the order history the load
-  generator never pruned; bounding it (#33, #39) removed the degradation, and two hours at a
-  held document count showed p95 flat at 42-52ms. What remains unexplained is the recovery
+- ~~The false-positive rate is uncharacterised.~~ Measured at **0.95/hour** over one
+  63-minute window (2026-10-05). The earlier 5.72/hour reading was also honest, and the
+  degradation behind it is still unexplained; see above.
+- **The testbed may still degrade on its own.** `orders` latency tracked the order history
+  while the load generator never pruned it, and two hours at a held document count showed
+  p95 flat at 42-52ms after bounding it (#33, #39). But `orders` degraded again on
+  2026-10-02 with the pruner running, so bounding the history did not settle this. Also
+  unexplained is the recovery
   in the original observation: with nothing pruning, the count only grew, so latency
   returning to 48ms unaided does not fit a pure count-drives-latency model. It is the
   natural experiment
