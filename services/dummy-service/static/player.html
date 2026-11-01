@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamBox</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #101317; --panel: #1a1f26; --ink: #f1f3f6; --muted: #98a2b0;
+    --good: #4ec16f; --warn: #e0a53e; --bad: #e8766c; --accent: #6aa6ec;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 18px; }
+  .screen { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden;
+            background: linear-gradient(135deg, #24405f, #3d2a55 60%, #5b3145);
+            display: grid; place-items: center; }
+  .screen.stalled { filter: grayscale(.8) brightness(.55); }
+  .label { font-size: 26px; font-weight: 600; }
+  .bar { height: 6px; margin-top: 12px; border-radius: 3px; background: var(--panel); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .stats { display: flex; flex-wrap: wrap; gap: 24px; margin-top: 16px; }
+  .stats b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stats span { color: var(--muted); font-size: 13px; }
+  .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>StreamBox</h1>
+  <p>A dummy streaming site for testing anomaly detection. There is no real video: each second of
+     playback is one segment request through the site's services.</p>
+  <div class="screen" id="screen"><div class="label" id="label">Starting...</div></div>
+  <div class="bar"><i id="progress"></i></div>
+  <div class="stats">
+    <div><b id="state">-</b><span>Player</span></div>
+    <div><b id="quality">-</b><span>Quality</span></div>
+    <div><b id="latency">-</b><span>Segment time</span></div>
+    <div><b id="rebuffers">0</b><span>Rebuffers</span></div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const SLOW_MS = 150, STALL_MS = 1000;
+let played = 0, rebuffers = 0, stalled = false;
+
+function show(state, cls, quality, label) {
+  $("state").textContent = state;
+  $("state").className = cls;
+  $("quality").textContent = quality;
+  $("label").textContent = label;
+  $("screen").classList.toggle("stalled", cls === "bad");
+}
+
+async function fetchSegment() {
+  const started = performance.now();
+  let ok = false;
+  try { ok = (await fetch("/work", { cache: "no-store" })).ok; } catch { ok = false; }
+  const ms = performance.now() - started;
+  $("latency").textContent = Math.round(ms) + " ms";
+
+  const stall = !ok || ms > STALL_MS;
+  if (stall && !stalled) { rebuffers += 1; $("rebuffers").textContent = rebuffers; }
+  stalled = stall;
+
+  if (!ok) show("Playback error", "bad", "-", "Playback error");
+  else if (ms > STALL_MS) show("Buffering", "bad", "240p", "Buffering...");
+  else if (ms > SLOW_MS) { show("Playing", "warn", "480p", "Now playing"); played += 1; }
+  else { show("Playing", "good", "1080p", "Now playing"); played += 1; }
+  $("progress").style.width = (played % 120) / 1.2 + "%";
+  setTimeout(fetchSegment, 1000);
+}
+fetchSegment();
+</script>
+</body>
+</html>
