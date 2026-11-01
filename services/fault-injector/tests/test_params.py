@@ -23,6 +23,26 @@ def test_unknown_fault_type_or_service_is_rejected(fault_type, service):
         build_params(fault_type, service, {})
 
 
+def test_a_dependency_fault_on_the_streaming_site_defaults_to_its_next_hop():
+    assert build_params("dependency_timeout", "stream-web", {})["dependency"] == "stream-playback"
+    assert build_params("config_error", "stream-playback", {})["dependency"] == "stream-cache"
+
+
+def test_a_dependency_fault_on_the_cicd_site_defaults_to_its_next_hop():
+    assert build_params("dependency_timeout", "ci-scheduler", {})["dependency"] == "ci-runner"
+
+
+@pytest.mark.parametrize("leaf", ["stream-storage", "stream-catalog", "ci-runner", "ci-deployer"])
+def test_a_leaf_service_has_no_dependency_to_fault(leaf):
+    with pytest.raises(ValueError):
+        build_params("dependency_timeout", leaf, {})
+
+
+def test_db_pool_saturation_stays_catalogue_only():
+    with pytest.raises(ValueError):
+        build_params("db_pool_saturation", "stream-storage", {})
+
+
 def test_duration_is_capped():
     assert build_params("service_crash", "payment", {"duration_s": 9999})["duration_s"] == MAX_DURATION_SECONDS
 

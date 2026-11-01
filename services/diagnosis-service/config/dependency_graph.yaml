@@ -20,6 +20,17 @@ nodes:
   user-db: datastore        # Mongo
   rabbitmq: broker
   queue-master: service
+  stream-web: service       # dummy streaming site, no edge to Sock Shop
+  stream-catalog: service
+  stream-playback: service
+  stream-cache: service
+  stream-storage: service
+  ci-web: service           # dummy CI/CD site, no edge to Sock Shop
+  ci-pipeline: service
+  ci-scheduler: service
+  ci-runner: service
+  ci-artifacts: service
+  ci-deployer: service
 
 edges:
   - [edge-router, front-end]
@@ -36,3 +47,12 @@ edges:
   - [user, user-db]
   - [shipping, rabbitmq]
   - [queue-master, rabbitmq]
+  - [stream-web, stream-catalog]
+  - [stream-web, stream-playback]
+  - [stream-playback, stream-cache]
+  - [stream-cache, stream-storage]
+  - [ci-web, ci-pipeline]
+  - [ci-pipeline, ci-scheduler]
+  - [ci-pipeline, ci-artifacts]
+  - [ci-scheduler, ci-runner]
+  - [ci-artifacts, ci-deployer]

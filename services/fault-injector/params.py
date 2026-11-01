@@ -11,7 +11,11 @@ from __future__ import annotations
 
 MAX_DURATION_SECONDS = 300  # safety cap - a forgotten fault can't run forever
 
-KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
+KNOWN_SERVICES = [
+    "front-end", "catalogue", "payment", "user", "carts", "orders", "shipping",
+    "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
+]
 
 FAULT_TYPES = {
     "bad_deploy_latency",
@@ -39,6 +43,17 @@ DEPENDENCIES = {
     "front-end": "carts",
     "shipping": "rabbitmq",
     "payment": None,
+    "stream-web": "stream-playback",
+    "stream-catalog": None,
+    "stream-playback": "stream-cache",
+    "stream-cache": "stream-storage",
+    "stream-storage": None,
+    "ci-web": "ci-pipeline",
+    "ci-pipeline": "ci-scheduler",
+    "ci-scheduler": "ci-runner",
+    "ci-runner": None,
+    "ci-artifacts": "ci-deployer",
+    "ci-deployer": None,
 }
 
 # Everything a dependency fault may be applied to: the testbed and nothing

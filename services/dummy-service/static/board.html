@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BuildBoard</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #101317; --panel: #1a1f26; --ink: #f1f3f6; --muted: #98a2b0;
+    --good: #4ec16f; --warn: #e0a53e; --bad: #e8766c; --accent: #6aa6ec;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 18px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 24px; margin-bottom: 18px; }
+  .stats b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stats span { color: var(--muted); font-size: 13px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-bottom: 6px;
+       border-radius: 6px; background: var(--panel); font-variant-numeric: tabular-nums; }
+  .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .running { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>BuildBoard</h1>
+  <p>A dummy CI/CD site for testing anomaly detection. No code is built: each commit is one request
+     through the site's services.</p>
+  <div class="stats">
+    <div><b id="pipeline">-</b><span>Pipeline</span></div>
+    <div><b id="running">0</b><span>Running</span></div>
+    <div><b id="passed">0</b><span>Passed</span></div>
+    <div><b id="failed">0</b><span>Failed</span></div>
+    <div><b id="latency">-</b><span>Last build time</span></div>
+  </div>
+  <ul id="builds"></ul>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const SLOW_MS = 400, STALLED_MS = 1500, SHOWN = 8;
+let number = 0, running = 0, passed = 0, failed = 0;
+const builds = [];
+
+function render() {
+  $("running").textContent = running;
+  $("passed").textContent = passed;
+  $("failed").textContent = failed;
+  $("builds").replaceChildren(...builds.slice(0, SHOWN).map((build) => {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    const state = document.createElement("span");
+    name.textContent = "Build #" + build.number;
+    state.textContent = build.state + (build.ms === null ? "" : " · " + build.ms + " ms");
+    state.className = build.cls;
+    row.append(name, state);
+    return row;
+  }));
+}
+
+function showPipeline(text, cls) {
+  $("pipeline").textContent = text;
+  $("pipeline").className = cls;
+}
+
+async function runBuild() {
+  const build = { number: ++number, state: "Running", cls: "running", ms: null };
+  builds.unshift(build);
+  running += 1;
+  render();
+
+  const started = performance.now();
+  let ok = false;
+  try { ok = (await fetch("/work", { cache: "no-store" })).ok; } catch { ok = false; }
+  build.ms = Math.round(performance.now() - started);
+  running -= 1;
+  $("latency").textContent = build.ms + " ms";
+
+  if (!ok) {
+    failed += 1;
+    Object.assign(build, { state: "Failed", cls: "bad" });
+    showPipeline("Failing", "bad");
+  } else {
+    passed += 1;
+    Object.assign(build, { state: "Passed", cls: build.ms > SLOW_MS ? "warn" : "good" });
+    if (build.ms > STALLED_MS) showPipeline("Queue backing up", "bad");
+    else if (build.ms > SLOW_MS) showPipeline("Slow", "warn");
+    else showPipeline("Healthy", "good");
+  }
+  render();
+}
+
+setInterval(runBuild, 1000);
+runBuild();
+</script>
+</body>
+</html>

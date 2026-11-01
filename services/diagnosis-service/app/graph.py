@@ -4,7 +4,7 @@ Edges point from caller to callee. Walking them forward (downstream) gives root-
 candidates: front-end looking slow is usually something it calls being slow. Walking them
 backward (upstream) gives blast radius: who is affected, and which other anomalies are likely
 symptoms of the same cause. Plain dicts and breadth-first search; a graph library is not
-warranted for 14 nodes.
+warranted for a graph this small.
 """
 
 from collections import deque

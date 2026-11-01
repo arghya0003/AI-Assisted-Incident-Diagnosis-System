@@ -47,7 +47,22 @@ scrape_configs:
     static_configs:
       - targets:
           - stream-web:8080
+          - stream-catalog:8080
           - stream-playback:8080
+          - stream-cache:8080
           - stream-storage:8080
+        labels:
+          project: incident-diagnosis-system
+
+  - job_name: cicd-site
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - ci-web:8080
+          - ci-pipeline:8080
+          - ci-scheduler:8080
+          - ci-runner:8080
+          - ci-artifacts:8080
+          - ci-deployer:8080
         labels:
           project: incident-diagnosis-system
