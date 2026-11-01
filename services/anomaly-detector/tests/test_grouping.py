@@ -54,6 +54,27 @@ def test_one_fault_across_many_services_becomes_a_single_event():
     assert len(event["contributors"]) == 6
 
 
+def test_a_dummy_site_alert_does_not_merge_with_sock_shop():
+    """The 2026-11-01 merge: two sites alerting at once are two incidents."""
+    grouper = AnomalyGrouper(group_delay_seconds=15)
+    grouper.add(signal("stream-web", "latency_p95_ms", seconds=0))
+    grouper.add(signal("orders", "latency_p95_ms", seconds=3))
+    grouper.add(signal("stream-storage", "liveness", seconds=5))
+
+    events = grouper.flush(at(20))
+
+    assert [e["services"] for e in events] == [["stream-storage", "stream-web"], ["orders"]]
+
+
+def test_each_site_keeps_its_own_grouping_delay():
+    grouper = AnomalyGrouper(group_delay_seconds=15)
+    grouper.add(signal("stream-web", "latency_p95_ms", seconds=0))
+    grouper.add(signal("orders", "latency_p95_ms", seconds=10))
+
+    assert [e["services"] for e in grouper.flush(at(16))] == [["stream-web"]]
+    assert [e["services"] for e in grouper.flush(at(26))] == [["orders"]]
+
+
 def test_nothing_is_emitted_before_the_grouping_delay_elapses():
     grouper = AnomalyGrouper(group_delay_seconds=15)
     grouper.add(signal("catalogue", "latency_p95_ms", seconds=0))

@@ -25,7 +25,13 @@
 
 $script:InciRoot = Split-Path -Parent $PSScriptRoot
 
+# The dummy sites only exist to Compose when the second file is included, so
+# anything that may touch them has to pass both.
+$script:InciCompose = @("-f", "docker-compose.yml", "-f", "docker-compose.sites.yml")
+
 $script:InciUrls = [ordered]@{
+    stream     = @{ Url = "http://localhost:8100"; What = "StreamBox - dummy streaming site"; Start = "InciStreamUp" }
+    cicd       = @{ Url = "http://localhost:8101"; What = "BuildBoard - dummy CI/CD site"; Start = "InciCIUp" }
     console    = @{ Url = "http://localhost:5010"; What = "Incident Console - inject, decide, review, measure" }
     shop       = @{ Url = "http://localhost";      What = "Sock Shop - the application under test" }
     approval   = @{ Url = "http://localhost:3000"; What = "Approval console (M4) - the HITL workflow" }
@@ -42,7 +48,8 @@ function script:Open-InciUrl($key) {
     } catch {
         # Say so rather than opening a tab onto a connection error, which is
         # the worst thing to discover with someone watching.
-        Write-Host ("  {0} is not responding. Run InciUp first." -f $entry.Url) -ForegroundColor Yellow
+        $start = if ($entry.Start) { $entry.Start } else { "InciUp" }
+        Write-Host ("  {0} is not responding. Run {1} first." -f $entry.Url, $start) -ForegroundColor Yellow
     }
     Start-Process $entry.Url
 }
@@ -54,6 +61,8 @@ function SockShopWeb  { Open-InciUrl shop }
 function InciApproval { Open-InciUrl approval }
 function InciMetrics  { Open-InciUrl metrics }
 function InciDocs     { Open-InciUrl diagnosis; Open-InciUrl orch }
+function InciStream   { Open-InciUrl stream }
+function InciCI       { Open-InciUrl cicd }
 
 <#  Everything a demo needs, in the order you would show it.  #>
 function InciDemo {
@@ -81,14 +90,28 @@ function InciUp {
     } finally { Pop-Location }
 }
 
+function script:Start-InciSite($site, $key) {
+    Push-Location $script:InciRoot
+    try {
+        Write-Host "Building and starting the site..." -ForegroundColor Cyan
+        docker compose @script:InciCompose --profile $site up -d --build
+        Write-Host ("  {0}" -f $script:InciUrls[$key].Url) -ForegroundColor Green
+        Write-Host "  It needs a few minutes of traffic before the detector has a baseline." -ForegroundColor DarkGray
+    } finally { Pop-Location }
+}
+
+function InciStreamUp { Start-InciSite streaming stream }
+function InciCIUp     { Start-InciSite cicd cicd }
+
 function InciDown {
     Push-Location $script:InciRoot
-    try { docker compose down } finally { Pop-Location }
+    # Named profiles too, or the sites keep running and hold the network open.
+    try { docker compose @script:InciCompose --profile streaming --profile cicd down } finally { Pop-Location }
 }
 
 function InciLogs($service = "eval-dashboard") {
     Push-Location $script:InciRoot
-    try { docker compose logs -f --tail 50 $service } finally { Pop-Location }
+    try { docker compose @script:InciCompose logs -f --tail 50 $service } finally { Pop-Location }
 }
 
 # ----------------------------------------------------------------- the checks
@@ -170,10 +193,14 @@ function InciHelp {
     Write-Host "    InciApproval   the approval console"
     Write-Host "    InciMetrics    Prometheus"
     Write-Host "    InciDemo       every demo tab, in presenting order"
+    Write-Host "    InciStream     StreamBox, the dummy streaming site"
+    Write-Host "    InciCI         BuildBoard, the dummy CI/CD site"
     Write-Host ""
     Write-Host "  Stack" -ForegroundColor Cyan
     Write-Host "    InciUp         build, start, and report what is wrong"
-    Write-Host "    InciDown       stop everything"
+    Write-Host "    InciStreamUp   build and start StreamBox"
+    Write-Host "    InciCIUp       build and start BuildBoard"
+    Write-Host "    InciDown       stop everything, including the sites"
     Write-Host "    InciStatus     traffic, kafka consumer, console backends, API key"
     Write-Host "    InciLogs <svc> follow one service's logs"
     Write-Host ""

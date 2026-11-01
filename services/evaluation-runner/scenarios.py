@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 # fail in a unit test, not 20 minutes into a live run.
 KNOWN_SERVICES = frozenset({
     "front-end", "catalogue", "payment", "user", "carts", "orders", "shipping",
+    "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
 })
 
 # The injector's own safety cap (MAX_DURATION_SECONDS). A longer duration is

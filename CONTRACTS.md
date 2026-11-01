@@ -310,6 +310,17 @@ edge-router (Traefik, single entrypoint)
 shipping -> rabbitmq <- queue-master   (async fan-out, separate from the REST chain above)
 ```
 
+The dummy test sites sit in the same graph as separate components, with no edge to Sock
+Shop. Their edges come from `DOWNSTREAM` in `docker-compose.sites.yml`.
+
+```
+stream-web -> stream-catalog
+           -> stream-playback -> stream-cache -> stream-storage
+
+ci-web -> ci-pipeline -> ci-scheduler -> ci-runner
+                      -> ci-artifacts -> ci-deployer
+```
+
 ## Open questions for the team (resolve before Week 3)
 
 - [ ] Confirm topic partitioning/retention on `metrics.raw` — **implemented** as proposed

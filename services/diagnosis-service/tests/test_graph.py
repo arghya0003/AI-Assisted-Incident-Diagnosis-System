@@ -25,12 +25,37 @@ CONTRACT_EDGES = {
     ("user", "user-db"),
     ("shipping", "rabbitmq"),
     ("queue-master", "rabbitmq"),
+    ("stream-web", "stream-catalog"),
+    ("stream-web", "stream-playback"),
+    ("stream-playback", "stream-cache"),
+    ("stream-cache", "stream-storage"),
+    ("ci-web", "ci-pipeline"),
+    ("ci-pipeline", "ci-scheduler"),
+    ("ci-pipeline", "ci-artifacts"),
+    ("ci-scheduler", "ci-runner"),
+    ("ci-artifacts", "ci-deployer"),
 }
 
 
 def test_yaml_matches_the_contract():
     assert GRAPH.edges == CONTRACT_EDGES
     assert GRAPH.nodes == {node for edge in CONTRACT_EDGES for node in edge}
+
+
+def test_the_dummy_sites_never_reach_sock_shop_or_each_other():
+    assert set(GRAPH.downstream("stream-web")) == {
+        "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    }
+    assert set(GRAPH.downstream("ci-web")) == {
+        "ci-pipeline", "ci-scheduler", "ci-artifacts", "ci-runner", "ci-deployer",
+    }
+
+
+def test_every_service_on_a_site_is_within_the_default_hop_limit_of_its_entry():
+    """Candidates come from a bounded walk, so a deeper site would lose its leaf."""
+    assert GRAPH.distance("stream-web", "stream-storage") == 3
+    assert GRAPH.distance("ci-web", "ci-runner") == 3
+    assert GRAPH.distance("ci-web", "ci-deployer") == 3
 
 
 # ------------------------------------------------- definition of done (PLAN.md)

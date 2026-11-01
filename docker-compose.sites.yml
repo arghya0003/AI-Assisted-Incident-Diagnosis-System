@@ -1,9 +1,13 @@
 # Dummy sites: small test targets for trying the detector and the diagnosis
-# layer on something they were not tuned on. Off by default, one site at a time:
+# layer on something they were not tuned on. Off by default:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.sites.yml --profile streaming up -d
+#   docker compose -f docker-compose.yml -f docker-compose.sites.yml --profile cicd up -d
 #
 # Every service is the same image; the environment decides its part.
+#
+# BALLAST_MB keeps each service above the injector's lowest memory cap, and
+# ci-runner's SLOTS is what lets a slow runner back up the queue behind it.
 
 x-dummy: &dummy
   build: services/dummy-service
@@ -13,19 +17,27 @@ x-dummy: &dummy
     - diagnosis-net
 
 services:
-  metrics-bridge:
-    environment:
-      SERVICE_JOBS: sock-shop-services,streaming-site
-
+  # ------------------------------------------------------- StreamBox
   stream-web:
     <<: *dummy
     profiles: [streaming]
     hostname: stream-web
     environment:
       SERVICE_NAME: stream-web
-      DOWNSTREAM: stream-playback:8080
+      DOWNSTREAM: stream-catalog:8080,stream-playback:8080
+      BALLAST_MB: "64"
     ports:
       - "8100:8080"
+
+  stream-catalog:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-catalog
+    environment:
+      SERVICE_NAME: stream-catalog
+      LATENCY_MS: "8"
+      JITTER_MS: "4"
+      BALLAST_MB: "64"
 
   stream-playback:
     <<: *dummy
@@ -33,7 +45,19 @@ services:
     hostname: stream-playback
     environment:
       SERVICE_NAME: stream-playback
+      DOWNSTREAM: stream-cache:8080
+      BALLAST_MB: "64"
+
+  stream-cache:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-cache
+    environment:
+      SERVICE_NAME: stream-cache
       DOWNSTREAM: stream-storage:8080
+      LATENCY_MS: "2"
+      JITTER_MS: "1"
+      BALLAST_MB: "64"
 
   stream-storage:
     <<: *dummy
@@ -43,6 +67,7 @@ services:
       SERVICE_NAME: stream-storage
       LATENCY_MS: "15"
       JITTER_MS: "10"
+      BALLAST_MB: "64"
 
   stream-traffic:
     <<: *dummy
@@ -51,4 +76,76 @@ services:
     command: ["python", "traffic.py"]
     environment:
       TARGET_URL: http://stream-web:8080/work
+      RPS: "5"
+
+  # ------------------------------------------------------- BuildBoard
+  ci-web:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-web
+    environment:
+      SERVICE_NAME: ci-web
+      DOWNSTREAM: ci-pipeline:8080
+      PAGE: board.html
+      BALLAST_MB: "64"
+    ports:
+      - "8101:8080"
+
+  ci-pipeline:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-pipeline
+    environment:
+      SERVICE_NAME: ci-pipeline
+      DOWNSTREAM: ci-scheduler:8080,ci-artifacts:8080
+      BALLAST_MB: "64"
+
+  ci-scheduler:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-scheduler
+    environment:
+      SERVICE_NAME: ci-scheduler
+      DOWNSTREAM: ci-runner:8080
+      BALLAST_MB: "64"
+
+  ci-runner:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-runner
+    environment:
+      SERVICE_NAME: ci-runner
+      LATENCY_MS: "60"
+      JITTER_MS: "30"
+      SLOTS: "2"
+      BALLAST_MB: "64"
+
+  ci-artifacts:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-artifacts
+    environment:
+      SERVICE_NAME: ci-artifacts
+      DOWNSTREAM: ci-deployer:8080
+      LATENCY_MS: "12"
+      JITTER_MS: "6"
+      BALLAST_MB: "64"
+
+  ci-deployer:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-deployer
+    environment:
+      SERVICE_NAME: ci-deployer
+      LATENCY_MS: "20"
+      JITTER_MS: "10"
+      BALLAST_MB: "64"
+
+  ci-traffic:
+    <<: *dummy
+    profiles: [cicd]
+    hostname: ci-traffic
+    command: ["python", "traffic.py"]
+    environment:
+      TARGET_URL: http://ci-web:8080/work
       RPS: "5"

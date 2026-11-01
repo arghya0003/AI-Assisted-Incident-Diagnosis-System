@@ -57,6 +57,8 @@ PG = {
 # would be a worse failure than the duplication.
 KNOWN_SERVICES = [
     "front-end", "catalogue", "payment", "user", "carts", "orders", "shipping",
+    "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
 ]
 
 # Fault windows are scored with the same 90s grace the evaluation runner uses,

@@ -55,6 +55,13 @@ TOPIC = "deploys.events"
 # through POST /deploys land in the log.
 SIMULATE_INTERVAL_SECONDS = float(os.environ.get("SIMULATE_INTERVAL_SECONDS", "900"))
 KNOWN_SERVICES = ["front-end", "catalogue", "payment", "user", "carts", "orders", "shipping"]
+# Accepted through POST /deploys, but left out of the simulated background
+# deploys: a dummy site may be off, and Sock Shop's deploy noise should not
+# change because one was added.
+SITE_SERVICES = [
+    "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
+]
 
 CONFIG_DIFF_SAMPLES = [
     "bump base image version",
@@ -130,8 +137,9 @@ def random_commit_sha() -> str:
 
 def create_deploy(service: str, version: str | None, commit_sha: str | None,
                    config_diff: str | None) -> dict:
-    if service not in KNOWN_SERVICES:
-        raise ValueError(f"unknown service {service!r}, expected one of {KNOWN_SERVICES}")
+    accepted = KNOWN_SERVICES + SITE_SERVICES
+    if service not in accepted:
+        raise ValueError(f"unknown service {service!r}, expected one of {accepted}")
 
     version = version or next_version(service)
     commit_sha = commit_sha or random_commit_sha()

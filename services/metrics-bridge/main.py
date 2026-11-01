@@ -50,8 +50,10 @@ METRIC_QUERIES = {
 
 # The Prometheus jobs whose targets are services under test. METRIC_QUERIES
 # runs once per target in these and nowhere else, so a target that only
-# reports testbed state (the load generator) is never read as a service.
-SERVICE_JOBS = {j for j in os.environ.get("SERVICE_JOBS", "sock-shop-services").split(",") if j}
+# reports testbed state (the load generator) is never read as a service. The
+# dummy sites are listed even when off: only targets that are up get read.
+SERVICE_JOBS = {j for j in os.environ.get(
+    "SERVICE_JOBS", "sock-shop-services,streaming-site,cicd-site").split(",") if j}
 
 # Testbed state, published under the component it describes rather than the
 # target that reports it (issue #33): orders latency rose for ~30 minutes with

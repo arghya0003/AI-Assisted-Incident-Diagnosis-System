@@ -22,11 +22,12 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 
 import requests
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Histogram, generate_latest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -35,6 +36,12 @@ log = logging.getLogger("dummy-service")
 # Wide enough to resolve a 5 ms baseline and a timeout cascade with one
 # histogram, since the bridge derives p50/p95/p99 from these buckets.
 LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+
+# config_error points a downstream hostname at loopback. On Sock Shop nothing
+# listens there, but every dummy service shares port 8080, so the call lands on
+# the caller itself. Naming the caller lets that fail at once, as a refused
+# connection would, instead of recursing until the thread pool is gone.
+CALLER_HEADER = "X-Dummy-Caller"
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,9 @@ class Config:
     jitter_ms: float = 2.0
     error_rate: float = 0.0
     timeout_s: float = 2.0
+    ballast_mb: int = 0
+    slots: int = 0  # requests served at once; 0 is unlimited
+    page: str = "player.html"
 
     @classmethod
     def from_env(cls, env=None) -> "Config":
@@ -58,6 +68,9 @@ class Config:
             jitter_ms=float(env.get("JITTER_MS", "2")),
             error_rate=float(env.get("ERROR_RATE", "0")),
             timeout_s=float(env.get("DOWNSTREAM_TIMEOUT_S", "2")),
+            ballast_mb=int(env.get("BALLAST_MB", "0")),
+            slots=int(env.get("SLOTS", "0")),
+            page=env.get("PAGE", "player.html"),
         )
 
 
@@ -74,6 +87,18 @@ def burn_cpu(milliseconds: float) -> None:
         sum(i * i for i in range(200))
 
 
+def allocate_ballast(megabytes: int) -> bytearray:
+    """Hold real memory, so memory_exhaustion has something to squeeze.
+
+    A service this small sits under the injector's lowest memory cap. Every page
+    is written, because an untouched allocation never reaches the working set.
+    """
+    ballast = bytearray(megabytes * 1024 * 1024)
+    for offset in range(0, len(ballast), 4096):
+        ballast[offset] = 1
+    return ballast
+
+
 def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.random) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="/static")
     # status_code is the label metrics-bridge filters on for error_rate.
@@ -85,7 +110,8 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
     def downstream_failure() -> tuple[int, str] | None:
         for url in config.downstream:
             try:
-                response = call(f"{url}/work", timeout=config.timeout_s)
+                response = call(f"{url}/work", timeout=config.timeout_s,
+                                headers={CALLER_HEADER: config.name})
             except requests.Timeout:
                 return 504, f"timed out calling {url}"
             except requests.RequestException:
@@ -94,17 +120,35 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
                 return 502, f"{url} answered {response.status_code}"
         return None
 
-    @app.get("/work")
-    def work():
-        started = time.perf_counter()
+    def serve() -> tuple[int, str]:
         burn_cpu(config.work_ms)
         time.sleep(max(0.0, config.latency_ms + rng() * config.jitter_ms) / 1000)
 
         failure = downstream_failure()
         if failure is None and rng() < config.error_rate:
             failure = (500, "configured error rate")
+        return failure or (200, "ok")
 
-        status, detail = failure or (200, "ok")
+    # A CI runner has a fixed number of slots. When it slows down, requests wait
+    # for one, and that wait counts as latency: the queue is the domain fault.
+    slots = threading.BoundedSemaphore(config.slots) if config.slots else None
+
+    @app.get("/work")
+    def work():
+        if request.headers.get(CALLER_HEADER) == config.name:
+            return jsonify({"service": config.name, "detail": "called itself"}), 503
+
+        started = time.perf_counter()
+        if slots is None:
+            status, detail = serve()
+        elif slots.acquire(timeout=config.timeout_s):
+            try:
+                status, detail = serve()
+            finally:
+                slots.release()
+        else:
+            status, detail = 503, "no free slot"
+
         elapsed = time.perf_counter() - started
         latency.labels(route="/work", status_code=str(status)).observe(elapsed)
         return jsonify({"service": config.name, "detail": detail,
@@ -121,7 +165,7 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
     @app.get("/")
     def index():
         # Only the site's entry service has a page; the others just answer /work.
-        return send_from_directory("static", "player.html")
+        return send_from_directory("static", config.page)
 
     return app
 
@@ -129,4 +173,5 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
 if __name__ == "__main__":
     settings = Config.from_env()
     log.info("%s calling %s", settings.name, list(settings.downstream) or "nothing")
+    ballast = allocate_ballast(settings.ballast_mb)
     create_app(settings).run(host="0.0.0.0", port=8080, threaded=True)

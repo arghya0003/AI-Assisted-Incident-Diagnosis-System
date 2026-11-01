@@ -27,6 +27,15 @@ from datetime import datetime, timedelta, timezone
 
 from detectors import SEVERITIES, Signal
 
+# Services on the dummy test sites carry a name prefix, because metrics have no
+# site column. Anything else is Sock Shop.
+SITE_PREFIXES = ("stream-", "ci-")
+
+
+def site_of(service: str) -> str:
+    """Which site a service belongs to. Sites share no calls, so no incident spans two."""
+    return next((p for p in SITE_PREFIXES if service.startswith(p)), "sock-shop")
+
 
 def parse_ts(value: str) -> datetime:
     """Parse the Zulu-suffixed ISO timestamps used across the contracts."""
@@ -80,12 +89,16 @@ class Group:
 class AnomalyGrouper:
     """Collects raw signals and yields one grouped event per incident.
 
-    Grouping is purely time-based: signals landing inside the same short
-    window are treated as one incident. That is the right call for this
-    testbed, where the evaluation harness injects one fault at a time. The
-    known limitation — two genuinely unrelated faults overlapping in time
+    Within a site, grouping is purely time-based: signals landing inside the
+    same short window are treated as one incident. That is the right call for
+    this testbed, where the evaluation harness injects one fault at a time.
+    The known limitation — two genuinely unrelated faults overlapping in time
     would merge into one event — is documented rather than silently ignored,
     and is why `services[]` is a list the consumer can inspect.
+
+    Sites group separately. Sock Shop keeps running beside a dummy site, and
+    on 2026-11-01 an alert merged `stream-web` with `front-end` and `orders`,
+    which handed the ranker two unrelated incidents as one.
 
     A cooling service is muted only against signals of similar size. One far
     worse than the incident that started the mute — `escalation_factor` times
@@ -113,7 +126,8 @@ class AnomalyGrouper:
         # always reproduces the same ids.
         self.id_namespace = id_namespace
 
-        self._open: Group | None = None
+        # site -> the incident currently collecting signals there
+        self._open: dict[str, Group] = {}
         # service -> time the cooling period for that service expires
         self._cooling: dict[str, datetime] = {}
         # service -> peak score of the incident that started its cooldown
@@ -141,9 +155,11 @@ class AnomalyGrouper:
             svc: peak for svc, peak in self._cooling_peak.items() if svc in self._cooling
         }
 
-        if self._open is not None:
-            if len(self._open.signals) < self.max_members:
-                self._open.add(signal)
+        site = site_of(signal.service)
+        group = self._open.get(site)
+        if group is not None:
+            if len(group.signals) < self.max_members:
+                group.add(signal)
             return
 
         if self._is_cooling(signal.service, now):
@@ -155,28 +171,29 @@ class AnomalyGrouper:
             # Far worse than what started the mute: a new incident, not the
             # old one continuing. Falls through to open a fresh group.
 
-        self._open = Group(opened_at=now, emit_at=now + self.group_delay)
-        self._open.add(signal)
+        self._open[site] = Group(opened_at=now, emit_at=now + self.group_delay)
+        self._open[site].add(signal)
 
     def flush(self, now: datetime) -> list[dict]:
-        """Emit any group whose grouping delay has elapsed.
+        """Emit every group whose grouping delay has elapsed, oldest first.
 
         `now` is passed in rather than read from the clock so replaying a
         recorded metric stream produces byte-identical results.
         """
-        if self._open is None or now < self._open.emit_at:
-            return []
-
-        group = self._open
-        self._open = None
-
-        for service in group.services:
-            self._cooling[service] = max(group.last_seen, now) + self.cooldown
-            self._cooling_peak[service] = max(
-                s.score for s in group.signals if s.service == service
-            )
-
-        return [self._to_event(group)]
+        due = sorted(
+            (site for site, group in self._open.items() if now >= group.emit_at),
+            key=lambda site: self._open[site].emit_at,
+        )
+        events = []
+        for site in due:
+            group = self._open.pop(site)
+            for service in group.services:
+                self._cooling[service] = max(group.last_seen, now) + self.cooldown
+                self._cooling_peak[service] = max(
+                    s.score for s in group.signals if s.service == service
+                )
+            events.append(self._to_event(group))
+        return events
 
     def _to_event(self, group: Group) -> dict:
         detected = group.t_detected

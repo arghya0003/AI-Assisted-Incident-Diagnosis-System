@@ -23,6 +23,8 @@ NAMEABLE_SERVICES = (
     "catalogue-db", "carts-db", "orders-db", "user-db",
     "front-end", "catalogue", "payment", "shipping", "orders", "carts", "user",
     "rabbitmq", "edge-router", "session-db", "queue-master",
+    "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
+    "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
 )
 
 # How a cited evidence id says what it points at. The evidence model
