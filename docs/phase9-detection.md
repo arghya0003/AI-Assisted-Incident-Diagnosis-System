@@ -402,6 +402,9 @@ Two honest caveats:
 
 **Settled at 0.95/hour** (2026-10-05): 1 alert across 63.0 minutes of quiet observation,
 with the testbed reset first and no machine sleep in the window. Target is under 1/hour.
+This is one window with one alert, so it passes narrowly, and the `orders` degradation
+behind the 5.72/hour reading of 2026-10-02 happened with the pruner already running and is
+still unexplained. See the README's evaluation section.
 
 Getting there took four attempts, and the three that failed each failed differently — which
 is the part worth keeping, because each one looked like a measurement at the time. The
