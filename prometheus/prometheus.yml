@@ -38,3 +38,16 @@ scrape_configs:
           - load-generator:5002
         labels:
           project: incident-diagnosis-system
+
+  # Dummy site for testing detection on something other than Sock Shop. Reported
+  # as down whenever its Compose profile is off; metrics-bridge only reads
+  # targets that are up, so that is harmless.
+  - job_name: streaming-site
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - stream-web:8080
+          - stream-playback:8080
+          - stream-storage:8080
+        labels:
+          project: incident-diagnosis-system

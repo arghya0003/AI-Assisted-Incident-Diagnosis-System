@@ -19,6 +19,7 @@ jobs:
       matrix:
         service:
           - anomaly-detector
+          - dummy-service
           - eval-dashboard
           - evaluation-runner
           - fault-injector

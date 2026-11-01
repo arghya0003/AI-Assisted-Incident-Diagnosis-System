@@ -1,0 +1,54 @@
+# Dummy sites: small test targets for trying the detector and the diagnosis
+# layer on something they were not tuned on. Off by default, one site at a time:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sites.yml --profile streaming up -d
+#
+# Every service is the same image; the environment decides its part.
+
+x-dummy: &dummy
+  build: services/dummy-service
+  image: incident-dummy-service
+  restart: always
+  networks:
+    - diagnosis-net
+
+services:
+  metrics-bridge:
+    environment:
+      SERVICE_JOBS: sock-shop-services,streaming-site
+
+  stream-web:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-web
+    environment:
+      SERVICE_NAME: stream-web
+      DOWNSTREAM: stream-playback:8080
+    ports:
+      - "8100:8080"
+
+  stream-playback:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-playback
+    environment:
+      SERVICE_NAME: stream-playback
+      DOWNSTREAM: stream-storage:8080
+
+  stream-storage:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-storage
+    environment:
+      SERVICE_NAME: stream-storage
+      LATENCY_MS: "15"
+      JITTER_MS: "10"
+
+  stream-traffic:
+    <<: *dummy
+    profiles: [streaming]
+    hostname: stream-traffic
+    command: ["python", "traffic.py"]
+    environment:
+      TARGET_URL: http://stream-web:8080/work
+      RPS: "5"
