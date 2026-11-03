@@ -16,6 +16,11 @@ x-dummy: &dummy
   networks:
     - diagnosis-net
 
+x-dummy-env: &dummy-env
+  # What the fault injector presents to /admin/fault. A default in a public
+  # repository is a guard against accidents, not a secret.
+  ADMIN_TOKEN: ${DUMMY_ADMIN_TOKEN:-dummy-admin}
+
 services:
   # ------------------------------------------------------- StreamBox
   stream-web:
@@ -23,6 +28,7 @@ services:
     profiles: [streaming]
     hostname: stream-web
     environment:
+      <<: *dummy-env
       SERVICE_NAME: stream-web
       DOWNSTREAM: stream-catalog:8080,stream-playback:8080
       BALLAST_MB: "64"
@@ -34,6 +40,7 @@ services:
     profiles: [streaming]
     hostname: stream-catalog
     environment:
+      <<: *dummy-env
       SERVICE_NAME: stream-catalog
       LATENCY_MS: "8"
       JITTER_MS: "4"
@@ -44,6 +51,7 @@ services:
     profiles: [streaming]
     hostname: stream-playback
     environment:
+      <<: *dummy-env
       SERVICE_NAME: stream-playback
       DOWNSTREAM: stream-cache:8080
       BALLAST_MB: "64"
@@ -53,6 +61,7 @@ services:
     profiles: [streaming]
     hostname: stream-cache
     environment:
+      <<: *dummy-env
       SERVICE_NAME: stream-cache
       DOWNSTREAM: stream-storage:8080
       LATENCY_MS: "2"
@@ -64,6 +73,7 @@ services:
     profiles: [streaming]
     hostname: stream-storage
     environment:
+      <<: *dummy-env
       SERVICE_NAME: stream-storage
       LATENCY_MS: "15"
       JITTER_MS: "10"
@@ -75,6 +85,7 @@ services:
     hostname: stream-traffic
     command: ["python", "traffic.py"]
     environment:
+      <<: *dummy-env
       TARGET_URL: http://stream-web:8080/work
       RPS: "5"
 
@@ -84,6 +95,7 @@ services:
     profiles: [cicd]
     hostname: ci-web
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-web
       DOWNSTREAM: ci-pipeline:8080
       PAGE: board.html
@@ -96,6 +108,7 @@ services:
     profiles: [cicd]
     hostname: ci-pipeline
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-pipeline
       DOWNSTREAM: ci-scheduler:8080,ci-artifacts:8080
       BALLAST_MB: "64"
@@ -105,6 +118,7 @@ services:
     profiles: [cicd]
     hostname: ci-scheduler
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-scheduler
       DOWNSTREAM: ci-runner:8080
       BALLAST_MB: "64"
@@ -114,6 +128,7 @@ services:
     profiles: [cicd]
     hostname: ci-runner
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-runner
       LATENCY_MS: "60"
       JITTER_MS: "30"
@@ -125,6 +140,7 @@ services:
     profiles: [cicd]
     hostname: ci-artifacts
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-artifacts
       DOWNSTREAM: ci-deployer:8080
       LATENCY_MS: "12"
@@ -136,6 +152,7 @@ services:
     profiles: [cicd]
     hostname: ci-deployer
     environment:
+      <<: *dummy-env
       SERVICE_NAME: ci-deployer
       LATENCY_MS: "20"
       JITTER_MS: "10"
@@ -147,5 +164,6 @@ services:
     hostname: ci-traffic
     command: ["python", "traffic.py"]
     environment:
+      <<: *dummy-env
       TARGET_URL: http://ci-web:8080/work
       RPS: "5"

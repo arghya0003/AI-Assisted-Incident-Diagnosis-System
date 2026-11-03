@@ -542,15 +542,22 @@ const PARAMS = {
                         ["steps", "Ramp steps", 6, "number", "1"]],
   dependency_timeout: [["dependency", "Dependency to freeze", "", "text"]],
   config_error:       [["dependency", "Hostname to break", "", "text"]],
+  // Each mode only applies to one service (the injector says which if it is wrong):
+  // slow_storage -> stream-storage, cache_flush -> stream-cache,
+  // stuck_runner -> ci-runner, flaky_build -> ci-runner or ci-deployer.
+  app_fault:          [["mode", "Application fault", "slow_storage", "select", null,
+                        ["slow_storage", "cache_flush", "stuck_runner", "flaky_build"]]],
   service_crash:      [],
 };
 
 function renderParams() {
   const type = $("#f-type").value;
   const host = $("#f-params");
-  host.replaceChildren(...(PARAMS[type] || []).map(([key, label, dflt, type2, step]) =>
+  host.replaceChildren(...(PARAMS[type] || []).map(([key, label, dflt, kind, step, options]) =>
     el("label", { class: "field", text: label }, [
-      el("input", { id: "p-" + key, type: type2, step, value: dflt })])));
+      kind === "select"
+        ? el("select", { id: "p-" + key }, options.map(o => el("option", { value: o, text: o })))
+        : el("input", { id: "p-" + key, type: kind, step, value: dflt })])));
 }
 
 async function loadFaultTypes() {
