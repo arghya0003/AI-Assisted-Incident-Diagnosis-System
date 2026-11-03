@@ -30,7 +30,8 @@ import sources
 import attribution
 import sweep as sweeping
 from scenarios import (
-    SEVERITY_LEVELS, SUITES, partition_by_support, severity_suite,
+    SETTLE_DEFAULT_S, SEVERITY_LEVELS, SUITE_SETTLE_S, SUITE_SITES, SUITES, events_for_site,
+    partition_by_support, severity_suite, suite_services,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -88,6 +89,21 @@ def run_live(args) -> int:
         return 1
     specs = [spec for spec in runnable for _ in range(args.repeat)]
 
+    # A site that is not up cannot be faulted: the injector accepts the request,
+    # the fault fails, and the scenario is scored as a miss. Refuse to start
+    # rather than report a detection rate for faults that never happened.
+    site_prefix = SUITE_SITES.get(args.suite)
+    if site_prefix:
+        silent = suite_services(specs) - sources.reporting_services(conn, suite_services(specs))
+        if silent:
+            log.error("suite '%s' needs %s reporting request metrics, and %s is not; "
+                      "start the site and let it run for a few minutes first",
+                      args.suite, site_prefix + "*", ", ".join(sorted(silent)))
+            collector.stop()
+            return 1
+    settle_seconds = (args.settle_seconds if args.settle_seconds is not None
+                      else SUITE_SETTLE_S.get(args.suite, SETTLE_DEFAULT_S))
+
     # Start from the same baseline every time: `orders` slows as the load
     # generator's order history grows, and a run on a degraded `orders`
     # scores real alerts as false positives and hands the ranker an
@@ -121,7 +137,7 @@ def run_live(args) -> int:
         scenario_ids.append(scenario_id)
         # Wait out the fault, then let the grouper's cooldown lapse so the
         # next scenario is not muted as a continuation of this one.
-        time.sleep(spec.duration_s + args.settle_seconds)
+        time.sleep(spec.duration_s + settle_seconds)
 
     log.info("observing %ss of quiet time for the false-positive rate", args.quiet_seconds)
     time.sleep(args.quiet_seconds)
@@ -135,6 +151,9 @@ def run_live(args) -> int:
 
     scenarios = sources.load_scenarios(conn, scenario_ids=scenario_ids)
     events = collector.snapshot()
+    set_aside = 0
+    if site_prefix:
+        events, set_aside = events_for_site(events, site_prefix)
     log.info("scoring %d scenarios against %d observed events", len(scenarios), len(events))
 
     results, summaries, false_positives, quiet_s, fp_rate = score_run(
@@ -146,6 +165,13 @@ def run_live(args) -> int:
         f"Detector under test: `{args.detector_label}` (as deployed).",
         f"{len(events)} anomaly event(s) observed in total.",
     ]
+    if site_prefix:
+        notes.append(
+            f"Suite `{args.suite}` ran on the `{site_prefix}*` site only. {set_aside} event(s) "
+            "about other services were set aside before scoring, so the false-positive rate "
+            "counts this site's alerts alone; Sock Shop's alerts say nothing about how the "
+            f"detector does here. Gap after each fault: {settle_seconds} s."
+        )
     if reset is not None:
         notes.append(
             f"Testbed reset before warm-up: {reset.get('orders_removed')} accumulated "
@@ -471,9 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="times to run each scenario, for a tighter median")
     live.add_argument("--warmup-seconds", type=int, default=90,
                        help="time to let detector baselines settle before injecting")
-    live.add_argument("--settle-seconds", type=int, default=150,
+    live.add_argument("--settle-seconds", type=int, default=None,
                        help="gap after each fault; must exceed the grouper cooldown "
-                            "or the next scenario is muted as a continuation")
+                            "or the next scenario is muted as a continuation "
+                            f"(default {SETTLE_DEFAULT_S}, longer for the site suites)")
     live.add_argument("--quiet-seconds", type=int, default=300,
                        help="fault-free observation used as the false-positive denominator")
     live.add_argument("--no-reset", action="store_true",

@@ -30,6 +30,9 @@ implement without re-architecting the testbed's network topology:
                         so the kernel OOM-kills the process.
   resource_exhaustion - tightens the CPU quota in steps: the one gradual
                         fault, where every other one is a step change.
+  app_fault           - makes a dummy-site service misbehave from the inside
+                        (slow storage, flushed cache, stuck runner, flaky
+                        build); see APP_FAULTS in params.py.
 
 Every fault undoes itself in a `finally`, and `recover_interrupted` undoes
 any fault a previous process was killed in the middle of - see that
@@ -51,7 +54,7 @@ import pymysql
 import requests
 from flask import Flask, request, jsonify
 
-from params import FAULT_TYPES, build_params, ramp
+from params import FAULT_TYPES, build_params, ramp, rate_query, site_entry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("fault-injector")
@@ -65,6 +68,15 @@ PG_PASSWORD = os.environ.get("PG_PASSWORD", "Abcd1234#")
 DEPLOY_EMITTER_URL = os.environ.get("DEPLOY_EMITTER_URL", "http://deploy-emitter:5000")
 LOAD_GENERATOR_URL = os.environ.get("LOAD_GENERATOR_URL", "http://load-generator:5002")
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "incident-diagnosis-system")
+
+# The dummy sites' traffic is not the load generator's, so their offered load
+# is read from the request rate Prometheus sees at the site's entry service.
+PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
+# Matches ADMIN_TOKEN in docker-compose.sites.yml; a guard against accidents.
+DUMMY_ADMIN_TOKEN = os.environ.get("DUMMY_ADMIN_TOKEN", "dummy-admin")
+DUMMY_PORT = 8080
+# How long past a fault's end the service keeps it, if we never get to clear it.
+APP_FAULT_GRACE_SECONDS = 30
 
 CATALOGUE_DB = {"host": "catalogue-db", "user": "root", "password": "Abcd1234#",
                 "database": "socksdb"}
@@ -170,7 +182,20 @@ def new_scenario_id(fault_type: str) -> str:
     return f"scn-{fault_type.replace('_', '-')}-{int(time.time())}"
 
 
-def offered_rps() -> float | None:
+def site_rps(instance: str) -> float | None:
+    """Request rate a dummy site's entry service is seeing, from Prometheus."""
+    try:
+        response = requests.get(f"{PROMETHEUS_URL}/api/v1/query",
+                                params={"query": rate_query(instance)}, timeout=3)
+        response.raise_for_status()
+        result = response.json()["data"]["result"]
+        return round(float(result[0]["value"][1]), 2) if result else 0.0
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+        log.warning("could not read %s request rate from Prometheus: %s", instance, exc)
+        return None
+
+
+def offered_rps(service: str = "") -> float | None:
     """Load being driven through the testbed right now, or None if unknown.
 
     A fault injected into an idle testbed moves no metric, so nothing can
@@ -178,7 +203,13 @@ def offered_rps() -> float | None:
     looks identical to a detector that simply missed it. Recording the
     offered rate with each scenario makes an idle run visible in the ground
     truth instead of silently deflating the evaluation numbers.
+
+    A dummy site's faults are measured against that site's own traffic: the
+    load generator only drives Sock Shop, so its rate says nothing about them.
     """
+    instance = site_entry(service)
+    if instance:
+        return site_rps(instance)
     try:
         resp = requests.get(f"{LOAD_GENERATOR_URL}/stats", timeout=3)
         resp.raise_for_status()
@@ -475,10 +506,52 @@ def run_resource_exhaustion(service: str, duration_s: int, cpu_limit: float,
         undo_cpu_limit(service)
 
 
+def admin_call(service: str, method: str, body: dict | None = None) -> None:
+    response = requests.request(
+        method, f"http://{service}:{DUMMY_PORT}/admin/fault", json=body, timeout=5,
+        headers={"X-Admin-Token": DUMMY_ADMIN_TOKEN},
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"{service} refused {method} /admin/fault: "
+                           f"{response.status_code} {response.text[:200]}")
+
+
+def undo_app_fault(service: str) -> None:
+    try:
+        admin_call(service, "DELETE")
+    except requests.ConnectionError:
+        # A service that is not running has nothing left to clear: its fault
+        # lived in the process, and a restarted one starts clean.
+        log.info("%s is not reachable; no app fault to clear", service)
+        return
+    log.info("cleared the app fault on %s", service)
+
+
+def run_app_fault(service: str, duration_s: int, params: dict):
+    """Make a dummy service misbehave from the inside, for `duration_s`.
+
+    The service enforces its own time limit (`ttl_s`) a little past ours, so a
+    fault whose injector died is gone shortly after it should have ended.
+    """
+    log.info("app fault %s on %s for %ss", params["mode"], service, duration_s)
+    admin_call(service, "POST", {
+        "extra_latency_ms": params["extra_latency_ms"],
+        "error_rate": params["error_rate"],
+        "decay_s": params["decay_s"],
+        "ttl_s": duration_s + APP_FAULT_GRACE_SECONDS,
+    })
+    try:
+        time.sleep(duration_s)
+    finally:
+        undo_app_fault(service)
+
+
 def undo(fault_type: str, service: str, params: dict) -> None:
     """Put back whatever `fault_type` changed. Safe to call when nothing did."""
     if fault_type in ("bad_deploy_latency", "resource_exhaustion"):
         undo_cpu_limit(service)
+    elif fault_type == "app_fault":
+        undo_app_fault(service)
     elif fault_type == "service_crash":
         undo_service_crash(service)
     elif fault_type == "dependency_timeout":
@@ -536,6 +609,8 @@ def execute(scenario_id: str, fault_type: str, service: str, params: dict):
         elif fault_type == "resource_exhaustion":
             run_resource_exhaustion(service, params["duration_s"], params["cpu_limit"],
                                     params["start_cpu_limit"], params["steps"])
+        elif fault_type == "app_fault":
+            run_app_fault(service, params["duration_s"], params)
         mark_recovered(scenario_id)
         log.info("scenario %s recovered", scenario_id)
     except Exception as exc:
@@ -570,7 +645,7 @@ def post_fault():
 
     # Ground truth for the evaluation runner: how much traffic the testbed
     # was actually serving when this fault landed.
-    rps = offered_rps()
+    rps = offered_rps(service)
     params["offered_rps_at_inject"] = rps
 
     scenario_id = new_scenario_id(fault_type)
@@ -587,7 +662,7 @@ def post_fault():
         "params": params, "status": "running",
     }
     if rps is None:
-        response["warning"] = ("could not reach the load generator - if no traffic is running, "
+        response["warning"] = ("could not read the offered request rate - if no traffic is running, "
                                "this fault will change no metric and nothing can detect it")
     elif rps < MIN_USEFUL_RPS:
         response["warning"] = (f"testbed is nearly idle ({rps} req/s offered) - "

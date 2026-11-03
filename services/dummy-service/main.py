@@ -19,6 +19,7 @@ Two things make a fault behave like one instead of being painted on:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import random
@@ -29,6 +30,8 @@ from dataclasses import dataclass, field
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Histogram, generate_latest
+
+from faults import FaultState, parse_fault
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dummy-service")
@@ -43,6 +46,11 @@ LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 # connection would, instead of recursing until the thread pool is gone.
 CALLER_HEADER = "X-Dummy-Caller"
 
+# The fault injector sends this to /admin/fault. It stops a stray request from
+# degrading a site by accident; the default sits in a public repository, so it
+# is not a secret, and these services are test targets, not something to expose.
+ADMIN_HEADER = "X-Admin-Token"
+
 
 @dataclass(frozen=True)
 class Config:
@@ -56,6 +64,7 @@ class Config:
     ballast_mb: int = 0
     slots: int = 0  # requests served at once; 0 is unlimited
     page: str = "player.html"
+    admin_token: str = ""  # empty turns the /admin routes off
 
     @classmethod
     def from_env(cls, env=None) -> "Config":
@@ -71,6 +80,7 @@ class Config:
             ballast_mb=int(env.get("BALLAST_MB", "0")),
             slots=int(env.get("SLOTS", "0")),
             page=env.get("PAGE", "player.html"),
+            admin_token=env.get("ADMIN_TOKEN", ""),
         )
 
 
@@ -99,8 +109,10 @@ def allocate_ballast(megabytes: int) -> bytearray:
     return ballast
 
 
-def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.random) -> Flask:
+def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.random,
+               clock=time.monotonic) -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="/static")
+    fault = FaultState()
     # status_code is the label metrics-bridge filters on for error_rate.
     latency = Histogram(
         "request_duration_seconds", "Time to serve /work",
@@ -121,11 +133,12 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
         return None
 
     def serve() -> tuple[int, str]:
+        extra_ms, extra_errors = fault.current(clock())
         burn_cpu(config.work_ms)
-        time.sleep(max(0.0, config.latency_ms + rng() * config.jitter_ms) / 1000)
+        time.sleep(max(0.0, config.latency_ms + extra_ms + rng() * config.jitter_ms) / 1000)
 
         failure = downstream_failure()
-        if failure is None and rng() < config.error_rate:
+        if failure is None and rng() < config.error_rate + extra_errors:
             failure = (500, "configured error rate")
         return failure or (200, "ok")
 
@@ -153,6 +166,28 @@ def create_app(config: Config, call=requests.get, registry=REGISTRY, rng=random.
         latency.labels(route="/work", status_code=str(status)).observe(elapsed)
         return jsonify({"service": config.name, "detail": detail,
                         "elapsed_ms": round(elapsed * 1000, 1)}), status
+
+    def admin_allowed() -> bool:
+        supplied = request.headers.get(ADMIN_HEADER, "")
+        return bool(config.admin_token) and hmac.compare_digest(supplied, config.admin_token)
+
+    @app.route("/admin/fault", methods=["GET", "POST", "DELETE"])
+    def admin_fault():
+        # 404 rather than 403 when the routes are off, so a service without a
+        # token does not announce that it has them.
+        if not config.admin_token:
+            return jsonify({"error": "not found"}), 404
+        if not admin_allowed():
+            return jsonify({"error": "forbidden"}), 403
+        if request.method == "DELETE":
+            fault.clear()
+        elif request.method == "POST":
+            try:
+                fault.set(parse_fault(request.get_json(force=True, silent=True) or {}, clock()))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            log.warning("%s fault applied: %s", config.name, fault.describe(clock()))
+        return jsonify(fault.describe(clock()))
 
     @app.get("/healthz")
     def healthz():

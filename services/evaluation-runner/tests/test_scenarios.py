@@ -6,15 +6,22 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scenarios import (  # noqa: E402
+    CICD_SUITE,
     DEFAULT_SUITE,
     FULL_SUITE,
     KNOWN_SERVICES,
     MAX_DURATION_S,
     MISSING_CLASS_SCENARIOS,
     REQUIRED_PARAMS,
+    SETTLE_DEFAULT_S,
+    STREAMING_SUITE,
+    SUITE_SETTLE_S,
+    SUITE_SITES,
     SUITES,
     ScenarioSpec,
+    events_for_site,
     partition_by_support,
+    suite_services,
 )
 
 ALL_SPECS = [(name, spec) for name, suite in SUITES.items() for spec in suite]
@@ -127,3 +134,82 @@ def test_partition_preserves_order():
     """Scenario order is chosen so a crash never precedes its own dependents."""
     runnable, _ = partition_by_support(FULL_SUITE, PLANNED_CLASSES)
     assert [s.label for s in runnable] == [s.label for s in FULL_SUITE]
+
+
+# ------------------------------------------------------------ the dummy-site suites
+
+# Mirrors APP_FAULTS in services/fault-injector/params.py: which service each
+# mode may be applied to. Duplicated so a suite naming a pairing the injector
+# refuses fails here and not an hour into a run.
+APP_FAULT_SERVICES = {
+    "slow_storage": {"stream-storage"},
+    "cache_flush": {"stream-cache"},
+    "stuck_runner": {"ci-runner"},
+    "flaky_build": {"ci-runner", "ci-deployer"},
+}
+
+# Matches GROUPER_COOLDOWN in services/anomaly-detector (120 s).
+GROUPER_COOLDOWN_S = 120
+
+SITE_SUITES = [("streaming", STREAMING_SUITE, "stream-"), ("cicd", CICD_SUITE, "ci-")]
+
+
+@pytest.mark.parametrize("name,suite,prefix", SITE_SUITES)
+def test_a_site_suite_stays_on_its_own_site(name, suite, prefix):
+    assert suite_services(suite) and all(s.startswith(prefix) for s in suite_services(suite))
+    assert SUITE_SITES[name] == prefix
+
+
+@pytest.mark.parametrize("name,suite,prefix", SITE_SUITES)
+def test_a_site_suite_covers_every_applicable_fault_class(name, suite, prefix):
+    """db_pool_saturation is MySQL-specific; the other six classes apply."""
+    assert {spec.fault_type for spec in suite} == (PLANNED_CLASSES - {"db_pool_saturation"}) | {"app_fault"}
+
+
+@pytest.mark.parametrize("name,suite,prefix", SITE_SUITES)
+def test_a_site_suite_gives_the_detector_longer_than_the_cooldown_between_faults(name, suite, prefix):
+    assert SUITE_SETTLE_S[name] > SETTLE_DEFAULT_S > GROUPER_COOLDOWN_S
+
+
+@pytest.mark.parametrize("name,suite,prefix", SITE_SUITES)
+def test_every_app_fault_in_a_suite_is_one_the_injector_accepts(name, suite, prefix):
+    for spec in (s for s in suite if s.fault_type == "app_fault"):
+        assert spec.service in APP_FAULT_SERVICES[spec.params["mode"]], spec.label
+
+
+def test_each_site_has_a_smoke_suite_that_runs_on_the_same_site():
+    for smoke, full in (("streaming-smoke", "streaming"), ("cicd-smoke", "cicd")):
+        assert SUITE_SITES[smoke] == SUITE_SITES[full]
+        assert all(s.startswith(SUITE_SITES[smoke]) for s in suite_services(SUITES[smoke]))
+
+
+def test_the_sock_shop_suites_are_not_tied_to_a_site():
+    for name in ("default", "full", "smoke", "new-faults"):
+        assert name not in SUITE_SITES and name not in SUITE_SETTLE_S
+
+
+def test_suite_services_includes_where_a_dependency_fault_lands():
+    suite = [ScenarioSpec("dependency_timeout", "ci-scheduler", 90, {"dependency": "ci-runner"})]
+    assert suite_services(suite) == {"ci-scheduler", "ci-runner"}
+
+
+class FakeEvent:
+    def __init__(self, *services):
+        self.services = services
+
+
+def test_events_about_other_services_are_set_aside_not_scored():
+    mine = FakeEvent("stream-web", "stream-storage")
+    events = [mine, FakeEvent("orders"), FakeEvent("front-end", "orders"), FakeEvent("ci-web")]
+    kept, set_aside = events_for_site(events, "stream-")
+    assert kept == [mine] and set_aside == 3
+
+
+def test_an_event_that_mixes_a_site_with_sock_shop_is_not_the_sites():
+    """The grouper should never produce one, but if it does it must not be scored as site data."""
+    kept, set_aside = events_for_site([FakeEvent("stream-web", "orders")], "stream-")
+    assert kept == [] and set_aside == 1
+
+
+def test_an_event_with_no_services_is_set_aside():
+    assert events_for_site([FakeEvent()], "stream-") == ([], 1)
