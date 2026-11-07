@@ -287,7 +287,9 @@ anything else would silently bias every number in the report.
 
 `fault_type` is one of `bad_deploy_latency`, `service_crash`, `db_pool_saturation`,
 `dependency_timeout`, `config_error`, `memory_exhaustion`, `resource_exhaustion`: the
-seven the injector can physically produce (`GET /fault-types`). For `dependency_timeout`
+seven the injector can physically produce on Sock Shop, plus `app_fault`, which acts inside
+a dummy-site service (`params.mode` is `slow_storage`, `cache_flush`, `stuck_runner` or
+`flaky_build`; see `services/dummy-service/README.md`). `GET /fault-types` lists them all. For `dependency_timeout`
 and `config_error`, `ground_truth_service` is the service that visibly degrades, and
 `params.dependency` is where the fault was actually applied.
 

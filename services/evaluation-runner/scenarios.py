@@ -40,6 +40,8 @@ REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "config_error": ("dependency",),
     "memory_exhaustion": ("limit_mb",),
     "resource_exhaustion": ("cpu_limit", "steps"),
+    # Which of the dummy sites' app faults; the injector holds the magnitudes.
+    "app_fault": ("mode",),
 }
 
 
@@ -132,12 +134,102 @@ SMOKE_SUITE: list[ScenarioSpec] = [
 # lands a real effect before spending an hour on the full suite.
 NEW_FAULTS_SUITE: list[ScenarioSpec] = list(MISSING_CLASS_SCENARIOS)
 
+# ----------------------------------------------------------------------------
+# The dummy sites. Each suite is every fault class that applies to the site
+# plus its app faults, run once as the held-out result: the detector and the
+# ranker were only ever tuned on Sock Shop, so nothing is adjusted before it.
+#
+# db_pool_saturation is MySQL-specific and has no equivalent here.
+#
+# `service` is the service whose metrics should move; `dependency` is where the
+# fault was applied, which is what the ranker has to name (see above).
+# ----------------------------------------------------------------------------
+STREAMING_SUITE: list[ScenarioSpec] = [
+    ScenarioSpec("service_crash", "stream-storage", 60),
+    ScenarioSpec("service_crash", "stream-catalog", 60),
+    ScenarioSpec("bad_deploy_latency", "stream-playback", 90, {"cpu_limit": 0.002}),
+    ScenarioSpec("dependency_timeout", "stream-playback", 90, {"dependency": "stream-cache"}),
+    # The class missed on 2026-11-01. The errors ramp up as the 1-minute window
+    # fills rather than stepping, and the run it missed in followed another
+    # fault by 2.5 minutes; SUITE_SETTLE_S leaves longer than that.
+    ScenarioSpec("config_error", "stream-web", 90, {"dependency": "stream-playback"}),
+    ScenarioSpec("memory_exhaustion", "stream-storage", 90, {"limit_mb": 64}),
+    ScenarioSpec("resource_exhaustion", "stream-playback", 180, {"cpu_limit": 0.002, "steps": 6}),
+    ScenarioSpec("app_fault", "stream-storage", 90, {"mode": "slow_storage"}),
+    ScenarioSpec("app_fault", "stream-cache", 90, {"mode": "cache_flush"}),
+]
+
+CICD_SUITE: list[ScenarioSpec] = [
+    ScenarioSpec("service_crash", "ci-deployer", 60),
+    ScenarioSpec("service_crash", "ci-runner", 60),
+    ScenarioSpec("bad_deploy_latency", "ci-scheduler", 90, {"cpu_limit": 0.002}),
+    ScenarioSpec("dependency_timeout", "ci-scheduler", 90, {"dependency": "ci-runner"}),
+    ScenarioSpec("config_error", "ci-web", 90, {"dependency": "ci-pipeline"}),
+    ScenarioSpec("memory_exhaustion", "ci-artifacts", 90, {"limit_mb": 64}),
+    ScenarioSpec("resource_exhaustion", "ci-pipeline", 180, {"cpu_limit": 0.002, "steps": 6}),
+    # 60 ms -> 600 ms on a two-slot runner: it cannot keep up with 5 req/s, so
+    # requests queue for a slot. Measured, that saturates within seconds, so it
+    # reads as a step; the ramp here is resource_exhaustion.
+    ScenarioSpec("app_fault", "ci-runner", 120, {"mode": "stuck_runner"}),
+    ScenarioSpec("app_fault", "ci-runner", 90, {"mode": "flaky_build"}),
+]
+
+STREAMING_SMOKE: list[ScenarioSpec] = [
+    ScenarioSpec("service_crash", "stream-storage", 45),
+    ScenarioSpec("app_fault", "stream-storage", 60, {"mode": "slow_storage"}),
+]
+
+CICD_SMOKE: list[ScenarioSpec] = [
+    ScenarioSpec("service_crash", "ci-deployer", 45),
+    ScenarioSpec("app_fault", "ci-runner", 60, {"mode": "stuck_runner"}),
+]
+
 SUITES: dict[str, list[ScenarioSpec]] = {
     "default": DEFAULT_SUITE,
     "full": FULL_SUITE,
     "smoke": SMOKE_SUITE,
     "new-faults": NEW_FAULTS_SUITE,
+    "streaming": STREAMING_SUITE,
+    "streaming-smoke": STREAMING_SMOKE,
+    "cicd": CICD_SUITE,
+    "cicd-smoke": CICD_SMOKE,
 }
+
+# The name prefix of the site a suite runs on, for suites that run on one.
+# Mirrors the prefixes in services/anomaly-detector/grouping.py.
+SUITE_SITES: dict[str, str] = {
+    "streaming": "stream-", "streaming-smoke": "stream-",
+    "cicd": "ci-", "cicd-smoke": "ci-",
+}
+
+SETTLE_DEFAULT_S = 150
+
+# Gap after each fault, where a suite needs more than the default. The
+# config_error miss on 2026-11-01 came 2.5 minutes after another fault, with
+# the detector's baseline for that service still unsettled; five minutes lets
+# it recover and the grouper's cooldown lapse, so a miss means the detector.
+SUITE_SETTLE_S: dict[str, int] = {
+    "streaming": 300, "cicd": 300,
+    "streaming-smoke": 150, "cicd-smoke": 150,
+}
+
+
+def suite_services(specs: list[ScenarioSpec]) -> set[str]:
+    """Every service a suite touches, including where dependency faults land."""
+    services = {spec.service for spec in specs}
+    services |= {spec.params["dependency"] for spec in specs if "dependency" in spec.params}
+    return services
+
+
+def events_for_site(events, prefix: str) -> tuple[list, int]:
+    """Events about one site, and how many about anything else were set aside.
+
+    Sock Shop keeps running beside a dummy site, and its alerts say nothing
+    about how the detector does on the site under test. The grouper keeps sites
+    in separate incidents, so an event belongs to a site whole.
+    """
+    kept = [e for e in events if e.services and all(s.startswith(prefix) for s in e.services)]
+    return kept, len(events) - len(kept)
 
 
 # Fault magnitudes for the severity sweep (issue #34), weakest first. A higher

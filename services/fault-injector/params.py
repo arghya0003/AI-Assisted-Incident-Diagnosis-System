@@ -27,7 +27,38 @@ FAULT_TYPES = {
     "config_error",
     "memory_exhaustion",
     "resource_exhaustion",
+    # Acts on the dummy sites' services from the inside, in the sites' own
+    # terms: slow storage, a flushed cache, a stuck runner, a flaky build.
+    "app_fault",
 }
+
+# What each app_fault does and where it can be applied. `decay` fades the
+# extra latency to nothing over the fault's duration, which is how a cache
+# warms back up: the one app fault that recovers gradually instead of all at
+# once. A stuck runner is slow enough (60 ms -> 600 ms) that two slots cannot
+# keep up with 5 req/s, so requests queue for a slot. Measured on 2026-11-03 it
+# saturates within seconds (the 2 s slot wait is short), so it behaves like a
+# step, not a ramp; a milder extra_latency_ms near the knee (~400) should build
+# slower, but that has not been run.
+APP_FAULTS: dict[str, dict] = {
+    "slow_storage": {"services": ("stream-storage",), "extra_latency_ms": 400.0},
+    "cache_flush": {"services": ("stream-cache",), "extra_latency_ms": 150.0, "decay": True},
+    "stuck_runner": {"services": ("ci-runner",), "extra_latency_ms": 540.0},
+    "flaky_build": {"services": ("ci-runner", "ci-deployer"), "error_rate": 0.3},
+}
+
+# The one service that takes a site's traffic, and so the one whose request
+# rate is the site's offered load. Keyed by the name prefix the sites share.
+SITE_ENTRIES = {"stream-": "stream-web:8080", "ci-": "ci-web:8080"}
+
+
+def site_entry(service: str) -> str | None:
+    """Prometheus instance carrying the traffic for a dummy-site service, else None."""
+    return next((entry for prefix, entry in SITE_ENTRIES.items() if service.startswith(prefix)), None)
+
+
+def rate_query(instance: str) -> str:
+    return f'sum(rate(request_duration_seconds_count{{instance="{instance}"}}[30s]))'
 
 # The default target for dependency_timeout and config_error: one edge per
 # service from the dependency graph in CONTRACTS.md (read out of each image's
@@ -107,6 +138,20 @@ def build_params(fault_type: str | None, service: str | None, body: dict) -> dic
 
     elif fault_type == "memory_exhaustion":
         params["limit_mb"] = max(int(body.get("limit_mb", 64)), MIN_MEMORY_LIMIT_MB)
+
+    elif fault_type == "app_fault":
+        mode = body.get("mode")
+        if mode not in APP_FAULTS:
+            raise ValueError(f"mode must be one of {sorted(APP_FAULTS)}")
+        preset = APP_FAULTS[mode]
+        if service not in preset["services"]:
+            raise ValueError(f"{mode} applies to {list(preset['services'])}, not {service}")
+        params["mode"] = mode
+        params["extra_latency_ms"] = float(body.get("extra_latency_ms", preset.get("extra_latency_ms", 0.0)))
+        params["error_rate"] = float(body.get("error_rate", preset.get("error_rate", 0.0)))
+        params["decay_s"] = float(body.get("decay_s", params["duration_s"] if preset.get("decay") else 0.0))
+        if params["extra_latency_ms"] <= 0 and params["error_rate"] <= 0:
+            raise ValueError("an app_fault needs extra_latency_ms or error_rate above zero")
 
     elif fault_type == "resource_exhaustion":
         params["cpu_limit"] = float(body.get("cpu_limit", 0.002))

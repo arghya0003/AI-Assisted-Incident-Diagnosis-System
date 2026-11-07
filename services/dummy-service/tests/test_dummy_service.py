@@ -171,7 +171,9 @@ def test_each_site_can_serve_its_own_page():
 
 def test_burn_cpu_spins_for_about_the_requested_time():
     """It must spin, not sleep, or a CPU throttle has nothing to take away."""
+    # Long enough to cross several ticks of process_time, which advances in
+    # 15.6 ms steps on Windows and made a 20 ms spin read as zero CPU.
     wall, cpu = time.perf_counter(), time.process_time()
-    main.burn_cpu(20)
-    assert time.perf_counter() - wall >= 0.02
-    assert time.process_time() - cpu >= 0.01
+    main.burn_cpu(100)
+    assert time.perf_counter() - wall >= 0.1
+    assert time.process_time() - cpu >= 0.05

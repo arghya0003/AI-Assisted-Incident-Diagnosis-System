@@ -184,6 +184,22 @@ def had_request_telemetry(conn, service: str, start: datetime, end: datetime) ->
         return cur.fetchone()[0] > 0
 
 
+def reporting_services(conn, services: set[str], within_seconds: int = 120) -> set[str]:
+    """Which of `services` have reported request-level metrics recently.
+
+    Asked before a site suite starts, so a site that is down or has not warmed
+    up is refused instead of being faulted and scored as missed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT service FROM metrics
+               WHERE service = ANY(%s) AND metric = 'request_rate'
+                 AND time > now() - make_interval(secs => %s)""",
+            (sorted(services), within_seconds),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
 def load_deploys(conn, start: datetime, end: datetime) -> list[tuple[str, str, datetime]]:
     """Deploy history, so replay applies the same deploy-window policy as live."""
     with conn.cursor() as cur:
