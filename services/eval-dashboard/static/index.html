@@ -205,6 +205,12 @@
         </p>
       </div>
       <div class="row">
+        <select id="rc-site" class="mini" aria-label="system">
+          <option value="">All systems</option>
+          <option value="shop">Sock Shop</option>
+          <option value="streaming">StreamBox</option>
+          <option value="cicd">BuildBoard</option>
+        </select>
         <select id="rc-hours" class="mini" aria-label="window">
           <option value="1">1 h</option><option value="6">6 h</option>
           <option value="24" selected>24 h</option><option value="168">7 d</option>
@@ -227,6 +233,9 @@
       detect it — the offered load is shown above.
     </p>
     <div class="grid">
+      <label class="field">System
+        <select id="f-site"></select>
+      </label>
       <label class="field">Fault type
         <select id="f-type"></select>
       </label>
@@ -237,6 +246,7 @@
         <input id="f-duration" type="number" value="90" min="10" max="300">
       </label>
     </div>
+    <p class="sub" id="f-site-note" style="margin:10px 0 0"></p>
     <div class="grid" id="f-params" style="margin-top:14px"></div>
     <div class="row" style="margin-top:18px">
       <button class="primary" id="f-go">Inject</button>
@@ -453,13 +463,26 @@ const ago = (iso) => {
     : s < 129600 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago";
 };
 
+// The three systems, by the service-name prefix that groups them. Mirrors the
+// detector's grouping and the server-side filter in recent.py.
+const SITE_LABEL = { shop: "Sock Shop", streaming: "StreamBox", cicd: "BuildBoard" };
+const siteOf = (service) =>
+  service.startsWith("stream-") ? "streaming" : service.startsWith("ci-") ? "cicd" : "shop";
+const sitesOf = (services) => [...new Set(services.split(";").map(siteOf))];
+
+$("#rc-site").onchange = loadRecents;
+const RECENT_LIMIT = 100;   // the server's default cap; hitting it means rows are missing
+
 async function loadRecents() {
   const t = $("#t-recents");
   try {
-    const rows = await api("/recent?hours=" + $("#rc-hours").value);
+    const site = $("#rc-site").value;
+    const rows = await api("/recent?hours=" + $("#rc-hours").value + "&limit=" + RECENT_LIMIT
+      + (site ? "&site=" + site : ""));
     recentTiles(rows);
     if (!rows.length) {
-      t.innerHTML = '<tr><td class="empty">No anomalies detected in this window.</td></tr>';
+      t.innerHTML = '<tr><td class="empty">No anomalies detected in this window'
+        + (site ? " for " + SITE_LABEL[site] : "") + ".</td></tr>";
       return;
     }
     t.replaceChildren(
@@ -478,8 +501,13 @@ function recentTiles(rows) {
   const tile = (k, v, note) => el("div", { class: "tile" }, [
     el("div", { class: "k", text: k }), el("div", { class: "v", text: String(v) }),
     el("div", { class: "n", text: note })]);
+  // At the cap the count is "at least", and says so; showing 100 as if it were the
+  // total would hide that older rows exist.
+  const capped = rows.length >= RECENT_LIMIT;
   $("#rc-tiles").replaceChildren(
-    tile("Anomalies", rows.length, "in the last " + $("#rc-hours").selectedOptions[0].text),
+    tile("Anomalies", capped ? RECENT_LIMIT + "+" : rows.length,
+      capped ? "newest " + RECENT_LIMIT + " shown; narrow the window or download the CSV"
+             : "in the last " + $("#rc-hours").selectedOptions[0].text),
     tile("Ongoing", n("ongoing"), "not over yet"),
     tile("Recurred", n("recurred"), "came back within 10 min"),
     tile("Resolved", n("resolved"), "the problem ended"),
@@ -501,7 +529,10 @@ function recentRow(r) {
     ]),
     el("td", {}, [
       el("b", { text: r.services.split(";").join(", ") }),
-      el("div", { class: "sub", text: r.severity + " · " + r.metrics.split(";").join(", ") }),
+      el("div", { class: "sub" }, [
+        ...sitesOf(r.services).map(s => el("span", { class: "pill idle", style: "margin-right:6px",
+          text: SITE_LABEL[s] })),
+        el("span", { text: r.severity + " · " + r.metrics.split(";").join(", ") })]),
     ]),
     el("td", {}, injected
       ? [el("code", { text: r.fault_type }),
@@ -532,46 +563,106 @@ function recentRow(r) {
 }
 
 // ──────────────────────────────── tab 1: inject ────────────────────────────
-// Each fault type's own parameters. Defaults match the injector's, so an
-// unchanged form reproduces its default behaviour.
-const PARAMS = {
-  bad_deploy_latency: [["cpu_limit", "CPU quota (fraction of a core)", 0.002, "number", "any"]],
-  db_pool_saturation: [["connections", "Held connections", 155, "number", "1"]],
-  memory_exhaustion:  [["limit_mb", "Memory cap (MB)", 64, "number", "1"]],
-  resource_exhaustion: [["cpu_limit", "Final CPU quota", 0.002, "number", "any"],
-                        ["steps", "Ramp steps", 6, "number", "1"]],
-  dependency_timeout: [["dependency", "Dependency to freeze", "", "text"]],
-  config_error:       [["dependency", "Hostname to break", "", "text"]],
-  // Each mode only applies to one service (the injector says which if it is wrong):
-  // slow_storage -> stream-storage, cache_flush -> stream-cache,
-  // stuck_runner -> ci-runner, flaky_build -> ci-runner or ci-deployer.
-  app_fault:          [["mode", "Application fault", "slow_storage", "select", null,
-                        ["slow_storage", "cache_flush", "stuck_runner", "flaky_build"]]],
-  service_crash:      [],
-};
+// The form narrows in order: system -> the fault types that apply there -> every
+// service in it, split into those the fault can target and those it cannot ->
+// that fault's own parameters. What applies where comes
+// from the server's catalog (main.py), which mirrors the injector's rules.
+let CATALOG = null;
+const siteSpec = () => CATALOG.sites.find(s => s.key === $("#f-site").value);
+const faultSpec = () => siteSpec().faults.find(f => f.type === $("#f-type").value);
+
+// Replace a select's options, keeping the current choice when it is still on offer.
+function fillSelect(select, values) {
+  const kept = values.includes(select.value) ? select.value : values[0];
+  select.replaceChildren(...values.map(v => el("option", { value: v, text: v })));
+  select.value = kept;
+}
+
+// Each fault type's own parameters, for the chosen service. Defaults match the
+// injector's, so an unchanged form reproduces its default behaviour.
+function paramsFor(type, service) {
+  switch (type) {
+    case "bad_deploy_latency":
+      return [["cpu_limit", "CPU quota (fraction of a core)", 0.002, "number", "any"]];
+    case "memory_exhaustion":
+      return [["limit_mb", "Memory cap (MB)", 64, "number", "1"]];
+    case "resource_exhaustion":
+      return [["cpu_limit", "Final CPU quota", 0.002, "number", "any"],
+              ["steps", "Ramp steps", 6, "number", "1"]];
+    case "dependency_timeout":
+      return [["dependency", "Dependency to freeze", CATALOG.default_dependency[service] || "", "text"]];
+    case "config_error":
+      return [["dependency", "Hostname to break", CATALOG.default_dependency[service] || "", "text"]];
+    case "app_fault":
+      // Only the modes that make sense on this service.
+      return [["mode", "Application fault", null, "select", null,
+               Object.keys(CATALOG.app_fault_modes).filter(m => CATALOG.app_fault_modes[m].includes(service))]];
+    default:
+      return [];   // service_crash, db_pool_saturation: nothing to set
+  }
+}
 
 function renderParams() {
-  const type = $("#f-type").value;
   const host = $("#f-params");
-  host.replaceChildren(...(PARAMS[type] || []).map(([key, label, dflt, kind, step, options]) =>
-    el("label", { class: "field", text: label }, [
-      kind === "select"
-        ? el("select", { id: "p-" + key }, options.map(o => el("option", { value: o, text: o })))
-        : el("input", { id: "p-" + key, type: kind, step, value: dflt })])));
+  host.replaceChildren(...paramsFor($("#f-type").value, $("#f-service").value)
+    .map(([key, label, dflt, kind, step, options]) =>
+      el("label", { class: "field", text: label }, [
+        kind === "select"
+          ? el("select", { id: "p-" + key }, options.map(o => el("option", { value: o, text: o })))
+          : el("input", { id: "p-" + key, type: kind, step, value: dflt })])));
+}
+
+// Every service of the system stays in the list. The ones this fault cannot target
+// sit in a second group, disabled, each with the reason - so a service is never
+// missing without saying why.
+function fillServices() {
+  const select = $("#f-service");
+  const fault = faultSpec();
+  const kept = fault.services.includes(select.value) ? select.value : fault.services[0];
+  const groups = [el("optgroup", { label: "Applicable" },
+    fault.services.map(s => el("option", { value: s, text: s })))];
+  const blocked = Object.entries(fault.unavailable);
+  if (blocked.length) {
+    groups.push(el("optgroup", { label: "Not applicable to this fault" },
+      blocked.map(([s, why]) => el("option", { value: s, disabled: "", title: why,
+        text: s + " — " + why }))));
+  }
+  select.replaceChildren(...groups);
+  select.value = kept;
+}
+
+// What the whole system never has, so a missing fault type is explained too.
+function renderNote() {
+  const lines = Object.entries(siteSpec().not_applicable)
+    .map(([type, why]) => type + " is not offered on " + siteSpec().label + ": " + why);
+  $("#f-site-note").textContent = lines.join(" ");
+}
+
+function renderFault() {
+  fillServices();
+  renderParams();
+}
+
+function renderSite() {
+  fillSelect($("#f-type"), siteSpec().faults.map(f => f.type));
+  renderNote();
+  renderFault();
 }
 
 async function loadFaultTypes() {
   try {
-    const { fault_types, services } = await api("/fault-types");
-    $("#f-type").replaceChildren(...fault_types.map(t => el("option", { value: t, text: t })));
-    $("#f-service").replaceChildren(...services.map(s => el("option", { value: s, text: s })));
-    renderParams();
+    ({ catalog: CATALOG } = await api("/fault-types"));
+    $("#f-site").replaceChildren(...CATALOG.sites.map(s =>
+      el("option", { value: s.key, text: s.label })));
+    renderSite();
   } catch (e) {
     message($("#f-result"), "err", e.message);
     $("#f-go").disabled = true;
   }
 }
-$("#f-type").onchange = renderParams;
+$("#f-site").onchange = renderSite;
+$("#f-type").onchange = renderFault;
+$("#f-service").onchange = renderParams;
 
 $("#f-go").onclick = async () => {
   const btn = $("#f-go");
@@ -581,7 +672,7 @@ $("#f-go").onclick = async () => {
     service: $("#f-service").value,
     duration_s: Number($("#f-duration").value),
   };
-  for (const [key, , , kind] of PARAMS[type] || []) {
+  for (const [key, , , kind] of paramsFor(type, body.service)) {
     const raw = $("#p-" + key).value;
     if (raw === "") continue;              // let the injector apply its own default
     body[key] = kind === "number" ? Number(raw) : raw;
@@ -618,7 +709,10 @@ async function loadRecent() {
         el("th", { text: h })))),
       el("tbody", {}, rows.map(r => el("tr", {}, [
         el("td", {}, el("code", { text: r.fault_type })),
-        el("td", { text: r.ground_truth_service }),
+        el("td", {}, [
+          el("span", { text: r.ground_truth_service }),
+          el("span", { class: "pill idle", style: "margin-left:6px",
+            text: SITE_LABEL[siteOf(r.ground_truth_service)] })]),
         el("td", { text: fmtTime(r.t_inject) }),
         el("td", {}, el("span", {
           class: "pill " + (r.status === "recovered" ? "good" : r.status === "failed" ? "bad" : "warn"),
@@ -1027,8 +1121,13 @@ function drawByType(host, byType) {
 loadHealth();
 loadFaultTypes();
 showTab(location.hash.slice(1) || "recent", false);
-setInterval(loadHealth, 20000);
-setInterval(() => { if (current !== "inject") loadCurrent(); }, 15000);
+// A hidden tab polls nothing: on a loaded host these refreshes are most of the
+// dashboard's own cost, and nobody is looking at the result.
+setInterval(() => { if (!document.hidden) loadHealth(); }, 20000);
+setInterval(() => { if (!document.hidden && current !== "inject") loadCurrent(); }, 15000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { loadHealth(); if (current !== "inject") loadCurrent(); }
+});
 addEventListener("resize", () => { if (current === "rate") loadRate(); });
 </script>
 </body>

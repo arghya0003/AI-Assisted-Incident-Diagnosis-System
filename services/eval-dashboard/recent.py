@@ -61,6 +61,12 @@ COLUMNS = [
     "snapshot_at",
 ]
 
+# The three systems the detector watches, by the service-name prefix that groups
+# them (the anomaly grouper keeps one open incident per site on the same prefixes).
+# A multi-service alert belongs to every site it names, so a site filter shows it
+# under each.
+SITES = ("shop", "streaming", "cicd")
+
 # The window an anomaly is attributed to an injected fault in. It is the same
 # definition the history tab and the evaluation runner score with - from
 # t_inject to recovery (capped), plus grace - so an anomaly counts as "caused by
@@ -136,6 +142,14 @@ LEFT JOIN LATERAL (
 ) back ON TRUE
 WHERE a.source = 'kafka'
   AND (%(hours)s::int IS NULL OR a.t_detected > now() - make_interval(hours => %(hours)s::int))
+  AND (%(site)s::text IS NULL
+       OR (%(site)s = 'streaming' AND EXISTS (
+              SELECT 1 FROM unnest(a.services) sv WHERE sv LIKE 'stream-%%'))
+       OR (%(site)s = 'cicd' AND EXISTS (
+              SELECT 1 FROM unnest(a.services) sv WHERE sv LIKE 'ci-%%'))
+       OR (%(site)s = 'shop' AND EXISTS (
+              SELECT 1 FROM unnest(a.services) sv
+              WHERE sv NOT LIKE 'stream-%%' AND sv NOT LIKE 'ci-%%')))
 ORDER BY a.t_detected DESC
 LIMIT %(limit)s
 """

@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,6 +61,90 @@ KNOWN_SERVICES = [
     "stream-web", "stream-catalog", "stream-playback", "stream-cache", "stream-storage",
     "ci-web", "ci-pipeline", "ci-scheduler", "ci-runner", "ci-artifacts", "ci-deployer",
 ]
+
+# What the inject tab offers for each system. The injector is the authority and
+# rejects anything outside its rules (services/fault-injector/params.py); this
+# only keeps the form from offering what it would refuse, so the two are
+# compared in tests/test_catalog.py and cannot drift quietly.
+SITE_LABELS = {"shop": "Sock Shop", "streaming": "StreamBox", "cicd": "BuildBoard"}
+SITE_PREFIXES = {"streaming": "stream-", "cicd": "ci-"}      # Sock Shop is the rest
+
+_COMMON_FAULTS = ["service_crash", "bad_deploy_latency", "dependency_timeout", "config_error",
+                  "memory_exhaustion", "resource_exhaustion"]
+SITE_FAULTS = {
+    "shop": _COMMON_FAULTS + ["db_pool_saturation"],
+    "streaming": _COMMON_FAULTS + ["app_fault"],
+    "cicd": _COMMON_FAULTS + ["app_fault"],
+}
+NOT_APPLICABLE = {
+    "shop": {"app_fault": "Application faults are defined for StreamBox and BuildBoard only."},
+    "streaming": {"db_pool_saturation": "It locks a MySQL table, and only Sock Shop has one."},
+    "cicd": {"db_pool_saturation": "It locks a MySQL table, and only Sock Shop has one."},
+}
+# Each mode only makes sense on the services named here.
+APP_FAULT_MODES = {
+    "slow_storage": ["stream-storage"],
+    "cache_flush": ["stream-cache"],
+    "stuck_runner": ["ci-runner"],
+    "flaky_build": ["ci-runner", "ci-deployer"],
+}
+DB_POOL_SERVICES = ["catalogue"]
+# The downstream a dependency fault hits when none is named. A service with none
+# (a leaf) has nothing to freeze or break, so those two faults are not offered on it.
+DEFAULT_DEPENDENCY = {
+    "catalogue": "catalogue-db", "carts": "carts-db", "orders": "orders-db", "user": "user-db",
+    "front-end": "carts", "shipping": "rabbitmq", "payment": None,
+    "stream-web": "stream-playback", "stream-catalog": None, "stream-playback": "stream-cache",
+    "stream-cache": "stream-storage", "stream-storage": None,
+    "ci-web": "ci-pipeline", "ci-pipeline": "ci-scheduler", "ci-scheduler": "ci-runner",
+    "ci-runner": None, "ci-artifacts": "ci-deployer", "ci-deployer": None,
+}
+
+
+def site_of(service: str) -> str:
+    for site, prefix in SITE_PREFIXES.items():
+        if service.startswith(prefix):
+            return site
+    return "shop"
+
+
+def _why_not(fault: str, service: str) -> str:
+    """The reason a service in the system cannot take this fault, for the greyed-out entry."""
+    if fault == "db_pool_saturation":
+        return "no MySQL table to lock (only catalogue has one)"
+    if fault == "app_fault":
+        return "no application fault is defined for it"
+    return "nothing downstream to freeze or break"      # dependency_timeout, config_error
+
+
+def injection_catalog() -> dict:
+    """Per system: its faults and, for each, the services it can and cannot target.
+
+    Every service of the system is accounted for under every fault - either in
+    `services` or in `unavailable` with the reason - so the form can show all of
+    them and grey out the rest.
+    """
+    sites = []
+    for key, label in SITE_LABELS.items():
+        services = [s for s in KNOWN_SERVICES if site_of(s) == key]
+        faults = []
+        for fault in SITE_FAULTS[key]:
+            if fault == "db_pool_saturation":
+                targets = [s for s in DB_POOL_SERVICES if s in services]
+            elif fault == "app_fault":
+                targets = [s for s in services if any(s in v for v in APP_FAULT_MODES.values())]
+            elif fault in ("dependency_timeout", "config_error"):
+                targets = [s for s in services if DEFAULT_DEPENDENCY.get(s)]
+            else:
+                targets = services
+            faults.append({"type": fault, "services": targets,
+                           "unavailable": {s: _why_not(fault, s)
+                                           for s in services if s not in targets}})
+        sites.append({"key": key, "label": label, "services": services, "faults": faults,
+                      "not_applicable": NOT_APPLICABLE.get(key, {})})
+    return {"sites": sites, "app_fault_modes": APP_FAULT_MODES,
+            "default_dependency": DEFAULT_DEPENDENCY}
+
 
 # Fault windows are scored with the same 90s grace the evaluation runner uses,
 # so "detected" means the same thing in this dashboard as in the report.
@@ -137,18 +222,34 @@ def index():
 @app.get("/api/health")
 def health():
     """Per-backend reachability, so a blank tab is explained rather than puzzling."""
-    checks = {}
-    for name, url in (
+    targets = (
         ("fault-injector", f"{INJECTOR_URL}/healthz"),
         ("orchestrator", f"{ORCHESTRATOR_URL}/health"),
         ("diagnosis-service", f"{DIAGNOSIS_URL}/health"),
         ("load-generator", f"{LOAD_GENERATOR_URL}/stats"),
-    ):
+    )
+
+    def probe(url: str):
         try:
-            response = requests.get(url, timeout=3)
-            checks[name] = {"ok": response.ok, "status": response.status_code}
+            return requests.get(url, timeout=3), None
         except requests.RequestException as exc:
+            return None, exc
+
+    # In parallel: on a loaded host each backend can take seconds to answer, and
+    # one after another that added up to the strip staying on "checking
+    # services..." for the sum of them, not the slowest.
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        results = list(pool.map(lambda target: probe(target[1]), targets))
+
+    checks = {}
+    stats_response = None
+    for (name, _), (response, exc) in zip(targets, results):
+        if exc is not None:
             checks[name] = {"ok": False, "error": str(exc)[:120]}
+        else:
+            checks[name] = {"ok": response.ok, "status": response.status_code}
+            if name == "load-generator":
+                stats_response = response
     try:
         query("SELECT 1")
         checks["timescaledb"] = {"ok": True}
@@ -157,13 +258,15 @@ def health():
 
     # Offered load, because a fault injected into an idle testbed moves no
     # metric and nothing can detect it - the single most common way a run is
-    # wasted. Surfaced on the inject tab before anyone presses the button.
+    # wasted. Surfaced on the inject tab before anyone presses the button. Read
+    # from the same /stats answer the health check already fetched.
     rps = None
-    try:
-        stats = requests.get(f"{LOAD_GENERATOR_URL}/stats", timeout=3).json()
-        rps = stats.get("achieved_rps") or stats.get("offered_rps")
-    except (requests.RequestException, ValueError):
-        pass
+    if stats_response is not None:
+        try:
+            stats = stats_response.json()
+            rps = stats.get("achieved_rps") or stats.get("offered_rps")
+        except ValueError:
+            pass
     return jsonify({"checks": checks, "offered_rps": rps})
 
 
@@ -175,7 +278,8 @@ def fault_types():
         types = requests.get(f"{INJECTOR_URL}/fault-types", timeout=5).json()
     except (requests.RequestException, ValueError) as exc:
         return jsonify({"error": f"could not reach the fault injector: {exc}"}), 502
-    return jsonify({"fault_types": types, "services": KNOWN_SERVICES})
+    return jsonify({"fault_types": types, "services": KNOWN_SERVICES,
+                    "catalog": injection_catalog()})
 
 
 @app.post("/api/faults")
@@ -416,10 +520,11 @@ def fault_rate():
 
 # ------------------------------------------------- tab 0: recent anomalies
 
-def recent_rows(hours: int | None, limit: int | None) -> list[dict]:
+def recent_rows(hours: int | None, limit: int | None, site: str | None = None) -> list[dict]:
     rows = query(recent.RECENT_SQL, {
         "hours": hours,
         "limit": limit,
+        "site": site,
         "grace": GRACE_SECONDS,
         "max_window": MAX_WINDOW_MINUTES,
     })
@@ -436,9 +541,12 @@ def recent_anomalies():
     happened to what was", and an anomaly nobody injected matters as much to
     that as one somebody did.
     """
+    site = request.args.get("site") or None
+    if site is not None and site not in recent.SITES:
+        return jsonify({"error": f"site must be one of {', '.join(recent.SITES)}"}), 400
     try:
         rows = recent_rows(int(request.args.get("hours", 24)),
-                           min(int(request.args.get("limit", 100)), 1000))
+                           min(int(request.args.get("limit", 100)), 1000), site)
     except psycopg2.Error as exc:
         return jsonify({"error": f"database query failed: {exc}"}), 502
     return jsonify(rows)
