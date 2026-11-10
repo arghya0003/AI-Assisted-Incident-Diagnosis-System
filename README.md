@@ -3,12 +3,33 @@
 Capstone project repository. See [CONTRACTS.md](CONTRACTS.md) for the Kafka/REST schemas
 every slice produces and consumes.
 
+The system watches a microservice testbed for anomalies, ranks the likely root cause with
+cited evidence, and puts a proposed remedy in front of a human to approve. It never acts on
+the system itself: the executor is a logged stub by design.
+
 | Slice | Owner | Status |
 | --- | --- | --- |
-| Testbed & ingestion pipeline | M1 | Phases 0-6, 8 complete |
-| Anomaly detection & evaluation | M2 | Detector and harness built; 6/7 faults detected under standing traffic, median 31.0s |
+| Testbed & ingestion pipeline | M1 | Phases 0-8 complete |
+| Anomaly detection & evaluation | M2 | Complete: detector, evaluation harness, Incident Console and two held-out test sites. Sock Shop 6/7 faults detected (median 31.0s); the held-out sites 9/9 each, with false-positive rates above target. See the Member 2 section |
 | Retrieval-augmented reasoning | M3 | Phases 0-8 complete (`services/diagnosis-service/`); evaluated across four pipeline modes and verified live |
 | Orchestration, HITL UI & safety | M4 | Orchestrator + approval UI built and run end-to-end against the live stack |
+
+## How the pieces fit
+
+1. Sock Shop and the two dummy sites (StreamBox, BuildBoard) export Prometheus metrics.
+   `metrics-bridge` publishes them to Kafka `metrics.raw`, and `metrics-sink` writes them to
+   TimescaleDB. `deploy-emitter` records deploys to the `deploys` table and `deploys.events`.
+2. `anomaly-detector` (M2) reads `metrics.raw`, raises an alert when a service departs from its
+   baseline, and publishes `anomalies.detected`. Every alert is also stored in `anomalies`.
+3. `orchestrator` (M4) consumes `anomalies.detected`, opens an incident, and calls
+   `diagnosis-service` (M3) `POST /analyze`.
+4. `diagnosis-service` ranks candidate services from the anomaly, the `deploys` table, a
+   dependency graph and past incidents, and returns hypotheses that cite their evidence.
+5. A human approves or rejects in `orchestrator-ui` (:3000) or the Incident Console (:5010).
+   Approving logs intent; nothing is executed.
+6. Alongside all that, `fault-injector` (M1) records labelled faults in `fault_scenarios`,
+   `evaluation-runner` (M2) scores the detector and the ranker against them, and
+   `eval-dashboard` shows the whole loop on one page.
 
 ## Running it
 
@@ -18,6 +39,16 @@ docker compose up -d
 ```
 
 Ports are listed below. The approval console is <http://localhost:3000>.
+
+A plain `docker compose up -d` starts Sock Shop and the platform only. The two held-out
+dummy sites, StreamBox and BuildBoard, start with their profiles (see Member 2):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sites.yml --profile streaming --profile cicd up -d
+```
+
+Both `-f` files are needed for every site command, because the site services are defined only in the second.
+The base stack is 28 services; the sites add 13 (11 site services and 2 traffic generators).
 
 **On an existing TimescaleDB volume**, Postgres does not re-run `timescaledb/init/*.sql`, so a
 stack that has been up since an earlier phase is missing newer tables. The symptom is a service that
@@ -57,6 +88,123 @@ account, so a shared key is a shared daily budget, and one evaluation run exhaus
 evidence-cited answer from the deterministic scorer, and the response header
 `X-Diagnosis-Mode: deterministic_fallback` says so. You lose the written explanation, not the
 diagnosis. `.env.example` documents the rest of the settings.
+
+## Testbed layout
+
+`testbed/` is gitignored — it's an upstream clone kept for reference only (nothing builds
+from it, all images are pulled pre-built from Docker Hub) and it carries its own `.git`
+history. Re-clone it if you need to inspect Sock Shop's source:
+`git clone https://github.com/microservices-demo/microservices-demo testbed/sock-shop`
+
+```
+testbed/sock-shop/          Upstream Sock Shop clone (reference only — images are pre-built)
+docker-compose.yml          Root skeleton — full stack: Sock Shop + Prometheus + Kafka + TimescaleDB
+docker-compose.sites.yml   The two held-out dummy sites: StreamBox (profile `streaming`), BuildBoard (profile `cicd`)
+prometheus/prometheus.yml   Scrape config for Phase 2 — targets each service's built-in /metrics
+services/metrics-bridge/    Phase 3 — bridges Prometheus metrics onto the metrics.raw Kafka topic
+services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into TimescaleDB
+timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
+services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
+services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
+services/load-generator/    Standing traffic through edge-router, so injected faults are observable
+services/anomaly-detector/  Phase 9 (M2) — swappable detectors, grouping, deploy-window policy
+services/evaluation-runner/ Phase 9 (M2) — fault injection + scoring; produces the report tables
+services/dummy-service/    Phase 9-10 (M2) — one configurable service that plays every part of the two dummy sites
+services/eval-dashboard/   Incident Console on :5010 (M2) — inject, decide, read history, detection rate
+scripts/inci.ps1           PowerShell shortcuts for the stack, see Terminal shortcuts
+docs/                      Per-phase write-ups; M2's are phase9-detection.md and phase10-held-out-sites.md
+results/                    Evaluation output (gitignored — regenerate, don't commit)
+```
+
+## Ports
+
+| Port | What |
+| --- | --- |
+| 80 | `edge-router` — the testbed's entry point |
+| 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
+| 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
+| 5002 | `load-generator` — `/stats` (what load is actually being offered) |
+| 8000 | `diagnosis-service` — `POST /analyze`, `/docs` |
+| 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
+| 3000 | `orchestrator-ui` — the HITL approval console |
+| 5010 | `eval-dashboard` — the Incident Console: inject a fault, decide on an incident, read the history and the detection rate |
+| 8100 | `stream-web` — StreamBox, the streaming dummy site (profile `streaming`) |
+| 8101 | `ci-web` — BuildBoard, the CI/CD dummy site (profile `cicd`) |
+| 8081 | `kafka-ui` — debugging only (profile `debug`) |
+| 8082 | `adminer` — debugging only (profile `debug`) |
+| 9090 | `prometheus` |
+| 29092 | `kafka` — host-side listener |
+
+## Terminal shortcuts
+
+```powershell
+.\scripts\install-shortcuts.ps1     # once, from anywhere you cloned this
+```
+
+Then `InciWeb` opens the console, `SockShopWeb` the application under test, and
+`InciDemo` every demo tab in presenting order. `InciHelp` lists the rest.
+
+Two of them do more than open a page, because the same things keep going wrong:
+
+- **`InciUp`** builds before it starts. Container images do not track this
+  repository, and three separate defects here were a merged fix that was not in
+  the running image - each time the symptom looked like a different bug.
+- **`InciStatus`** reports the offered request rate (a fault with no traffic
+  moves no metric and nothing can detect it), whether the orchestrator's Kafka
+  consumer is consuming (that thread can die while the API stays healthy, so
+  incidents silently stop opening), and whether a Gemini key is present (without
+  one, every diagnosis quietly comes from the deterministic ranker).
+
+PowerShell only. The installer writes to the profile of whichever shell runs it,
+which matters because VS Code often launches PowerShell 7 while the standalone
+app is Windows PowerShell 5.1, and they read different profiles.
+
+The held-out sites have their own: `InciStream` and `InciCI` open their pages,
+`InciStreamUp` and `InciCIUp` start them, and `InciDown` stops everything, both sites
+included. `InciDemo` does not open the site pages yet.
+
+`kafka-ui` and `adminer` are debugging UIs that nothing else depends on, so they sit
+behind a Compose profile and stay off by default (~300 MiB between them). Bring them up
+with `docker compose --profile debug up -d`.
+
+## Tests, all slices
+
+Run on 2026-11-10 from a checkout of this branch, no Docker needed:
+
+| Service | Owner | Result |
+| --- | --- | --- |
+| `anomaly-detector` | M2 | 64 passed |
+| `evaluation-runner` | M2 | 149 passed |
+| `dummy-service` | M2 | 45 passed, 1 skipped on Windows (it reads `/proc`) |
+| `eval-dashboard` | M2 | 55 passed |
+| `fault-injector` | M1 | 34 passed |
+| `load-generator` | M1 | 7 passed |
+| `diagnosis-service` | M3 | 506 passed, 15 skipped, 4 expected failures |
+| `orchestrator` | M4 | 63 passed |
+
+`metrics-bridge`, `metrics-sink` and `deploy-emitter` have no unit tests; they are exercised
+against the live stack. `orchestrator-ui` is checked by `npm run lint` and `npm run build`,
+which were not re-run for this table.
+
+`.github/workflows/ci.yml` runs the eight Python suites above on every pull request, the
+console's lint and build, and a check that `docker-compose.yml` is valid.
+
+## Open across the project
+
+Each is described in its owner's "Not done yet" section. They are gathered here because
+none can be settled by one member alone.
+
+- **Which harness owns the ranking numbers.** M2's `attribute` and M3's live scorer both
+  compute MRR and top-k. The report should use one.
+- **Attribution under cascades.** When a fault cascades, the first alert often names the caller,
+  not the broken service. On the held-out sites, top-3 and MRR fall below target once those
+  cases count. Whether M2's grouper or M3's ranker should disambiguate is undecided.
+- **False positives on the held-out sites** are above target (StreamBox 4.36/h, BuildBoard
+  7.28/h), and the cause is not established (M2).
+- **The retrieval corpus is empty on a fresh volume.** It needs `--ingest` and Ollama (M3).
+- **The LLM path has not been exercised end to end** with `answered_by=llm` on the
+  verification machine (M4).
+- **Executing an approved action is out of scope by design** (M4).
 
 ---
 
@@ -125,13 +273,14 @@ partitioning/retention, silently falling back to Kafka's wrong defaults. Fixed w
 restarts, schema auto-initialized, topic config correct, real traffic flowing end-to-end.
 See `docs/phase6-orchestration.md`.
 
-### Phase 7 (Week 6-7) — Integration support ◐ partially unblocked
+### Phase 7 (Week 6-7) — Integration support ✅
 Help M2 wire onto `metrics.raw` / TimescaleDB, help M3 get deploy-log and dependency-graph
-read access. M2 now exists and consumes `metrics.raw`, `deploys.events` and the
-`fault_scenarios` / `metrics` / `deploys` tables — see the Member 2 section below. M3 still
-does not exist, so the deploy-log and dependency-graph handoff is still pending.
+read access. M2 consumes `metrics.raw`, `deploys.events` and the
+`fault_scenarios` / `metrics` / `deploys` tables — see the Member 2 section below. M3
+(`services/diagnosis-service/`) reads the `deploys` table directly and keeps its own
+dependency graph in `config/dependency_graph.yaml`, so that handoff is done.
 
-### Phase 8 (Week 7+) — Fault injection harness (pulled forward) ✅ partial
+### Phase 8 (Week 7+) — Fault injection harness (pulled forward) ✅
 Skipped ahead to the part of Phase 8 that doesn't depend on teammates: a real
 fault-injection harness (`services/fault-injector/`, port 5001) against the testbed, via
 the Docker Engine API. Three scenario types — `bad_deploy_latency` (CPU-throttle + a
@@ -139,8 +288,8 @@ companion deploy event), `service_crash` (stop/restart), `db_pool_saturation` (r
 MySQL connections against `catalogue-db`) — all verified with real, physical effects (p95
 latency hit 7.47s during a throttle test; Prometheus itself independently reported a
 crashed service as down). Ground truth recorded in `fault_scenarios`, in CONTRACTS.md's
-eval-hooks shape, ready for M2's evaluation runner whenever it exists. Integration
-testing/CI not started yet. See `docs/phase8-fault-injection.md`.
+eval-hooks shape, which M2's evaluation runner now scores against. CI runs on every pull
+request (`.github/workflows/ci.yml`, added by M4). See `docs/phase8-fault-injection.md`.
 
 **Update (issue #35):** the injector now produces all seven fault classes. It adds
 `dependency_timeout` (paused dependency), `config_error` (dependency resolved to loopback),
@@ -148,71 +297,6 @@ testing/CI not started yet. See `docs/phase8-fault-injection.md`.
 `db_pool_saturation` now holds a table lock: the held connections it used before never
 reached catalogue, which reuses two pooled connections. Each was verified on the live stack,
 and faults interrupted by an injector restart are undone at startup.
-
-## Testbed layout
-
-`testbed/` is gitignored — it's an upstream clone kept for reference only (nothing builds
-from it, all images are pulled pre-built from Docker Hub) and it carries its own `.git`
-history. Re-clone it if you need to inspect Sock Shop's source:
-`git clone https://github.com/microservices-demo/microservices-demo testbed/sock-shop`
-
-```
-testbed/sock-shop/          Upstream Sock Shop clone (reference only — images are pre-built)
-docker-compose.yml          Root skeleton — full stack: Sock Shop + Prometheus + Kafka + TimescaleDB
-prometheus/prometheus.yml   Scrape config for Phase 2 — targets each service's built-in /metrics
-services/metrics-bridge/    Phase 3 — bridges Prometheus metrics onto the metrics.raw Kafka topic
-services/metrics-sink/      Phase 4 — Kafka consumer writing metrics.raw into TimescaleDB
-timescaledb/init/           Phase 4/5/8 — hypertable, continuous aggregate, deploy log, fault_scenarios schema
-services/deploy-emitter/    Phase 5 — records deploys to Postgres + publishes deploys.events
-services/fault-injector/    Phase 8 — real fault injection against the testbed via the Docker Engine API
-services/load-generator/    Standing traffic through edge-router, so injected faults are observable
-services/anomaly-detector/  Phase 9 (M2) — swappable detectors, grouping, deploy-window policy
-services/evaluation-runner/ Phase 9 (M2) — fault injection + scoring; produces the report tables
-results/                    Evaluation output (gitignored — regenerate, don't commit)
-```
-
-## Ports
-
-| Port | What |
-| --- | --- |
-| 80 | `edge-router` — the testbed's entry point |
-| 5000 | `deploy-emitter` — `POST/GET /deploys`, `/healthz` |
-| 5001 | `fault-injector` — `POST/GET /faults`, `/fault-types` |
-| 5002 | `load-generator` — `/stats` (what load is actually being offered) |
-| 8000 | `diagnosis-service` — `POST /analyze`, `/docs` |
-| 8090 | `orchestrator` — incident REST API, `/ws` live feed, `/docs` |
-| 3000 | `orchestrator-ui` — the HITL approval console |
-| 5010 | `eval-dashboard` — inject a fault, decide on an incident, read the history and the detection rate |
-
-## Terminal shortcuts
-
-```powershell
-.\scripts\install-shortcuts.ps1     # once, from anywhere you cloned this
-```
-
-Then `InciWeb` opens the console, `SockShopWeb` the application under test, and
-`InciDemo` every demo tab in presenting order. `InciHelp` lists the rest.
-
-Two of them do more than open a page, because the same things keep going wrong:
-
-- **`InciUp`** builds before it starts. Container images do not track this
-  repository, and three separate defects here were a merged fix that was not in
-  the running image - each time the symptom looked like a different bug.
-- **`InciStatus`** reports the offered request rate (a fault with no traffic
-  moves no metric and nothing can detect it), whether the orchestrator's Kafka
-  consumer is consuming (that thread can die while the API stays healthy, so
-  incidents silently stop opening), and whether a Gemini key is present (without
-  one, every diagnosis quietly comes from the deterministic ranker).
-
-PowerShell only. The installer writes to the profile of whichever shell runs it,
-which matters because VS Code often launches PowerShell 7 while the standalone
-app is Windows PowerShell 5.1, and they read different profiles.
-| 8081 | kafka-ui · 8082 adminer — both `debug` profile only, see below |
-| 9090 | Prometheus · 29092 Kafka (host-side) |
-
-`kafka-ui` and `adminer` are debugging UIs that nothing else depends on, so they sit
-behind a Compose profile and stay off by default (~300 MiB between them). Bring them up
-with `docker compose --profile debug up -d`.
 
 ## Fixes on top of the phase work
 
@@ -270,6 +354,11 @@ Also found while verifying, and **not** fixed here — each needs its owner's ca
 Owns "something is wrong" — and "how do we know we're right". Full design notes and the
 reasoning behind each decision are in [docs/phase9-detection.md](docs/phase9-detection.md).
 
+**Status: complete.** It covers the detector, the evaluation harness, the Incident Console
+(`services/eval-dashboard`), and two held-out dummy sites (`services/dummy-service`) that the
+detector and ranker were never tuned on. The held-out results and their caveats are in
+[docs/phase10-held-out-sites.md](docs/phase10-held-out-sites.md).
+
 ### Phase 9 — Detector ✅
 `services/anomaly-detector/` rebuilt from a single-file EWMA z-score into four modules:
 
@@ -304,8 +393,14 @@ missed a `service_crash` completely. See [docs/phase9-detection.md](docs/phase9-
 ```bash
 docker compose run --rm evaluation-runner live                      # inject faults, score the live detector
 docker compose run --rm evaluation-runner live --suite smoke        # quick wiring check
+docker compose run --rm evaluation-runner live --suite streaming    # held-out site, needs its site stack up
+docker compose run --rm evaluation-runner live --suite cicd         # held-out site, needs its site stack up
+docker compose run --rm evaluation-runner attribute --since-minutes 120  # ranker metrics over the same window
 docker compose run --rm evaluation-runner replay --since-minutes 120  # ablation over recorded data
 ```
+
+A site suite refuses to start unless every service it touches reported metrics in the last two minutes.
+A site that is down would otherwise be faulted and scored as a string of misses.
 
 `live` measures the real end-to-end pipeline. `replay` re-runs every detector over an
 identical recorded stream, which is what makes the ablation a claim about detectors rather
@@ -317,11 +412,14 @@ root-cause accuracy, MRR, evidence validity — are implemented and tested but r
 "not measured" rather than a zero that would read as a measured failure.
 
 ### Tests
-101 tests, no Docker needed:
+No Docker needed. Counts are from `pytest --collect-only` on 2026-11-10:
 
 ```bash
-cd services/anomaly-detector   && python -m pytest tests -q   # 61
-cd services/evaluation-runner  && python -m pytest tests -q   # 40
+cd services/anomaly-detector   && python -m pytest -q   # 64
+cd services/evaluation-runner  && python -m pytest -q   # 149
+cd services/dummy-service       && python -m pytest -q   # 46; one is skipped on Windows (it reads /proc)
+cd services/fault-injector      && python -m pytest -q   # 34
+cd services/eval-dashboard      && python -m pytest -q   # 55
 ```
 
 `test_replay.py` runs the real detector, grouper and scoring code over a synthetic metric
@@ -404,6 +502,55 @@ same day over 16 scenarios, on the deterministic ranker rather than the LLM, and
 to 94% once cascades are included. `attribute` has not been run on the window with all six
 fault classes. Quote each figure with its own run, not as one combined result.
 
+### Held-out test sites ✅ (run 2026-11-07)
+StreamBox and BuildBoard exist to test the detector and ranker on systems they were never
+tuned on. Both run the same `dummy-service` image, configured by environment, with real
+synchronous downstream calls, so a fault cascades the way it would in a real system.
+
+- **StreamBox** (`stream-*`, port 8100): `stream-web` calls `stream-catalog` and
+  `stream-playback`; playback calls `stream-cache`, which calls `stream-storage`.
+- **BuildBoard** (`ci-*`, port 8101): `ci-web` → `ci-pipeline` → `ci-scheduler` →
+  `ci-runner` (two slots), and `ci-pipeline` → `ci-artifacts` → `ci-deployer`.
+
+Each site carries 5 req/s of its own traffic and has no edge to Sock Shop. The detector
+groups alerts per site, so one site's alert never merges into another's.
+
+Full suite, one run each, detector untouched (labelled `ewma-untuned`), nine faults at
+five-minute gaps:
+
+| Metric | Target | StreamBox | BuildBoard |
+| --- | --- | --- | --- |
+| Faults detected | — | 9 of 9 | 9 of 9 |
+| Detection latency, median (p95) | median under 60 s | 13.7 s (39.6 s) | 34.7 s (40.0 s) |
+| Top-3, alert names the injected service | above 70% | 100% | 89% |
+| Top-3, first alert in the window, any service | above 70% | 67% | 56% |
+| MRR, alert names the injected service | above 0.6 | 0.87 | 0.81 |
+| MRR, first alert in the window, any service | above 0.6 | 0.48 | 0.43 |
+| Evidence validity | 100% | 100% | 100% |
+| False-positive rate | under 1 per hour | **4.36/h** (3 in 41.3 min) | **7.28/h** (5 in 41.2 min) |
+
+The false-positive target and the unfiltered ranking targets are **not met** on either site.
+The filtered rows only count cases where the alert already names the injected service, so they
+are an upper bound. Nothing has been tuned. Any later run with changed thresholds is tuned and
+must say so. The write-up, with per-fault latencies, rankings and caveats, is in
+[docs/phase10-held-out-sites.md](docs/phase10-held-out-sites.md); the four generated reports are in
+[docs/held-out-runs/2026-11-07/](docs/held-out-runs/2026-11-07/).
+
+### Incident Console (`services/eval-dashboard`, port 5010)
+One page for the whole loop. It is a small server that proxies every call, because none of the
+backends sets CORS headers, and it keeps the database password out of the browser.
+
+| Tab | What it shows |
+| --- | --- |
+| **Recent** | One row per anomaly, newest first: its cause, the diagnosis, the fix a human approved, and whether it ended. A system filter (Sock Shop, StreamBox, BuildBoard) runs in the query. At the 100-row cap the Anomalies tile reads "100+". |
+| **Inject a fault** | System, then fault type, then service. Every service in the system stays listed; those the fault cannot target are greyed out with the reason. |
+| **Decisions** | Approve, reject or request more information on an incident awaiting a human. |
+| **History** | One row per injected fault: whether it was detected, how fast, what the ranker blamed, and what a human decided. |
+| **Detection rate** | Injected against detected, per fault class, over time. |
+
+The form's rules mirror the injector's `params.py`. `services/eval-dashboard/tests/test_catalog.py`
+reads that file and fails if the two disagree.
+
 ### Not done yet
 - ~~The false-positive rate is uncharacterised.~~ Measured at **0.95/hour** over one
   63-minute window (2026-10-05). The earlier 5.72/hour reading was also honest, and the
@@ -422,13 +569,9 @@ fault classes. Quote each figure with its own run, not as one combined result.
   established pool, so exhausting the database's capacity to accept *new* connections never
   touches it. Either the injector kills catalogue's existing connections, or the scenario
   should be dropped.
-- **Three fault classes injectable, not the six in the plan.** The four missing scenarios
-  (dependency timeout, config error, memory exhaustion, gradual resource exhaustion) now
-  exist in the suite with labelled ground truth as `--suite full`, and the runner asks the
-  injector what it supports before a run so an unimplemented class is skipped rather than
-  scored as a miss. The mechanisms themselves are written and verified to apply cleanly
-  against `services/fault-injector`, but that is M1's file and a shared container, so it
-  waits on M1 (issue #35).
+- ~~Three fault classes injectable, not the six in the plan.~~ The injector now produces all
+  seven classes (M1's update, issue #35). The runner asks it what it supports before a run,
+  so an unimplemented class is skipped rather than scored as a miss.
 - ~~MRR / top-k / evidence validity are unscored by this harness (issue #21).~~
   `evaluation-runner attribute` now asks the diagnosis service about the anomaly raised
   inside each fault window and scores the ranking against the injected service: **top-1
@@ -442,6 +585,16 @@ fault classes. Quote each figure with its own run, not as one combined result.
 - **Attribution under cascades is an open question.** With real traffic an anomaly often
   names the caller rather than the broken service (M3, PR #31). Whether M2 should order
   `services[]` by likely culpability, or M3 should disambiguate, is undecided.
+- **The held-out sites raise false positives above target.** StreamBox 4.36/h and BuildBoard
+  7.28/h against under 1/h, from one run each. A 40-minute quiet window on a fresh stack gave
+  none, so it is not yet clear whether the alerts come from fault aftermath, host load or the
+  detector. Five of BuildBoard's came within 20 s of alerts on another system.
+- **Site rankings miss outside the filtered view.** Filtered top-3 meets its target on both
+  sites. Unfiltered top-3 and MRR do not (StreamBox 67% and 0.48, BuildBoard 56% and 0.43).
+  The misses are cascades, where the symptom sits upstream of the cause.
+- **`config_error` on `stream-web` was missed on 2026-11-01 and detected on 2026-11-07.** The
+  first run had 2.5 minutes between faults and the second had 5. That is not a proven cause.
+- **`db_pool_saturation` has not been re-measured** since M1 changed it to a table lock.
 - Seasonality suppression deliberately skipped (no diurnal cycle in synthetic traffic).
 - ~~No CI.~~ M4 added `.github/workflows/ci.yml`, which runs both M2 suites on every pull
   request alongside M3's and M4's, plus a compose validation.
@@ -499,7 +652,8 @@ would have produced. They are the ground truth every later phase is tested again
 
 ### Phase 3 — Dependency graph ✅
 Sock Shop's call graph (14 nodes, 14 edges) from `config/dependency_graph.yaml`, with
-downstream/upstream traversal. No LLM.
+downstream/upstream traversal, plus the two dummy sites (11 nodes, 9 edges): 25 nodes and
+23 edges in all, with no edge between systems. No LLM.
 
 ### Phase 4 — Candidate scoring ✅
 The deterministic ranker, and the baseline the LLM is measured against. Four signals,
@@ -535,7 +689,8 @@ selectable per request, so the LLM's contribution can be measured rather than as
 
 ## Tests
 
-445 tests in Docker, 430 on the host without a database:
+A host run on 2026-11-10 reports 506 passed, 15 skipped and 4 expected failures. The Docker
+script runs the suite and the optional steps:
 
 ```bash
 bash services/diagnosis-service/scripts/test_in_docker.sh   # + --ingest --fixtures --compare --eval
@@ -656,7 +811,7 @@ The headline contribution, built as code and enforced by tests, not asserted in 
   alongside the free-text reason, stored for a future retraining pass.
 
 ### Tests
-53 tests, no Docker needed:
+63 tests, no Docker needed:
 
 ```bash
 cd services/orchestrator && python -m pytest -q
@@ -702,7 +857,9 @@ This run is also what surfaced the `incidents` table-name collision with M3
 ### Not done yet
 - Ollama was not available on the verification machine, so the LLM path itself
   (`answered_by=llm`) has only been exercised through M3's own test suite, not end to end.
-- Integration/CI workflow (GitHub Actions) not added yet — PLAN.md lists this under M4 too.
+- ~~Integration/CI workflow (GitHub Actions) not added yet.~~ `.github/workflows/ci.yml` now
+  runs the Python suites, the console's lint and build, and a compose check on every pull
+  request.
 - Executing an approved action is deliberately out of scope (PLAN.md's risk register: "the
   executor is architecturally stubbed by design ... listed as future work, not a stretch
   goal")
